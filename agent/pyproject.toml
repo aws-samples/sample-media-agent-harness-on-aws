@@ -76,7 +76,7 @@ dev = [
     "PyJWT[crypto] >= 2.15",
     # The IngestTick PDF text extractor (ingestion/pdf.py, Requirement 16) and its tests. Pinned to the
     # version the deploy bundles (agent-infra-stack.ts `ingestionRequirements`).
-    "pypdf == 6.21.1",
+    "pypdf==6.21.2",
     # The HeroFrame Lambda's video decoder (ingestion/hero_frame.py) and its round-trip test. Pinned to the
     # version the deploy bundles (agent-infra-stack.ts `heroFrameRequirements`).
     "av == 19.0.1; python_version >= '3.12'",
