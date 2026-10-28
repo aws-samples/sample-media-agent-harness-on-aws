@@ -17,6 +17,7 @@ import * as cdk from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { AgentInfraStack } from "../lib/agent-infra-stack";
 import { resolveEnvConfig, EnvName } from "../lib/env-config";
+import { PERSONAL_SAMPLES } from "../lib/personal-samples";
 
 const PROJECT = "mediaworks-harness";
 
@@ -83,6 +84,13 @@ function assertArtifactsCdnDeny(parent: Template, env: string): void {
   const prodJson = JSON.stringify(prod.parent.toJSON());
   assert.ok(prodJson.includes("ASSET_SERVICE_FN"), "prod secret must carry ASSET_SERVICE_FN");
   assertArtifactsCdnDeny(prod.parent, "prod");
+  // The demo tour's 0-demo.mp4 reaches every prod user's Personal project too.
+  const prodAsset = resourcesOf(Template.fromStack(prod.stack.ingestionStack!), "AWS::Lambda::Function")
+    .find((f: any) => f.Handler === "ingestion.handlers.asset_service.handler");
+  assert.deepEqual(JSON.parse(prodAsset.Environment.Variables.PERSONAL_SAMPLES), [...PERSONAL_SAMPLES],
+    "prod: the Asset_Service gets PERSONAL_SAMPLES");
+  assert.equal(Object.values(prod.parent.findResources("Custom::CDKBucketDeployment"))
+    .filter((r: any) => r.Properties.DestinationBucketKeyPrefix === "samples/").length, 1, "prod: samples/ is uploaded");
   console.log("prod: ingestion stack, ASSET_SERVICE_FN, deny present — ok");
 }
 
@@ -289,6 +297,36 @@ for (const env of ["staging", "sandbox"] as const) {
     assert.ok(st, "staging: hybrid-search may read Search_Renditions");
     assert.deepEqual([].concat(st.Action), ["s3:GetObject"], "staging: rendition read is GetObject only");
     assert.ok(JSON.stringify(st.Resource).includes("/projects/*/rendition.jpg"), "staging: renditions only");
+  }
+
+  // --- Personal samples (the demo tour's 0-demo.mp4): env, exact-key IAM, one upload to samples/ ---
+  // On in staging (and prod + customer); sandbox leaves it off, so its Asset_Service has no PERSONAL_SAMPLES.
+  if (env === "sandbox") {
+    const asset = resourcesOf(t, "AWS::Lambda::Function")
+      .find((f: any) => f.Handler === "ingestion.handlers.asset_service.handler");
+    assert.equal(asset.Environment.Variables.PERSONAL_SAMPLES, undefined, "sandbox: no personal samples");
+  } else {
+    const asset = resourcesOf(t, "AWS::Lambda::Function")
+      .find((f: any) => f.Handler === "ingestion.handlers.asset_service.handler");
+    const samples = JSON.parse(asset.Environment.Variables.PERSONAL_SAMPLES ?? "[]");
+    assert.deepEqual(samples, [...PERSONAL_SAMPLES], `${env}: the Asset_Service gets PERSONAL_SAMPLES`);
+    const stmts = resourcesOf(t, "AWS::IAM::Policy")
+      .filter((p: any) => JSON.stringify(p.Roles ?? []).includes("AssetServiceRole"))
+      .flatMap((p: any) => p.PolicyDocument.Statement);
+    const read = stmts.find((s: any) => s.Sid === "IngestBucketReadPersonalSamples");
+    const write = stmts.find((s: any) => s.Sid === "IngestBucketWritePersonalSampleCopies");
+    assert.ok(read && write, `${env}: the sample read + copy grants exist`);
+    assert.deepEqual([].concat(read.Action), ["s3:GetObject"]);
+    assert.deepEqual([].concat(write.Action), ["s3:PutObject"]);
+    assert.ok(JSON.stringify(read.Resource).includes("/samples/0-demo.mp4") && !JSON.stringify(read.Resource).includes("samples/*"),
+      `${env}: the read names the sample key exactly`);
+    assert.ok(JSON.stringify(write.Resource).includes("/projects/*/0-demo.mp4"),
+      `${env}: the copy may write only <project>/<asset>/0-demo.mp4`);
+    const deploys = Object.values(parent.findResources("Custom::CDKBucketDeployment")).map((r: any) => r.Properties)
+      .filter((p: any) => p.DestinationBucketKeyPrefix === "samples/");
+    assert.equal(deploys.length, 1, `${env}: one BucketDeployment uploads samples/`);
+    assert.equal(deploys[0].Prune, false, `${env}: the samples upload never deletes other samples/ objects`);
+    assert.equal(deploys[0].RetainOnDelete, true, `${env}: users' samples survive a stack delete`);
   }
 
   console.log(`${env}: all IngestionStack synth assertions passed`);

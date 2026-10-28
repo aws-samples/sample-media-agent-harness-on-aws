@@ -59,7 +59,11 @@ export type AssetServiceCommand =
   | "create_bookmarks"
   | "remove_bookmarks"
   | "import_status"
-  | "rescan_import";
+  | "rescan_import"
+  /** Copy the configured samples (the demo tour's 0-demo.mp4) into the caller's own Personal project, pinned. */
+  | "seed_personal_samples"
+  /** The read-only lineage graph (projects.lineageEdges): ancestors / descendants / the whole Project. */
+  | "lineage";
 
 export interface AssetServiceCall {
   /** The caller's Cognito access token (the Actor). Absent only under `DEV_BYPASS_AUTH`. */

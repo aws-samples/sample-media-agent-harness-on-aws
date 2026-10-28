@@ -1,9 +1,14 @@
 """Strands tool for planning and executing complex multi-step goals.
 
-Wires the full pipeline: Planning Agent → (optional) Design Agent → Plan Chainer,
-with execution_mode routing, plan validation with retry, progress event forwarding,
-and cumulative token tracking. Execution is async-only: the plan is written to the
+Wires the full pipeline: Planning Agent (one fused call that returns both the
+HighLevelPlan and the execution DAG) → Plan Chainer, with execution_mode routing,
+plan validation with a Planning-agent self-retry, progress event forwarding, and
+cumulative token tracking. Execution is async-only: the plan is written to the
 Plan State table and the Plan Chainer lambda drives the DAG reactively.
+
+Fusion is unconditional: the single Planning call is the ONLY way to obtain a DAG.
+When the fused DAG is missing or fails validation, the Planning call is re-invoked
+with the validation errors fed back for correction, bounded to a few attempts.
 """
 import asyncio
 import json
@@ -56,9 +61,10 @@ TOOL_SPEC = {
     "name": "plan_and_execute_tool",
     "description": (
         "For multi-step goals with REAL DEPENDENCIES between the steps. Calls the "
-        "Planning Agent to decompose the goal, routes by execution_mode (direct "
-        "dispatch, or Design Agent → Coordinator for standard/complex workflows), "
-        "validates the plan, and returns consolidated results with token usage.\n"
+        "Planning Agent to decompose the goal AND design the execution DAG in one "
+        "call, routes by execution_mode (direct dispatch, or DAG → Coordinator for "
+        "standard/complex workflows), validates the plan, and returns consolidated "
+        "results with token usage.\n"
         "Use this ONLY when a later step consumes an earlier step's OUTPUT, so the "
         "order cannot be left to a single sub-agent -- for example generate a video, "
         "generate a soundtrack, then mux the two together.\n"
@@ -87,7 +93,6 @@ TOOL_SPEC = {
 
 # --- Environment ---
 PLANNING_AGENT_ARN = os.environ.get("PLANNING_AGENT_RUNTIME_ARN", "")
-DESIGN_AGENT_ARN = os.environ.get("DESIGN_AGENT_RUNTIME_ARN", "")
 TASK_AGENT_ARN = os.environ.get("TASK_AGENT_RUNTIME_ARN", "")
 PLAN_STATE_TABLE = os.environ.get("PLAN_STATE_TABLE", "")
 SKILLS_S3_BUCKET = os.environ.get("SKILLS_S3_BUCKET", "")
@@ -95,14 +100,10 @@ REGION = os.environ.get("AWS_REGION", "us-west-2")
 JOB_REGISTRY_TABLE = os.environ.get("JOB_REGISTRY_TABLE", "")
 PLAN_EXECUTION_BUDGET_SECONDS = int(os.environ.get("PLAN_EXECUTION_BUDGET_SECONDS", "600"))
 
-
-def _fused_design_enabled() -> bool:
-    """Plan AND design in one Planning Agent call (default on; PLAN_FUSED_DESIGN=0 turns it off).
-
-    The DAG it returns is validated exactly like a designed one, and the Design Agent remains the
-    fallback for a missing or invalid fused DAG — so turning this off only costs latency.
-    """
-    return os.environ.get("PLAN_FUSED_DESIGN", "1").strip().lower() not in ("0", "false", "no", "off")
+# How many times the fused Planning call may be re-invoked to correct a missing or invalid DAG,
+# INCLUDING the first attempt. The first call produced the DAG already; a small ceiling bounds the
+# self-retry (each retry is a full Planning invocation on the pinned reasoning model).
+PLAN_DAG_MAX_ATTEMPTS = max(1, int(os.environ.get("PLAN_DAG_MAX_ATTEMPTS", "2")))
 
 
 # The ARN constants above are an import-time snapshot (tests patch them). The deploy no longer puts the
@@ -111,10 +112,6 @@ def _fused_design_enabled() -> bool:
 # the parameters existed on a brand-new environment).
 def _planning_agent_arn() -> str:
     return PLANNING_AGENT_ARN or runtime_arns.get("PLANNING_AGENT_RUNTIME_ARN")
-
-
-def _design_agent_arn() -> str:
-    return DESIGN_AGENT_ARN or runtime_arns.get("DESIGN_AGENT_RUNTIME_ARN")
 
 
 def _task_agent_arn() -> str:
@@ -388,6 +385,13 @@ def _invoke_runtime(arn: str, payload: dict) -> tuple[str, dict]:
         if isinstance(parsed, dict):
             evt_type = parsed.get("type", "")
             if evt_type in ("step", "execution_summary"):
+                if evt_type == "execution_summary" and parsed.get("lineage"):
+                    # projects.lineageEdges: a directly-run step's outputs join this turn's ledger.
+                    try:
+                        from media import turn_outputs as _turn_outputs
+                        _turn_outputs.merge_lineage(parsed.get("lineage"), via="task_agent")
+                    except Exception:  # noqa: BLE001
+                        pass
                 return
             if evt_type == "output_ref" and parsed.get("s3_key"):
                 # A render manifest is NOT this node's text output — it is a
@@ -515,8 +519,8 @@ def _parse_json_from_text(text: str) -> dict | None:
 def _consumes_prior_phase(goal: str, constraints: str, hlp: HighLevelPlan) -> bool:
     """True when the goal (or the plan the planner made of it) reads an earlier phase's outputs.
 
-    Guided skills hand off between phase plans with ``external_inputs`` (a node field the Design
-    Agent writes and the Plan Chainer resolves), so a goal that names it must take the plan path.
+    Guided skills hand off between phase plans with ``external_inputs`` (a node field the planner
+    writes and the Plan Chainer resolves), so a goal that names it must take the plan path.
     """
     texts = [goal or "", constraints or ""]
     texts += [sg.description or "" for sg in (hlp.sub_goals or [])]
@@ -611,7 +615,7 @@ def _new_plan_session_id() -> str:
     ``effective_session`` whenever ``current_session_id()`` is unbound (a plan
     started outside a UI chat turn — 4 of 12 plan-state rows in a production
     snapshot are keyed this way), and that value is what gets propagated as
-    AgentCore's ``runtimeSessionId`` to the planning/design agents here and to
+    AgentCore's ``runtimeSessionId`` to the planning agent here and to
     every node's Task Agent in the plan chainer. AgentCore rejects a
     ``runtimeSessionId`` shorter than 33 chars, so both propagation paths skip it
     for a too-short id — meaning the old ``plan-session-<epoch>`` form (23 chars)
@@ -631,11 +635,12 @@ def plan_and_execute(tool, **kwargs) -> dict:
     """Strands tool handler — plan and execute a complex goal.
 
     Pipeline:
-    1. Call Planning Agent → HighLevelPlan
+    1. Call Planning Agent (fused) → {HighLevelPlan, DAG}
     2. Route by execution_mode:
        - "direct" → dispatch via Task Agent, return result
-       - "standard"/"complex" → Design Agent → Plan (DAG)
-    3. Validate Plan (retry Design Agent once on failure)
+       - "standard"/"complex" → use the fused DAG
+    3. Validate the DAG; on a missing/invalid DAG, re-invoke the fused Planning
+       call with the validation errors fed back, bounded to PLAN_DAG_MAX_ATTEMPTS
     4. Execute via the Plan Chainer (async, reactive)
     5. Return consolidated result with token usage
     """
@@ -684,7 +689,7 @@ def plan_and_execute(tool, **kwargs) -> dict:
 
     # Build catalog from the orchestrator's live tool/skill/model registry.
     #
-    # CRITICAL: an empty/missing catalog here means the Design Agent gets
+    # CRITICAL: an empty/missing catalog here means the Planning Agent gets
     # "No catalog provided." in its prompt and has NO real tool names to
     # ground on. It will then invent plausible-sounding tool names from
     # context (e.g. "start_separate_audio_stems" when the real tool is
@@ -704,7 +709,7 @@ def plan_and_execute(tool, **kwargs) -> dict:
     except Exception:
         logger.exception(
             "plan_and_execute: get_catalog() raised — proceeding with an "
-            "empty catalog. The Design Agent will have NO real tool names "
+            "empty catalog. The Planning Agent will have NO real tool names "
             "to ground on and may hallucinate tool names."
         )
         catalog = {}
@@ -712,7 +717,7 @@ def plan_and_execute(tool, **kwargs) -> dict:
     if not catalog.get("tools"):
         logger.warning(
             "plan_and_execute: catalog has no tools (gateway_tools=%d, tools=%d) "
-            "— Design Agent will receive 'No catalog provided.' and has no real "
+            "— Planning Agent will receive 'No catalog provided.' and has no real "
             "tool names to ground on. Proceeding anyway per degraded-mode policy, "
             "but any node names it invents will fail at dispatch time.",
             len(catalog.get("gateway_tools", [])), len(catalog.get("tools", [])),
@@ -725,10 +730,10 @@ def plan_and_execute(tool, **kwargs) -> dict:
     _emit("running", "Planning Agent: analyzing goal...", agent="planning", phase="planning")
     planning_payload: dict = {"goal": goal, "catalog": catalog,
                               "session_id": session_id, "s3_bucket": SKILLS_S3_BUCKET, "ddb_table": PLAN_STATE_TABLE}
-    if _fused_design_enabled():
-        # One call for the plan AND its DAG (planning_agent.FUSED_MODE). A planning runtime that
-        # predates the mode ignores it and returns a bare HighLevelPlan, which parses as before.
-        planning_payload["mode"] = "plan_and_design"
+    # One call for the plan AND its DAG (planning_agent.FUSED_MODE). Fusion is unconditional: this
+    # is the only way to produce a DAG. A planning runtime that predates the mode ignores it and
+    # returns a bare HighLevelPlan, which parses as before and takes the self-retry path for a DAG.
+    planning_payload["mode"] = "plan_and_design"
     if constraints:
         planning_payload["goal"] = f"{goal}\n\nConstraints: {constraints}"
 
@@ -814,7 +819,7 @@ def plan_and_execute(tool, **kwargs) -> dict:
                 depends_on=[])]
 
     if execution_mode == "direct":
-        # Direct dispatch — skip Design Agent and Coordinator
+        # Direct dispatch — skip the DAG and Coordinator
         if high_level_plan.direct_dispatch_params is None:
             return _finalize(_error(tool_use_id, "execution_mode is 'direct' but direct_dispatch_params is missing"))
 
@@ -826,60 +831,41 @@ def plan_and_execute(tool, **kwargs) -> dict:
         result["executionMode"] = "direct"
         return _finalize(result)
 
-    # standard / complex → Design Agent → Coordinator
+    # standard / complex → fused DAG → Coordinator
     if execution_mode not in ("standard", "complex"):
         return _finalize(_error(tool_use_id, f"Unknown execution_mode: {execution_mode}"))
 
-    if not _design_agent_arn():
-        return _finalize(_error(tool_use_id, "DESIGN_AGENT_RUNTIME_ARN not configured"))
-
     # ------------------------------------------------------------------
-    # Step 3: Call Design Agent — unless the Planning Agent already returned the DAG
+    # Step 3 + 4: Build and validate the DAG from the fused Planning response.
+    #
+    # Fusion is unconditional, so the Planning call is the ONLY source of a DAG. When the fused
+    # DAG is missing, unparseable, or fails validation, the fused Planning call is RE-INVOKED with
+    # the validation errors fed back for correction (the Planning Agent appends them to its prompt,
+    # exactly as the retired Design Agent did), bounded to PLAN_DAG_MAX_ATTEMPTS. If no attempt
+    # produces a valid DAG, fail cleanly naming the validation problem.
     # ------------------------------------------------------------------
-    plan = None
-    if fused_dag is not None:
-        plan, fused_error = _plan_from_data(fused_dag)
-        if plan is None:
-            logger.warning("plan_and_execute: fused DAG unusable (%s); calling the Design Agent",
-                           fused_error)
-        else:
-            logger.info("plan_and_execute: using the fused DAG (%d nodes); Design Agent skipped",
-                        len(plan.nodes))
-            _emit("done", f"Planning Agent: DAG with {len(plan.nodes)} node(s) (designed in the same call)",
-                  agent="design", phase="design")
-    if plan is None:
-        _emit("running", "Design Agent: building execution DAG...", agent="design", phase="design")
-        plan, design_error = _call_design_agent(high_level_plan, catalog, cumulative_tokens, session_id=session_id)
-
-        if plan is None and design_error:
-            _emit("failed", f"Design Agent failed: {design_error[:80]}", agent="design", phase="design")
-            return _finalize(_error(tool_use_id, design_error))
-
-        _emit("done", f"Design Agent: DAG with {len(plan.nodes)} node(s)", agent="design", phase="design")
-
-    # ------------------------------------------------------------------
-    # Step 4: Validate Plan (with one retry)
-    # ------------------------------------------------------------------
-    _emit("running", "Validating execution plan...", agent="coordinator", phase="validation")
     available_tools = _extract_available_tools(catalog)
     logger.info("plan_and_execute: available_tools for validation (%d): %s",
                 len(available_tools), sorted(available_tools)[:30])
-    logger.info("plan_and_execute: DAG node tools: %s",
-                {n.id: n.tools for n in plan.nodes})
-    plan, validation_error = _validate_with_retry(
-        plan, high_level_plan, catalog, available_tools, cumulative_tokens, session_id=session_id
+    plan, validation_error = _plan_with_self_retry(
+        fused_dag=fused_dag,
+        planning_payload=planning_payload,
+        available_tools=available_tools,
+        cumulative_tokens=cumulative_tokens,
     )
 
     if plan is None:
-        _emit("failed", f"Plan validation failed: {(validation_error or '')[:200]}", agent="coordinator", phase="validation")
+        _emit("failed", f"Plan validation failed: {(validation_error or '')[:200]}",
+              agent="planning", phase="design")
         return _finalize(_error(tool_use_id, validation_error or "Plan validation failed after retry"))
 
+    logger.info("plan_and_execute: DAG node tools: %s", {n.id: n.tools for n in plan.nodes})
     _emit("done", "Plan validated", agent="coordinator", phase="validation")
 
     # A node that declares no skills inherits the session's active skills.
     #
     # Direct dispatch already does exactly this a few hundred lines up ("if not skills:
-    # skills = current_active_skills()"); DAG nodes did not, and the design agent emitted
+    # skills = current_active_skills()"); DAG nodes did not, and the planner emitted
     # skills=[] for all three nodes of a video+music+mux plan. The mux node therefore had
     # no media skill, did not know fal's merge-audio-video endpoint existed, and followed a
     # prompt that named an M2C tool which takes a single asset. It refused, correctly, and
@@ -930,7 +916,7 @@ def plan_and_execute(tool, **kwargs) -> dict:
             for n in plan.nodes
         ],
     }
-    _emit("plan_ready", "Execution DAG ready for review", agent="design", phase="validation",
+    _emit("plan_ready", "Execution DAG ready for review", agent="planning", phase="validation",
           plan_type="execution_dag", plan_data=dag_summary,
           gate_id="gate_execution_dag")
 
@@ -977,9 +963,9 @@ def _dispatch_plan_async(
     """
     import uuid
 
-    # The Design Agent generates a readable plan name (e.g. "plan-stemtranslate01").
+    # The planner generates a readable plan name (e.g. "plan-stemtranslate01").
     # We use a UUID as the actual system key to guarantee uniqueness across dispatches.
-    # The Design Agent's name becomes the display_name for the Activity Panel.
+    # The planner's name becomes the display_name for the Activity Panel.
     display_name = plan.plan_id
     plan_id = str(uuid.uuid4())
 
@@ -1331,55 +1317,87 @@ def _dispatch_plan_async(
     }
 
 
-def _call_design_agent(
-    high_level_plan: HighLevelPlan,
-    catalog: dict,
-    cumulative_tokens: dict,
-    session_id: str = "",
-    validation_errors: list | None = None,
-) -> tuple[Plan | None, str | None]:
-    """Call the Design Agent and parse the Plan response.
+def _fused_dag_from_text(text: str) -> dict | None:
+    """Extract the ``dag`` object from a fused ``{high_level_plan, dag}`` Planning response.
 
-    Returns (plan, None) on success or (None, error_message) on failure.
+    Returns the DAG dict, or ``None`` when the response is not a fused object or carries no DAG
+    (e.g. an older planning runtime that returned a bare HighLevelPlan).
     """
-    design_payload: dict = {
-        "high_level_plan": high_level_plan.to_dict(),
-        "catalog": catalog,
-        "session_id": session_id,
-        "s3_bucket": SKILLS_S3_BUCKET,
-        "ddb_table": PLAN_STATE_TABLE,
-    }
-    if validation_errors:
-        error_text = "\n".join(
-            f"- {e.error_type}: {e.message}" for e in validation_errors
-        )
-        design_payload["validation_errors"] = error_text
+    data = _parse_json_from_text(text)
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("high_level_plan"), dict):
+        dag = data.get("dag")
+        return dag if isinstance(dag, dict) else None
+    return None
 
-    try:
-        design_text, design_usage = _invoke_runtime(_design_agent_arn(), design_payload)
-        _accumulate_tokens(cumulative_tokens, design_usage)
-    except Exception as e:
-        logger.exception("Design Agent invocation failed")
-        return None, f"Design Agent failed: {e}"
 
-    plan_data = _parse_json_from_text(design_text)
-    logger.info("_call_design_agent: parse result type=%s, text_len=%d, first_brace=%d",
-                type(plan_data).__name__, len(design_text), design_text.find("{"))
-    if plan_data is None:
-        # Extra debug: try json.loads on the substring from first { to see what happens
-        fb = design_text.find("{")
-        if fb >= 0:
-            try:
-                json.loads(design_text[fb:])
-                logger.error("_call_design_agent: json.loads on text[%d:] SUCCEEDED but _parse_json_from_text returned None", fb)
-            except json.JSONDecodeError as je:
-                logger.error("_call_design_agent: json.loads on text[%d:] failed: %s (pos %d)", fb, je.msg, je.pos)
-        return None, f"Design Agent returned invalid JSON: {design_text[:500]}"
+def _plan_with_self_retry(
+    *,
+    fused_dag: dict | None,
+    planning_payload: dict,
+    available_tools: set[str],
+    cumulative_tokens: dict,
+) -> tuple[Plan | None, str | None]:
+    """Build a validated Plan from the fused DAG, re-invoking the fused Planning call on failure.
 
-    if "error" in plan_data:
-        return None, f"Design Agent error: {plan_data['error']}"
+    Fusion is unconditional, so the Planning Agent is the ONLY producer of a DAG — there is no
+    Design Agent fallback. Attempt 1 uses the DAG the Planning call already returned. If it is
+    missing, unparseable, or fails validation, the SAME fused Planning call is re-invoked with the
+    validation errors fed back (``payload["validation_errors"]`` — the Planning Agent appends them
+    to its prompt so the retry differs from attempt 1), up to ``PLAN_DAG_MAX_ATTEMPTS`` attempts.
 
-    return _plan_from_data(plan_data)
+    Each candidate is normalised (``normalize_async_job_nodes`` — the catalog-derivable async-trio
+    repair) before validation, exactly as a designed plan was. Returns ``(plan, None)`` on success
+    or ``(None, error_message)`` naming the validation problem when every attempt is exhausted.
+    """
+    current_dag = fused_dag
+    last_error: str | None = None
+
+    for attempt in range(1, PLAN_DAG_MAX_ATTEMPTS + 1):
+        errors_text: str
+        if current_dag is None:
+            last_error = "the Planning Agent returned no DAG"
+            errors_text = last_error
+        else:
+            plan, parse_error = _plan_from_data(current_dag)
+            if plan is None:
+                last_error = parse_error or "the DAG could not be parsed"
+                errors_text = last_error
+            else:
+                repairs = normalize_async_job_nodes(plan, available_tools)
+                if repairs:
+                    logger.info("plan_and_execute: auto-repaired async job node(s): %s", "; ".join(repairs))
+                errors = validate_plan(plan, available_tools)
+                if not errors:
+                    logger.info("plan_and_execute: fused DAG valid on attempt %d (%d nodes)",
+                                attempt, len(plan.nodes))
+                    _emit("done",
+                          f"Planning Agent: DAG with {len(plan.nodes)} node(s) validated",
+                          agent="planning", phase="design")
+                    return plan, None
+                last_error = "; ".join(e.message for e in errors)
+                errors_text = "\n".join(f"- {e.error_type}: {e.message}" for e in errors)
+
+        logger.warning("plan_and_execute: DAG attempt %d invalid: %s", attempt, last_error)
+
+        if attempt >= PLAN_DAG_MAX_ATTEMPTS:
+            break
+
+        # Re-invoke the fused Planning call, feeding the validation errors back for correction.
+        _emit("running",
+              f"Planning Agent: correcting the execution DAG (attempt {attempt + 1})...",
+              agent="planning", phase="design")
+        retry_payload = {**planning_payload, "validation_errors": errors_text}
+        try:
+            retry_text, retry_usage = _invoke_runtime(_planning_agent_arn(), retry_payload)
+            _accumulate_tokens(cumulative_tokens, retry_usage)
+        except Exception as e:  # noqa: BLE001 — surface as a clean failure, not a stack trace
+            logger.exception("Planning Agent self-retry invocation failed")
+            return None, f"Planning Agent retry failed: {e}"
+        current_dag = _fused_dag_from_text(retry_text)
+
+    return None, f"Plan validation failed after {PLAN_DAG_MAX_ATTEMPTS} attempt(s): {last_error}"
 
 
 def _plan_from_data(plan_data: dict) -> tuple[Plan | None, str | None]:
@@ -1404,63 +1422,6 @@ def _plan_from_data(plan_data: dict) -> tuple[Plan | None, str | None]:
     if notes:
         logger.info("plan_and_execute: tool-node repairs: %s", "; ".join(notes))
     return plan, None
-
-
-def _validate_with_retry(
-    plan: Plan | None,
-    high_level_plan: HighLevelPlan,
-    catalog: dict,
-    available_tools: set[str],
-    cumulative_tokens: dict,
-    session_id: str = "",
-) -> tuple[Plan | None, str | None]:
-    """Validate a Plan. If invalid, retry Design Agent once with errors.
-
-    Returns (validated_plan, None) on success or (None, error_message) on failure.
-    """
-    if plan is None:
-        return None, "No plan to validate"
-
-    # Auto-repair async-submit nodes (grant the sibling status/result verbs from the same
-    # gateway, coerce output_type) BEFORE validating. The Design Agent reliably omits the
-    # job trio on a submit_job node — a purely structural, catalog-derivable defect the
-    # retry loop kept reproducing (sessions f0598806, 59c46b2c). Normalizing here fixes it
-    # deterministically so the plan validates and executes as a DAG instead of failing over
-    # to un-tracked dispatch. validate_plan stays pure; the repair lives in this
-    # orchestration step where the plan is about to be persisted and executed.
-    repairs = normalize_async_job_nodes(plan, available_tools)
-    if repairs:
-        logger.info("plan_and_execute: auto-repaired async job node(s): %s", "; ".join(repairs))
-
-    errors = validate_plan(plan, available_tools)
-    if not errors:
-        return plan, None
-
-    # First validation failed — retry Design Agent with error context
-    logger.warning(
-        "Plan validation failed with %d errors, retrying Design Agent: %s",
-        len(errors),
-        [e.message for e in errors],
-    )
-
-    retry_plan, retry_error = _call_design_agent(
-        high_level_plan, catalog, cumulative_tokens, session_id=session_id, validation_errors=errors
-    )
-
-    if retry_plan is None:
-        return None, retry_error or "Design Agent retry failed"
-
-    # Normalize the retry plan too, then validate.
-    retry_repairs = normalize_async_job_nodes(retry_plan, available_tools)
-    if retry_repairs:
-        logger.info("plan_and_execute: auto-repaired async job node(s) on retry: %s", "; ".join(retry_repairs))
-    retry_errors = validate_plan(retry_plan, available_tools)
-    if not retry_errors:
-        return retry_plan, None
-
-    # Second validation also failed
-    error_details = "; ".join(e.message for e in retry_errors)
-    return None, f"Plan validation failed after retry: {error_details}"
 
 
 def _without_web_search(catalog: dict) -> dict:

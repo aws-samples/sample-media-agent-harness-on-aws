@@ -50,6 +50,10 @@
 //   POST /projects/:pid/assets/import-status → Asset_Service `import_status` → {bucket, prefix, counts, attention,
 //        statusCounts, indexing}: where to copy files for the import inbox and what it did with them
 //   POST /projects/:pid/assets/rescan-import → Asset_Service `rescan_import` (sweep the inbox now, every object)
+//   POST /projects/:pid/assets/lineage {assetId?, direction?: ancestors|descendants|both|project, depth?, maxNodes?,
+//        sessionId?} → Asset_Service `lineage` (read-only; projects.lineageEdges) → {nodes, edges, gaps, stats,
+//        truncated, focus?}. Under `/projects`, so it is covered by `authPaths`, `PROTECTED_PREFIXES` and the
+//        CloudFront `/projects/*` behavior already: no new path registration.
 //   POST /projects/:pid/assets/:assetId/chat-copy {sessionId}
 //        → the chat ATTACHMENT REFERENCE for that asset (asset-lineage Phase 2; the path is unchanged):
 //          {assetId, projectId, displayName, kind, sizeBytes, url, expiresAt, sourceUri, bucket, key}
@@ -142,8 +146,15 @@ export type SessionOwnerLookup = (
   sessionId: string,
 ) => Promise<{ exists: boolean; actorId?: string; title?: string; createdAt?: unknown } | null>;
 
+/** A chat's owner, title and its turn ids in order (the lineage view's "Made in chat <title> · turn N"). */
+export type SessionTurnsLookup = (
+  sessionId: string,
+) => Promise<{ actorId?: string; title?: string; turnIds: string[] } | null>;
+
 export interface IngestionWriteDeps {
   checkAccess?: (actorSub: string, projectId: string) => Promise<AccessResult>;
+  /** Reader of a chat's owner, title and turn order (lineage chat provenance); defaults to the sessions table. */
+  sessionTurns?: SessionTurnsLookup;
   /** Reader of ASSET rows (the chat attachment reference); defaults to the env store. */
   store?: Pick<TransactStore, "batchGet"> | null;
   s3?: UploadS3;
@@ -172,6 +183,44 @@ export interface IngestionWriteContext {
 
 let cachedS3: UploadS3 | undefined;
 let cachedSessionOwner: SessionOwnerLookup | undefined;
+let cachedSessionTurns: SessionTurnsLookup | undefined;
+
+/** The turn ids of a transcript, in order, once each (`turnId`, else the `<turnId>-u|-a|-x` message id). */
+export function turnIdsOf(transcript: unknown): string[] {
+  const out: string[] = [];
+  for (const m of Array.isArray(transcript) ? transcript : []) {
+    const rec = (m ?? {}) as { turnId?: unknown; id?: unknown };
+    const id = typeof rec.turnId === "string" ? rec.turnId
+      : typeof rec.id === "string" ? rec.id.replace(/-(u|a|x)$/, "") : "";
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+function defaultSessionTurns(env: NodeJS.ProcessEnv): SessionTurnsLookup {
+  if (!cachedSessionTurns) {
+    const table = env.SESSIONS_TABLE ?? "";
+    const ddb = table ? DynamoDBDocumentClient.from(new DynamoDBClient({ region: env.AWS_REGION ?? "us-west-2" })) : null;
+    cachedSessionTurns = async (sessionId) => {
+      if (!ddb || !table) return null;
+      try {
+        const got = await ddb.send(new GetCommand({
+          TableName: table, Key: { sessionId },
+          ProjectionExpression: "actorId, #t, transcript", ExpressionAttributeNames: { "#t": "title" },
+        }));
+        if (!got.Item) return null;
+        return {
+          ...(typeof got.Item.actorId === "string" ? { actorId: got.Item.actorId } : {}),
+          ...(typeof got.Item.title === "string" ? { title: got.Item.title } : {}),
+          turnIds: turnIdsOf(got.Item.transcript),
+        };
+      } catch {
+        return null;
+      }
+    };
+  }
+  return cachedSessionTurns;
+}
 
 /** The default S3 operations over one `S3Client` (the proxy task role), built on first use. */
 export function s3UploadOps(client: S3Client): UploadS3 {
@@ -296,6 +345,7 @@ interface Resolved {
   allowlist: string[];
   m2cBucket: string;
   sessionOwner: SessionOwnerLookup;
+  sessionTurns: SessionTurnsLookup;
   env: NodeJS.ProcessEnv;
   now: () => number;
   newUuid: () => string;
@@ -312,6 +362,7 @@ function resolve(deps: IngestionWriteDeps): Resolved {
     allowlist: deps.sourceBucketAllowlist ?? defaultAllowlist(env),
     m2cBucket: deps.m2cBucket ?? defaultM2cBucket(env),
     sessionOwner: deps.sessionOwner ?? defaultSessionOwner(env),
+    sessionTurns: deps.sessionTurns ?? defaultSessionTurns(env),
     env,
     now: deps.now ?? (() => Date.now()),
     newUuid: deps.newUuid ?? (() => randomUUID()),
@@ -400,7 +451,7 @@ type Route =
   | { name: "organize"; command: OrganizeCommand };
 
 type OrganizeCommand = "move_assets" | "rename_folder" | "create_folder" | "resolve_locations" | "create_bookmarks" | "remove_bookmarks"
-  | "import_status" | "rescan_import";
+  | "import_status" | "rescan_import" | "lineage";
 
 // `POST /projects/:pid/assets/<verb>` → the Asset_Service organize command it forwards to. An asset id is
 // `<kind>:<uuid>`, so none of these verbs can collide with `assets/:assetId`.
@@ -413,6 +464,9 @@ const ORGANIZE_VERBS: Record<string, OrganizeCommand> = {
   "remove-bookmarks": "remove_bookmarks",
   "import-status": "import_status",
   "rescan-import": "rescan_import",
+  // Read-only, but a POST like its siblings (a body carries the query). Off-flag the Asset_Service answers
+  // 404 lineage_not_enabled.
+  lineage: "lineage",
 };
 
 function matchRoute(parts: string[], method: string): Route | null {
@@ -814,6 +868,7 @@ const ORGANIZE_FIELDS: Record<OrganizeCommand, readonly string[]> = {
   remove_bookmarks: ["bookmarkIds"],
   import_status: [],
   rescan_import: [],
+  lineage: ["assetId", "direction", "depth", "maxNodes", "sessionId"],
 };
 
 async function handleOrganize(
@@ -830,7 +885,39 @@ async function handleOrganize(
     sendServiceError(res, reply);
     return;
   }
+  if (command === "lineage") {
+    sendJson(res, 200, await withChats(reply.value as Record<string, unknown>, ctx.actor, d.sessionTurns));
+    return;
+  }
   sendJson(res, 200, reply.value);
+}
+
+const MAX_LINEAGE_CHATS = 25;
+
+/**
+ * Chat provenance for the lineage view: `chats[sessionId] = {title, turns: {turnId: N}}` for the chats THIS actor
+ * owns (a link back to the turn that made a file); another member's chat is `{mine: false}` — its title and turns
+ * are theirs. Best effort: an unreadable session is simply absent.
+ */
+export async function withChats(
+  graph: Record<string, unknown>, actor: string, lookup: SessionTurnsLookup,
+): Promise<Record<string, unknown>> {
+  const ids = new Set<string>();
+  for (const list of [graph.nodes, graph.edges]) {
+    for (const x of Array.isArray(list) ? list : []) {
+      const sid = (x as { sessionId?: unknown })?.sessionId;
+      if (typeof sid === "string" && sid) ids.add(sid);
+    }
+  }
+  const chats: Record<string, { mine: boolean; title?: string; turns?: Record<string, number> }> = {};
+  await Promise.all([...ids].slice(0, MAX_LINEAGE_CHATS).map(async (sid) => {
+    const s = await lookup(sid).catch(() => null);
+    if (!s) return;
+    if (s.actorId !== actor) { chats[sid] = { mine: false }; return; }
+    chats[sid] = { mine: true, ...(s.title ? { title: s.title } : {}),
+      turns: Object.fromEntries(s.turnIds.map((t, i) => [t, i + 1])) };
+  }));
+  return { ...graph, chats };
 }
 
 /**

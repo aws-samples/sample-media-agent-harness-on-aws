@@ -42,6 +42,7 @@ from projects.access import AccessCheckIncomplete, check_access
 from projects.ids import is_project_id
 
 from .. import catalog, rebuild, rendition
+from ..personal_samples import samples_from_env, seed_personal_samples
 from ..folders import FOLDER_METADATA_KEY, date_from, folder_or_error, session_folder
 from ..limits import (
     MAX_FILES_PER_BATCH,
@@ -50,6 +51,7 @@ from ..limits import (
     admit,
     kind_for,
     limits_from_env,
+    entity_metadata_enabled,
 )
 from ..names import sanitize
 from ..registrar import LocationError, S3LocationRegistrar, allowlist_from_env
@@ -98,6 +100,7 @@ _COMMANDS = (
     "remove_bookmarks",
     "import_status",
     "rescan_import",
+    "seed_personal_samples",
 )
 _RESOLVE_PAGE_MAX = 100
 # One move/resolve call names at most this many assets or locations; a folder rename rewrites at most
@@ -167,9 +170,13 @@ class AssetService:
         catalog_tools: Optional[Callable[[], Any]] = None,
         request_rebuild: Optional[Callable[[str, str], Any]] = None,
         retry_rebuild: Optional[Callable[[str], Any]] = None,
+        entity_metadata: Optional[bool] = None,
+        personal_samples: Optional[list] = None,
     ):
+        self._personal_samples = personal_samples
         self._limits = limits or limits_from_env()
         self._catalog = catalog_tools
+        self._entity_metadata = entity_metadata_enabled() if entity_metadata is None else entity_metadata
         self._request_rebuild = request_rebuild
         self._retry_rebuild = retry_rebuild
         self._store = store
@@ -232,6 +239,10 @@ class AssetService:
                 return _ok(self._import_status(pid))
             if command == "rescan_import":
                 return _ok(self._rescan_import(pid))
+            if command == "seed_personal_samples":
+                return _ok(self._seed_personal_samples(pid, actor, role))
+            if command == "lineage":
+                return _ok(self._lineage(pid, actor, args))
             if command in _ALL_FUTURE_COMMANDS:
                 raise ServiceError(400, "unknown_command", f"{command} is not available yet")
             raise ServiceError(400, "unknown_command", f"Unknown command: {command!r}")
@@ -573,7 +584,7 @@ class AssetService:
             listed = self._catalog()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog refuses, it never passes
             raise ServiceError(503, "catalog_unreadable", catalog.UNREADABLE) from exc
-        missing = catalog.missing_tools(kinds, listed)
+        missing = catalog.missing_tools(kinds, listed, entity_metadata=self._entity_metadata)
         if missing:
             raise ServiceError(503, "catalog_missing", catalog.refusal(missing))
 
@@ -808,6 +819,47 @@ class AssetService:
             (removed if self._store.remove_bookmark(pid, bid) else missing).append(bid)
         return {"removed": removed, "missing": missing}
 
+    # ------------------------------------------------------------------ lineage (projects.lineageEdges)
+    def _lineage(self, pid: str, actor: str, args: dict) -> dict:
+        """The Project's lineage graph: one asset's ancestors / descendants (``assetId`` + ``direction``), or the
+        whole Project (``direction: project``). ``depth`` (1-50, default 10) and ``maxNodes`` (1-2000, default 500)
+        bound it (``truncated`` says when they cut). Each node is checked like an asset read: another member's
+        "this chat only" file is never a node (its edges are contracted), and the focus itself is a uniform 404
+        when it is not this actor's to see. ``sessionId`` reveals the caller's own hidden files of THAT chat."""
+        from projects import lineage_contract as lc
+
+        from ..lineage import DEFAULT_DEPTH, DEFAULT_NODES, DIRECTIONS, MAX_DEPTH, MAX_NODES, LineageReader
+
+        if not lc.edges_enabled():
+            raise ServiceError(404, "lineage_not_enabled", "Lineage is not enabled in this environment")
+        direction = args.get("direction", "both" if args.get("assetId") else "project")
+        if direction not in DIRECTIONS:
+            raise ServiceError(400, "invalid_args", f"direction must be one of {', '.join(DIRECTIONS)}")
+        asset_id = args.get("assetId")
+        if direction != "project":
+            if not schema.is_asset_id(asset_id):
+                raise ServiceError(400, "invalid_args", "assetId must be an asset id (or use direction: project)")
+        else:
+            asset_id = None
+
+        def bounded(name: str, default: int, hi: int) -> int:
+            v = args.get(name, default)
+            if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= hi:
+                raise ServiceError(400, "invalid_args", f"{name} must be an integer 1-{hi}")
+            return v
+
+        depth = bounded("depth", DEFAULT_DEPTH, MAX_DEPTH)
+        max_nodes = bounded("maxNodes", DEFAULT_NODES, MAX_NODES)
+        session_id = args.get("sessionId")
+        if session_id is not None and (not isinstance(session_id, str) or not CHAT_SESSION_ID_RE.fullmatch(session_id)):
+            raise ServiceError(400, "invalid_args", "sessionId must be 1-128 of [A-Za-z0-9._-]")
+        try:
+            return LineageReader(self._store.table, self._store).lineage(
+                pid, actor, asset_id=asset_id, direction=direction, depth=depth, max_nodes=max_nodes,
+                session_id=session_id)
+        except LookupError as exc:
+            raise ServiceError(404, *_ASSET_NOT_FOUND) from exc
+
     # ------------------------------------------------------------------ import inbox
     def _import_status(self, pid: str) -> dict:
         """Where to copy files (``bucket``, ``prefix``), what the inbox did with them, and the project's progress."""
@@ -909,6 +961,19 @@ class AssetService:
             raise ServiceError(409, "already_registered", str(exc)) from exc
         except ProjectNotActive as exc:
             raise ServiceError(404, *_PROJECT_NOT_FOUND) from exc
+
+    # ------------------------------------------------------------------ seed_personal_samples
+    def _seed_personal_samples(self, pid: str, actor: str, role: Optional[str]) -> dict:
+        """Copy the configured samples (``PERSONAL_SAMPLES``) into the caller's OWN Personal project, pinned.
+
+        Owner-only and Personal-only (see ``ingestion.personal_samples``): a member, or any other project, is a
+        no-op. No samples configured is a no-op too, so the proxy may call this in every env.
+        """
+        samples = self._personal_samples if self._personal_samples is not None else samples_from_env()
+        if role != "owner" or not samples:
+            return {"seeded": [], "skipped": []}
+        return seed_personal_samples(store=self._store, s3=self._s3, bucket=self._ingest_bucket, pid=pid,
+                                     actor=actor, samples=samples, register=self._register)
 
     def _actor_display(self, actor: str) -> str:
         # P0: the MEMBER.display lookup (Req 3 "addedByDisplay") lands with the Projects_Surface wave;

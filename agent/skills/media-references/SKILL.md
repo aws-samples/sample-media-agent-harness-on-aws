@@ -24,9 +24,12 @@ sit at the bottom where a focused node never reaches them.
    result body, after dependent steps already dispatched. That is how a soundtrack was lost:
    `num_inference_steps: 50` on a model capped at 8, discovered only after the mux node ran.
    If you must set a tuning param, `get_model_schema` first. Otherwise let the model default it.
-   But ALWAYS send the model's REQUIRED fields: for `minimax/h3-max/*` that is
+   But ALWAYS send the fields THAT model requires. Requirements differ even within one family:
+   `minimax/h3-max/image-to-video` (and its `text-to-video` / `reference-to-video` siblings) REQUIRE
    `prompt_expansion_mode: "disabled"` (valid: `disabled`|`fast`|`balanced`|`quality` — never
-   `off`/`auto`; a missing or invalid value fails the clip).
+   `off`/`auto`), while `minimax/h3-max/recast` does NOT accept it at all. A submit that breaks the
+   model's own schema is refused before anything is sent, and the refusal lists the fields that model
+   accepts: fix the input from that list, and keep the same submit tool.
 
 2. **The default video model (MiniMax H3 Max) has NO native audio — plan music + mux separately.**
    `minimax/h3-max/*` outputs video only (no audio track, no `generate_audio` flag), so a "video with

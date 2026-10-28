@@ -1,0 +1,52 @@
+{
+  "sources": {"speech_diarization": "s3://m/diar", "face_recognition": "s3://m/face"},
+  "persons": [
+    {
+      "person_id": 3,
+      "type": "on_camera_speaker",
+      "name": "Miriam Okafor",
+      "role": "anchor",
+      "aliases": [],
+      "speaker_ids": ["SPEAKER_02"],
+      "face_ids": [5],
+      "speech_sec": 412.5,
+      "screen_sec": 388.2,
+      "appearances": [{"begin_ms": 12400, "end_ms": 31800}],
+      "appearances_basis": "face",
+      "name_mechanisms": ["celebrity", "transcript_cue"],
+      "evidence": [{"kind": "self_id", "name": "Miriam Okafor"}]
+    },
+    {
+      "person_id": 7,
+      "type": "on_camera_speaker",
+      "name": "Tomas Vega",
+      "character_name": "Det. Rios",
+      "aliases": [],
+      "speaker_ids": ["SPEAKER_05"],
+      "face_ids": [9],
+      "speech_sec": 96.4,
+      "screen_sec": 121.7,
+      "appearances": [{"begin_ms": 84200, "end_ms": 99500}],
+      "appearances_basis": "face",
+      "name_mechanisms": ["collection"],
+      "evidence": [{"mechanism": "credits_cast", "actor": "Tomas Vega", "character": "Det. Rios"}]
+    },
+    {
+      "person_id": 11,
+      "type": "uncertain",
+      "name": null,
+      "aliases": ["Tom"],
+      "speaker_ids": ["SPEAKER_07"],
+      "face_ids": [],
+      "speech_sec": 14.1,
+      "screen_sec": 0.0,
+      "appearances": [],
+      "appearances_basis": "speech",
+      "name_mechanisms": [],
+      "evidence": []
+    }
+  ],
+  "bindings": [],
+  "unresolved": {"speakers": ["SPEAKER_11"], "faces": [14]},
+  "provenance": {"tool_version": "alpha"}
+}

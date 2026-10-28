@@ -280,6 +280,15 @@ describe('PlusMenu: Recent in <Active_Project>', () => {
     expect(pickRecentAssets(rows).map((a) => a.assetId)).toEqual(['video:1', 'video:2', 'video:3']);
   });
 
+  it('pickRecentAssets keeps a pinned sample (0-demo.mp4) first, ahead of newer files', () => {
+    const rows = [
+      { ...asset(1), registeredAt: '2026-10-28T09:00:00.000Z' },
+      { ...asset(2), registeredAt: '2026-10-28T08:00:00.000Z' },
+      { ...asset(3), registeredAt: '2026-01-01T00:00:00.000Z', pinned: true },
+    ];
+    expect(pickRecentAssets(rows).map((a) => a.assetId)).toEqual(['video:3', 'video:1', 'video:2']);
+  });
+
   it('never offers a "this chat only" file: a hidden session asset belongs to its own chat (D2)', () => {
     const rows = [
       { ...asset(1), visibility: 'session' as const, sessionId: 'S9' },

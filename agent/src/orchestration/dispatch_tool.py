@@ -483,6 +483,15 @@ def _consume_stream(iter_source, budget_seconds: int = _DISPATCH_BUDGET_SECONDS,
                 # Internal accounting; don't surface to the user — the
                 # orchestrator emits its own summary at the end.
                 saw_completion = True
+                # Lineage (projects.lineageEdges): the sub-agent's outputs join THIS turn's ledger with their
+                # inputs, so the turn's Generated_Media message registers them with lineage. The merge takes
+                # only our own output locations (text shaped like a frame cannot smuggle in a foreign edge).
+                if parsed.get("lineage"):
+                    try:
+                        from media import turn_outputs as _turn_outputs
+                        _turn_outputs.merge_lineage(parsed.get("lineage"), via="task_agent")
+                    except Exception:  # noqa: BLE001 - lineage never breaks a dispatch
+                        logger.debug("dispatch_tool: sub-agent lineage not merged", exc_info=True)
                 continue
             if ev_type == "error":
                 had_error = True

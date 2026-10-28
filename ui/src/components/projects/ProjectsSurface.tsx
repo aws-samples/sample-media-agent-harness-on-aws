@@ -26,9 +26,12 @@ import ProjectHeader, { type ProjectPanelKey } from './ProjectHeader';
 import ProjectAssetsSection, { TOP_LEVEL, projectSectionHeadingStyle } from './ProjectAssetsSection';
 import MembersTab from './MembersTab';
 import { getProjectTab } from './tabSlots';
-import { createProject, peekGraphEnabled, type NewProjectSettings, type ProjectSummary } from '../../projects/api';
+import { createProject, peekGraphEnabled, peekLineageEnabled, type NewProjectSettings, type ProjectSummary } from '../../projects/api';
 import SegmentedControl, { panelDomId, tabDomId } from '../ui/SegmentedControl';
+import Badge from '../ui/Badge';
 import GraphTab from './graph/GraphTab';
+// The tab shell only: the canvas and its layout are a lazy chunk (LineageTab imports LineageCanvas with lazy()).
+import LineageTab from './lineage/LineageTab';
 import { useProjectsList } from '../../projects/useProjectsList';
 import {
   getSessionProject,
@@ -57,6 +60,8 @@ export interface ProjectsSurfaceProps {
   graphFocus?: { projectId: string; nodeIds: string[]; nonce: number } | null;
   /** Open the Assets grid of `projectId` at `folder` (`""` = the top level): a file's location was clicked. */
   folderFocus?: { projectId: string; folder: string; nonce: number } | null;
+  /** Open a chat at a turn (the Lineage view's "Made in chat … · turn N"). */
+  onOpenChat?: (sessionId: string, turnId?: string) => void;
 }
 
 function pickSelection(
@@ -72,8 +77,30 @@ function pickSelection(
 
 const PANEL_ORDER: ProjectPanelKey[] = ['upload', 's3-location'];
 
-type ProjectView = 'assets' | 'graph';
-const VIEW_OPTIONS = [{ value: 'assets' as const, label: 'Assets' }, { value: 'graph' as const, label: 'Graph' }];
+type ProjectView = 'assets' | 'lineage' | 'graph';
+/** Assets | Lineage (where `/config.lineageEnabled`) | Graph (where `/config.graphEnabled`). */
+export function viewOptions(
+  lineage: boolean,
+  graph: boolean,
+): { value: ProjectView; label: React.ReactNode; ariaLabel?: string }[] {
+  return [
+    { value: 'assets', label: 'Assets' },
+    // Lineage is still a preview feature — a small BETA pill marks it. `ariaLabel` carries the same
+    // status to screen readers (the visible pill alone would be silent to them).
+    ...(lineage
+      ? [{
+          value: 'lineage' as const,
+          ariaLabel: 'Lineage (beta)',
+          label: (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              Lineage<Badge variant="info" caps>Beta</Badge>
+            </span>
+          ),
+        }]
+      : []),
+    ...(graph ? [{ value: 'graph' as const, label: 'Graph' }] : []),
+  ];
+}
 
 export default function ProjectsSurface({
   activeSessionId,
@@ -83,6 +110,7 @@ export default function ProjectsSurface({
   onSelectedChange,
   graphFocus,
   folderFocus,
+  onOpenChat,
 }: ProjectsSurfaceProps) {
   const { projects, refresh } = useProjectsList();
   const [selectedId, setSelectedId] = useState<string | null>(hostSelectedId ?? null);
@@ -94,6 +122,14 @@ export default function ProjectsSurface({
   // Assets | Graph. The Graph tab exists only where the graph stack is deployed (`/config.graphEnabled`).
   const [view, setView] = useState<ProjectView>('assets');
   const [showGraphTab] = useState(peekGraphEnabled);
+  // The Lineage tab exists only where lineage edges are on (`/config.lineageEnabled`).
+  const [showLineageTab] = useState(peekLineageEnabled);
+  const showViewTabs = showGraphTab || showLineageTab;
+  const VIEW_OPTIONS = viewOptions(showLineageTab, showGraphTab);
+  // An asset's ⋯ → Lineage: the Lineage view focused on it (remounted on the nonce).
+  const [lineageFocus, setLineageFocus] = useState<{ projectId: string; assetId: string; nonce: number } | null>(null);
+  // "Show in Assets" from the Lineage view: the Assets grid at that asset's folder (remounted on the nonce).
+  const [lineageFolder, setLineageFolder] = useState<{ projectId: string; folder: string; nonce: number } | null>(null);
   const viewIds = useId();
   // Bumped after a settings change so the asset list re-reads (indexing on → stored files become queued).
   const [assetsEpoch, setAssetsEpoch] = useState(0);
@@ -160,7 +196,11 @@ export default function ProjectsSurface({
   }, [graphFocus, selectedId, showGraphTab]);
   const focusIds = graphFocus && graphFocus.projectId === selectedId ? graphFocus.nodeIds : undefined;
   // A folder focus request opens the Assets grid at that folder (the grid remounts on the nonce, seeded with it).
-  const folderSeed = folderFocus && folderFocus.projectId === selectedId ? folderFocus : null;
+  const hostFolderSeed = folderFocus && folderFocus.projectId === selectedId ? folderFocus : null;
+  const lineageFolderSeed = lineageFolder && lineageFolder.projectId === selectedId ? lineageFolder : null;
+  const folderSeed = lineageFolderSeed && (!hostFolderSeed || lineageFolderSeed.nonce > hostFolderSeed.nonce)
+    ? lineageFolderSeed : hostFolderSeed;
+  const lineageSeed = lineageFocus && lineageFocus.projectId === selectedId ? lineageFocus : null;
   useEffect(() => {
     if (folderSeed) { setSettingsOpen(false); setView('assets'); }
   }, [folderSeed]);
@@ -250,13 +290,29 @@ export default function ProjectsSurface({
             settingsOpen={settingsOpen}
             onToggleSettings={() => setSettingsOpen((v) => !v)}
           />
-          {showGraphTab && !settingsOpen && (
+          {showViewTabs && !settingsOpen && (
             <SegmentedControl
               options={VIEW_OPTIONS} value={view} onChange={setView} label="Project view" variant="underline"
               idPrefix={viewIds} style={viewTabsStyle}
             />
           )}
-          {showGraphTab && !settingsOpen && view === 'graph' ? (
+          {showLineageTab && !settingsOpen && view === 'lineage' ? (
+            <div style={graphBodyStyle} role="tabpanel" id={panelDomId(viewIds, 'lineage')}
+              aria-labelledby={tabDomId(viewIds, 'lineage')} data-testid="project-lineage-view">
+              <LineageTab
+                key={`${selected.projectId}:${lineageSeed?.nonce ?? 0}`}
+                project={{ id: selected.projectId, name: selected.name }}
+                initialFocus={lineageSeed?.assetId ?? null}
+                sessionId={activeSessionId ?? null}
+                onOpenChat={onOpenChat}
+                onNotFound={handleSelectedNotFound}
+                onShowFolder={(folder) => {
+                  setLineageFolder({ projectId: selected.projectId, folder, nonce: Date.now() });
+                  setView('assets');
+                }}
+              />
+            </div>
+          ) : showGraphTab && !settingsOpen && view === 'graph' ? (
             <div style={graphBodyStyle} role="tabpanel" id={panelDomId(viewIds, 'graph')}
               aria-labelledby={tabDomId(viewIds, 'graph')} data-testid="project-graph-view">
               <GraphTab
@@ -310,6 +366,11 @@ export default function ProjectsSurface({
                 onNotFound={handleSelectedNotFound}
                 sessionId={activeSessionId ?? null}
                 indexing={indexingById[selected.projectId]}
+                onShowLineage={showLineageTab ? (assetId) => {
+                  setLineageFocus({ projectId: selected.projectId, assetId, nonce: Date.now() });
+                  setSettingsOpen(false);
+                  setView('lineage');
+                } : undefined}
               />
             )}
             {SHOW_PROJECT_MEMBERS && (

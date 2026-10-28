@@ -44,7 +44,7 @@ Using a coding agent? [`AGENTS.md`](AGENTS.md) (read by Claude Code through [`CL
 
 | Directory | Description |
 |-----------|-------------|
-| [`agent/`](agent/) | Strands agents (main orchestrator, task, planning, design, render), the Lab service, tools and built-in [skills](agent/skills/) — Python |
+| [`agent/`](agent/) | Strands agents (main orchestrator, task, planning, render), the Lab service, tools and built-in [skills](agent/skills/) — Python |
 | [`ui/`](ui/) | React workspace (`src/`) and the authenticating proxy (`server/`) — TypeScript |
 | [`infra/`](infra/) | AWS CDK app: AgentCore runtimes and gateway, the proxy, data stores, ingestion and search |
 
@@ -63,7 +63,7 @@ Build a harness of your own when your domain's context is hard to express as tex
 
 ## Architecture
 
-<img src="ui/public/media-agent-harness-architecture.png" alt="Architecture: users and OIDC applications reach CloudFront, an Application Load Balancer and an Amazon ECS proxy authenticated by Amazon Cognito. The proxy invokes the Strands main orchestrator agent, which answers directly or dispatches single or multi-task plans to task, planning, design and rendering sub-agents. An AgentCore Gateway fronts Unified Media Agent Toolkit micro-workflows and user-defined tools. Media, skills and control-plane state live in Amazon S3 and Amazon DynamoDB, with AWS Lambda managing dispatch state. The platform runs on Amazon Bedrock and AgentCore Runtime, Memory, Identity, Gateway, Observability, Evaluations, Policy, Code Interpreter and Registry." width="100%">
+<img src="ui/public/media-agent-harness-architecture.png" alt="Architecture: users and OIDC applications reach CloudFront, an Application Load Balancer and an Amazon ECS proxy authenticated by Amazon Cognito. The proxy invokes the Strands main orchestrator agent, which answers directly or dispatches single or multi-task plans to task, planning and rendering sub-agents. An AgentCore Gateway fronts Unified Media Agent Toolkit micro-workflows and user-defined tools. Media, skills and control-plane state live in Amazon S3 and Amazon DynamoDB, with AWS Lambda managing dispatch state. The platform runs on Amazon Bedrock and AgentCore Runtime, Memory, Identity, Gateway, Observability, Evaluations, Policy, Code Interpreter and Registry." width="100%">
 
 ## Components
 
@@ -71,7 +71,7 @@ Build a harness of your own when your domain's context is hard to express as tex
 |---|---|
 | **Web workspace** | Chat with the agents, upload and browse media, review results in interactive viewers (video timeline, images, documents), and manage skills, agents and tools. Served through Amazon CloudFront; sign-in with Amazon Cognito. |
 | **API proxy** | The workspace's backend on AWS Fargate. Validates every request, signs calls to the agents, and serves media through short-lived links — media is never publicly readable. |
-| **Agents** (AgentCore Runtime) | An orchestrator that plans and delegates to specialist sub-agents: a task agent for tool-heavy work and code execution, a planning agent for multi-step jobs, a design agent for brainstorming, and a render agent that turns results into interactive views. |
+| **Agents** (AgentCore Runtime) | An orchestrator that plans and delegates to specialist sub-agents: a task agent for tool-heavy work and code execution, a planning agent for multi-step jobs, and a render agent that turns results into interactive views. |
 | **Skills, tools and hooks** | Built-in and user-authored skills, tool collections and event-driven hooks, versioned and published through a lab workflow. Custom agents combine a persona, skills and tools, and can be exposed to external applications. |
 | **Capability API** | An always-on Fargate service that serves the catalog of skills, agents and tools quickly, backed by Amazon DynamoDB and the AgentCore Agent Registry. |
 | **Projects** | Shared workspaces for a team's media: membership-scoped access, automatic indexing of uploaded media, and search across it. |

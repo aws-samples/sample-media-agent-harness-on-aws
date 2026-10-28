@@ -61,8 +61,33 @@ def _run(op: str, source: dict, **spec) -> str:
     res = ma.run_action(act, session_id=session_id, project_id=jc.trusted_project_id())
     if not res.get("ok"):
         return json.dumps({"error": res.get("error") or "the action failed"})
+    _note_lineage(op, source, res.get("outputs") or [])
     return json.dumps({"status": "done", "elapsedMs": res.get("elapsedMs"),
                        "outputs": [{"name": o["name"], "url": o["url"], "kind": o["kind"]} for o in res["outputs"]]})
+
+
+_TOOL_OF_OP = {"frame": "extract_frames", "clip": "clip_video"}
+
+
+def _note_lineage(op: str, source: dict, outputs: list) -> None:
+    """projects.lineageEdges: each output is made from the source over its own time range (a frame's instant, a
+    clip's in/out). The tool's result names only CDN URLs and none of its source, so the ledger's generic paths
+    cannot see this; it is recorded here, where both are known. A no-op with the flag off; never raises."""
+    try:
+        from projects import lineage_contract as lc
+
+        if not lc.edges_enabled():
+            return
+        from media import turn_outputs
+
+        src = source.get("s3uri")
+        for o in outputs:
+            rng = o.get("range") if isinstance(o.get("range"), dict) else None
+            turn_outputs.note_write(o.get("s3uri"), [src], tool=_TOOL_OF_OP.get(op, op),
+                                    ranges=[{"input": src, **rng}] if rng and src else [],
+                                    settings={"op": op})
+    except Exception:  # noqa: BLE001 - lineage never breaks the tool
+        logger.debug("media_quick: lineage not recorded", exc_info=True)
 
 
 @tool

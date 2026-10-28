@@ -39,8 +39,39 @@ describe("buildTurnMessage", () => {
     });
   });
 
-  it("forwards the summary's lineage, dropping malformed entries and capping inputs (asset-lineage §3)", () => {
-    const inputs = Array.from({ length: 25 }, (_, i) => `s3://b/projects/p/video:${i}/a.mp4`);
+  it("forwards the lineage-edge fields bounded, without query strings, and keeps the message under SQS's limit", () => {
+    const msg = buildTurnMessage({
+      ...base,
+      summary: {
+        lineage: [{
+          output: "s3://b/artifacts/external/x.png", inputs: ["s3://b/f.jpg"], tool: "usr-fal___run_model",
+          unresolved: [{ ref: "https://h.example/a.png?X-Amz-Signature=secret", reason: "external_url" }, { nope: 1 }],
+          origin: "https://v3.fal.media/files/x.png?token=t", via: "task_agent", jobId: "req-1", inferred: true,
+          ranges: [{ input: "s3://b/f.jpg", start: 1.5, end: 3, unit: "s" }, { input: "s3://b/f.jpg", start: "x", end: 1 }],
+          settings: { model: "flux", seed: 3 }, junk: "dropped",
+        }, { output: "s3://b/o.mp4", inputs: [], settings: { prompt: "p".repeat(2000) } }],
+      },
+    });
+    expect(msg?.lineage).toEqual([
+      {
+        output: "s3://b/artifacts/external/x.png", inputs: ["s3://b/f.jpg"], tool: "usr-fal___run_model",
+        unresolved: [{ ref: "https://h.example/a.png", reason: "external_url" }],
+        origin: "https://v3.fal.media/files/x.png", via: "task_agent", jobId: "req-1", inferred: true,
+        ranges: [{ input: "s3://b/f.jpg", start: 1.5, end: 3, unit: "s" }], settings: { model: "flux", seed: 3 },
+      },
+      { output: "s3://b/o.mp4", inputs: [] },
+    ]);
+    const many = Array.from({ length: 100 }, (_, n) => ({
+      output: `s3://b/artifacts/s/output/${n}.mp4`,
+      inputs: Array.from({ length: 500 }, (_, i) => `s3://bucket-name/artifacts/s/output/clip_${n}_${i}.mp4`),
+    }));
+    const big = buildTurnMessage({ ...base, summary: { lineage: many } });
+    expect(big?.lineage).toHaveLength(100);
+    expect(JSON.stringify(big).length).toBeLessThan(200_000);
+  });
+
+  it("forwards the summary's lineage, dropping malformed entries and capping inputs at 500 (lineage edges)", () => {
+    const inputs = Array.from({ length: 501 }, (_, i) => `s3://b/projects/p/video:${i}/a.mp4`);
     const msg = buildTurnMessage({
       ...base,
       summary: {
@@ -55,7 +86,7 @@ describe("buildTurnMessage", () => {
     });
     expect(msg?.lineage).toEqual([
       { output: "s3://b/artifacts/s/output/clip.mp4", inputs: ["s3://b/x.mp4"], tool: "crop_video" },
-      { output: "s3://b/artifacts/s/output/frames.zip", inputs: inputs.slice(0, 20) },
+      { output: "s3://b/artifacts/s/output/frames.zip", inputs: inputs.slice(0, 500) },
     ]);
   });
 

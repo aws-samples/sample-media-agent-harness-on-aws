@@ -4,7 +4,7 @@ Both panels used to fetch this from the agent runtime, so opening a tab woke a m
 to be told what is essentially a constant. They now read from here instead, from two
 different kinds of source:
 
-* **Agents** come from `BUILTIN_CAPABILITIES` in this module — four literals, plus four
+* **Agents** come from `BUILTIN_CAPABILITIES` in this module — three literals, plus three
   `os.environ` lookups for whether each runtime is wired.
 * **Skills** come from a DynamoDB row the *deploy* writes (`infra/lib/builtin-skills.ts`
   and the `BuiltinSkillCatalog` custom resource), not from files in this image. That is
@@ -17,7 +17,7 @@ What these tests pin:
   fields — not just identity.
 * **Honest about deployment.** `configured` says whether a sub-agent runtime is wired,
   and comes from an env var, so a task that never received those variables would report
-  four healthy runtimes as unconfigured. `None` (does not apply) and `False` (applies,
+  three healthy runtimes as unconfigured. `None` (does not apply) and `False` (applies,
   answer is no) are different, and the tests keep them apart.
 * **A missing catalog is an error, not an empty list.** An unpublished row must surface
   as a partial error, or a failed deploy-time write reads as "this harness ships no
@@ -41,7 +41,6 @@ ARN_ENVS = {
     "task-agent": "TASK_AGENT_RUNTIME_ARN",
     "render-agent": "RENDER_AGENT_RUNTIME_ARN",
     "planning-agent": "PLANNING_AGENT_RUNTIME_ARN",
-    "design-agent": "DESIGN_AGENT_RUNTIME_ARN",
 }
 
 
@@ -53,10 +52,10 @@ async def _builtins(category: str):
 
 
 @pytest.mark.asyncio
-async def test_all_four_sub_agents_are_present() -> None:
+async def test_all_sub_agents_are_present() -> None:
     rows = await _builtins("specialty-agent")
     slugs = {r.asset_id for r in rows}
-    assert slugs == set(ARN_ENVS), f"expected the four sub-agents, got {sorted(slugs)}"
+    assert slugs == set(ARN_ENVS), f"expected the three sub-agents, got {sorted(slugs)}"
 
 
 @pytest.mark.asyncio
@@ -96,7 +95,7 @@ async def test_configured_is_false_when_the_arn_env_is_absent(monkeypatch) -> No
     """A missing env var must read as NOT configured, not as unknown-and-hidden.
 
     This is the failure this test exists for: if the Capability API task definition
-    never receives these variables, four working runtimes render as unconfigured.
+    never receives these variables, working runtimes render as unconfigured.
     Asserting `is False` (not falsy) keeps that distinct from `None`.
     """
     for env in ARN_ENVS.values():
@@ -114,14 +113,14 @@ async def test_configured_and_runtime_id_come_from_the_arn(monkeypatch) -> None:
         "TASK_AGENT_RUNTIME_ARN",
         "arn:aws:bedrock-agentcore:us-west-2:1234:runtime/mediaworks_task-ABC123",
     )
-    for env in ("RENDER_AGENT_RUNTIME_ARN", "PLANNING_AGENT_RUNTIME_ARN", "DESIGN_AGENT_RUNTIME_ARN"):
+    for env in ("RENDER_AGENT_RUNTIME_ARN", "PLANNING_AGENT_RUNTIME_ARN"):
         monkeypatch.delenv(env, raising=False)
 
     rows = {r.asset_id: r for r in await _builtins("specialty-agent")}
     assert rows["task-agent"].configured is True
     assert rows["task-agent"].runtime_id == "mediaworks_task-ABC123"
     # The others are untouched by one being set.
-    assert rows["design-agent"].configured is False
+    assert rows["render-agent"].configured is False
 
 
 def test_the_descriptor_names_an_env_var_for_every_sub_agent() -> None:

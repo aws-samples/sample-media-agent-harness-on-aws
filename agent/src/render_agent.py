@@ -60,11 +60,11 @@ REGION = os.environ.get("AWS_REGION", "us-west-2")
 S3_BUCKET = os.environ.get("SKILLS_S3_BUCKET", "")
 S3_PREFIX = os.environ.get("ARTIFACTS_PREFIX", "artifacts/")
 
-# The Render Agent is PINNED to a fast/cheap model (Haiku 4.5). Its work is largely
+# The Render Agent is PINNED to a specific model. Its work is largely
 # deterministic — build_render_manifest does the projection; the LLM only selects URLs and
 # a skill — so it does not need the reasoning tier, and it runs on every artifact. Overridable
 # via RENDER_MODEL_ID but never takes the caller's orchestrator model pick.
-RENDER_MODEL_ID = os.environ.get("RENDER_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0")
+RENDER_MODEL_ID = os.environ.get("RENDER_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 ARTIFACTS_DOMAIN = os.environ.get("ARTIFACTS_DOMAIN", "")
 _boto_cfg = BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 4, "mode": "standard"})
 

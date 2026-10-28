@@ -46,10 +46,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
+from projects import lineage_contract as lc
 from projects.access import check_access
 from projects.ids import is_project_id
 
 from .. import generated as gen
+from ..lineage_capture import LineageCapture, plan_entries, shot_index, shot_ranges
+from ..lineage_edges import LineageEdges
 from ..folders import SESSIONS_ROOT, date_from, session_folder
 from ..limits import limits_from_env
 from ..store import AssetStore, ProjectNotActive, RegistrationConflict
@@ -81,6 +84,12 @@ class Work:
     job_tool: Optional[str] = None  # job: the row's trio, when the result does not name a tool
     job_nodes: list[gen.JobNode] = field(default_factory=list)  # job: M2C-bucket outputs per node
     source_media: list[str] = field(default_factory=list)  # job: the row's `sourceMedia`
+    lineage_inputs: list[str] = field(default_factory=list)  # job: the row's `lineageInputs` (lineage edges)
+    # projects.lineageEdges: the producer's entries with every edge field (lineage_contract.parse_entry), and a
+    # settled plan's result document (its nodes' artifacts and depends_on) with where it was read from.
+    edge_entries: list[dict] = field(default_factory=list)
+    plan_doc: Optional[dict] = None
+    result_key: Optional[str] = None
 
 
 @dataclass
@@ -93,6 +102,7 @@ class Deps:
     access: Callable[[Any, str, str], Any] = check_access
     sessions_table: Any = None  # boto3 resource Table (sessions): folder title + invented-folder check
     m2c_bucket: str = ""  # the M2C proxy bucket (`MEDIA_PROXY_BUCKET`); empty → no m2c registration
+    lineage_edges: Optional[bool] = None  # projects.lineageEdges; None → from the env (INGESTION_CONFIG)
 
 
 def work_from_turn(msg: dict) -> Optional[Work]:
@@ -107,7 +117,8 @@ def work_from_turn(msg: dict) -> Optional[Work]:
     turn = msg.get("turnId") if isinstance(msg.get("turnId"), str) else None
     return Work(project_id=pid, actor_sub=actor, session_id=sid, producer=f"turn:{turn or ''}", turn_id=turn,
                 window_ms=(start - gen.WINDOW_SLACK_MS, end + gen.WINDOW_SLACK_MS),
-                keys=gen.external_refs_in("\n".join(refs)), lineage=gen.lineage_entries(msg.get("lineage")))
+                keys=gen.external_refs_in("\n".join(refs)), lineage=gen.lineage_entries(msg.get("lineage")),
+                edge_entries=lc.entries(msg.get("lineage"), gen.MAX_LINEAGE_ENTRIES))
 
 
 def work_from_job_image(new: dict, old: Optional[dict], deps: Deps) -> Optional[Work]:
@@ -135,7 +146,17 @@ def work_from_job_image(new: dict, old: Optional[dict], deps: Deps) -> Optional[
     sources = [s for s in new.get("sourceMedia") or [] if isinstance(s, str)]
     return Work(project_id=pid, actor_sub=actor, session_id=sid, producer=f"job:{job_id}",
                 turn_id=new.get("turnId") if isinstance(new.get("turnId"), str) else None, keys=keys,
-                job_id=job_id, job_tool=trio, job_nodes=nodes, source_media=sources)
+                job_id=job_id, job_tool=trio, job_nodes=nodes, source_media=sources,
+                lineage_inputs=[s for s in new.get("lineageInputs") or [] if isinstance(s, str)],
+                plan_doc=_plan_doc(body), result_key=result_key)
+
+
+def _plan_doc(body: str) -> Optional[dict]:
+    try:
+        doc = json.loads(body or "")
+    except (TypeError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) and doc.get("schema") == "plan-result/v1" else None
 
 
 def _plan_project(run_id: object, job_id: object, deps: Deps) -> Optional[str]:
@@ -167,6 +188,8 @@ class GeneratedMedia:
     def __init__(self, deps: Deps):
         self.deps = deps
         self.store = AssetStore(deps.table)
+        self.edges_on = lc.edges_enabled() if deps.lineage_edges is None else bool(deps.lineage_edges)
+        self._made: list[tuple[str, str, str, bool, Optional[dict]]] = []
 
     # ------------------------------------------------------------ candidates
     def _window_keys(self, work: Work) -> tuple[list[str], list[str]]:
@@ -289,7 +312,10 @@ class GeneratedMedia:
             aid = gen.asset_id_in_project_key(key, pid)
             if aid:
                 return aid
-        return self.store.asset_id_for_location(pid, bucket, key)
+        aid = self.store.asset_id_for_location(pid, bucket, key)
+        if aid is None and self.edges_on:
+            aid = LineageEdges(self.deps.table).alias_of(pid, bucket, key)
+        return aid
 
     def derived_from(self, pid: str, inputs: Iterable[str]) -> list[str]:
         return list(dict.fromkeys(a for a in (self.asset_for_location(pid, u) for u in inputs) if a))
@@ -313,6 +339,9 @@ class GeneratedMedia:
                      work.actor_sub, work.project_id, work.producer)
             return {"registered": [], "existing": [], "deduped": [], "skipped": [], "jobs": [],
                     "reason": "no_access"}
+        self._node_rows = {}
+        if self.edges_on and work.plan_doc is not None:
+            work.keys = list(dict.fromkeys([*work.keys, *self._in_node_outputs(work)]))
         cands, skipped = self.candidates(work)
         selected, over_cap = gen.select(cands)
         if over_cap:
@@ -321,6 +350,8 @@ class GeneratedMedia:
         self._session: Optional[dict] = None
         self._session_read = False
         self._names: dict[str, Optional[str]] = {}
+        self._made = []
+        self._aliases: list[tuple[str, str]] = []  # (asset id, url of a durable copy of its bytes)
         by_output: dict[tuple[str, str], gen.LineageEntry] = {}
         for e in work.lineage:
             loc = gen.parse_location(e.output, self.deps.bucket)
@@ -338,6 +369,8 @@ class GeneratedMedia:
                                    gen.output_label(entry.tool if entry else None)))
             for node in work.job_nodes:
                 self._register_job(work, node, out)
+            if self.edges_on:
+                out["lineage"] = self._capture_lineage(work)
         except ProjectNotActive:
             log.info("generated_media: project %s is no longer active; stopping", work.project_id)
         log.info("generated_media: %s → %s registered=%d existing=%d deduped=%d jobs=%d skipped=%s",
@@ -350,13 +383,19 @@ class GeneratedMedia:
             self._session, self._session_read = session_row(self.deps.sessions_table, work.session_id), True
         return folder_for(work.session_id, self._session, last_modified, label=label)
 
+    def _note_made(self, aid: str, c: gen.Candidate, new: bool, default_entry: Optional[dict]) -> None:
+        if self.edges_on:
+            self._made.append((aid, c.bucket, c.key, new, default_entry))
+
     def _register(self, work: Work, c: gen.Candidate, out: dict, *, source: str, role: str, folder: str,
                   tool: Optional[str] = None, derived: Optional[list[str]] = None,
-                  job_id: Optional[str] = None, name: Optional[str] = None) -> Optional[str]:
+                  job_id: Optional[str] = None, name: Optional[str] = None,
+                  default_entry: Optional[dict] = None) -> Optional[str]:
         """Register ``c`` in place; append its id to ``out``'s registered/existing/deduped. Returns the id."""
         aid = gen.location_asset_id(c.kind, work.project_id, c.bucket, c.key)
         if self.store.get_asset(work.project_id, aid) is not None:
             out["existing"].append(aid)
+            self._note_made(aid, c, False, default_entry)
             return aid
         producer = {"sessionId": work.session_id, "turnId": work.turn_id, "tool": tool, "jobId": job_id}
         try:
@@ -377,13 +416,16 @@ class GeneratedMedia:
             if other is None:
                 raise
             out["existing"].append(other)
+            self._note_made(other, c, False, default_entry)
             return other
         rid = str(row.get("assetId") or aid)
         if row.get("deduped"):
             out["deduped"].append(rid)
             out["existing"].append(rid)
+            self._note_made(rid, c, False, default_entry)
         else:
             out["registered"].append(rid)
+            self._note_made(rid, c, True, default_entry)
         return rid
 
     def _register_job(self, work: Work, node: gen.JobNode, out: dict) -> None:
@@ -402,6 +444,7 @@ class GeneratedMedia:
         source_name = self.display_name_of(work.project_id, source_asset)
         folder = self._folder(work, datetime.now(timezone.utc), label=label)
         outputs: list[str] = []
+        shots = self._shot_ranges(m2c, node) if self.edges_on else {}
         for key in node.keys[:gen.MAX_PER_MESSAGE]:
             head = self._head(m2c, key)
             if head is None:
@@ -414,9 +457,13 @@ class GeneratedMedia:
             aid = self._register(work, cand, out, source="m2c", role=gen.m2c_role(cand.kind, key), folder=folder,
                                  tool=tool, derived=[source_asset] if source_asset else [], job_id=job_id,
                                  name=gen.output_display_name(cand, source_name, gen.output_label(tool),
-                                                              always=True))
+                                                              always=True),
+                                 default_entry=self._job_entry(node, work, m2c, key, tool, job_id, shots)
+                                 if self.edges_on else None)
             if aid:
                 outputs.append(aid)
+                if self.edges_on:
+                    self._aliases.extend((aid, url) for k, url in node.copies if k == key)
         if not outputs:
             return
         prefix = node.output_prefix or f"s3://{m2c}/{node.keys[0].rsplit('/', 1)[0]}/"
@@ -425,6 +472,149 @@ class GeneratedMedia:
             "outputPrefix": prefix, "sourceAssetId": source_asset, "outputs": outputs,
         })
         out["jobs"].append(job_id)
+
+
+    # ------------------------------------------------------------ lineage edges (projects.lineageEdges)
+    def _capture_lineage(self, work: Work) -> dict:
+        """Write the edges of everything this message registered (or found registered), AFTER all of it is an
+        asset, so an output made from another output of the same message resolves its parent. Best effort per
+        edge (``ingestion.lineage_capture``); a failure here never fails the registration."""
+        cap = LineageCapture(self.deps.table, self.store, self.deps.bucket, m2c_bucket=self.deps.m2c_bucket)
+        try:
+            for aid, url in self._aliases:
+                # The durable copy of an M2C output (`<session output>/<execution>/<name>`): later steps are handed
+                # the copy's URL, so it resolves to the M2C output's asset -- and resolves what already waited on it.
+                loc = cap.location(url)
+                if loc and loc[0] == self.deps.bucket:
+                    cap.edges.put_alias(work.project_id, loc[0], loc[1], aid)
+                    cap.on_registered(work.project_id, aid, bucket=loc[0], key=loc[1])
+            entries = list(work.edge_entries)
+            if work.plan_doc is not None:
+                entries = lc.merge_entries(entries, self._plan_entries(work, cap))
+            by_loc: dict[tuple[str, str], dict] = {}
+            via = "turn" if work.window_ms is not None else "job"
+            for e in entries:
+                loc = cap.location(e["output"])
+                if loc:
+                    by_loc.setdefault(loc, e)
+                elif lc.normalize_origin_url(e["output"]):
+                    cap.park_output(work.project_id, e, session_id=work.session_id, turn_id=work.turn_id,
+                                    job_id=work.job_id, default_via=via)
+            seen: set[str] = set()
+            for aid, bucket, key, new, default in self._made:
+                if aid in seen:
+                    continue
+                seen.add(aid)
+                entry = by_loc.get((bucket, key))
+                if default is not None:
+                    # The producer's entry (a plan node's) wins its fields; the job's own (the M2C source, a shot's
+                    # time range) fills in what it lacks.
+                    entry = lc.merge_entries([entry], [default])[0] if entry else lc.parse_entry(default)
+                if entry is None and work.window_ms is None and (work.source_media or work.lineage_inputs):
+                    # A lone async job (a fal queue render polled to completion): its row's `sourceMedia` is what
+                    # the submission was given (jobs.strands_tool_wrap extracts it from the tool input).
+                    entry = lc.parse_entry({"output": f"s3://{bucket}/{key}",
+                                            "inputs": list(dict.fromkeys([*work.source_media, *work.lineage_inputs])),
+                                            "tool": work.job_tool, "via": "job", "jobId": work.job_id})
+                if entry:
+                    cap.capture(work.project_id, aid, entry, session_id=work.session_id, turn_id=work.turn_id,
+                                job_id=work.job_id, default_via=via)
+                if new:
+                    cap.on_registered(work.project_id, aid, bucket=bucket, key=key,
+                                      origin=(entry or {}).get("origin"))
+        except ProjectNotActive:
+            raise
+        except Exception:  # noqa: BLE001 - lineage is recorded best effort; the assets are registered
+            log.exception("generated_media: lineage capture failed for %s", work.producer)
+        log.info("generated_media: %s lineage edges=%d dropped=%d derivedAdded=%d", work.producer,
+                 cap.stats["edges"], cap.stats["dropped"], cap.stats["derivedAdded"])
+        return dict(cap.stats)
+
+    @staticmethod
+    def _job_entry(node: gen.JobNode, work: Work, m2c: str, key: str, tool: Optional[str], job_id: str,
+                   shots: dict) -> dict:
+        """An M2C output's default lineage: made from the media the node ran on — over the shot's own time range
+        when the output is one shot of a shot segmentation (``shot_images/shot_000003.jpg``)."""
+        # The node's own sources; the row's `sourceMedia` only when the node names none (a plan row's would be every
+        # video the plan touched, not this node's).
+        inputs = list(dict.fromkeys(node.sources or [*work.source_media, *work.lineage_inputs]))
+        entry: dict = {"output": f"s3://{m2c}/{key}", "tool": tool, "via": "job", "jobId": job_id, "inputs": inputs}
+        idx = shot_index(key)
+        if idx is not None and idx in shots:
+            entry["ranges"] = [{"input": i, **shots[idx]} for i in inputs]
+            entry["settings"] = {"shot": idx}
+        return entry
+
+    def _shot_ranges(self, m2c: str, node: gen.JobNode) -> dict:
+        key = next((k for k in node.keys if k.rsplit("/", 1)[-1] == "shots.json"), None)
+        if not key:
+            return {}
+        try:
+            body = self.deps.s3.get_object(Bucket=m2c, Key=key)["Body"].read(8 * 1024 * 1024)
+            return shot_ranges(json.loads(body))
+        except Exception as exc:  # noqa: BLE001 - no ranges, the edges still land
+            log.info("generated_media: shots %s unreadable for ranges: %s", key, exc)
+            return {}
+
+    def _plan_entries(self, work: Work, cap: LineageCapture) -> list[dict]:
+        doc = work.plan_doc or {}
+        plan_id = str(doc.get("plan_id") or work.job_id or "")
+        prefix = (work.result_key or "").rsplit("/", 1)[0]
+
+        def node_row(nid: str) -> dict:
+            return self._node_row(plan_id, nid)
+
+        def node_ledger(nid: str) -> list:
+            if not prefix.startswith("plans/"):
+                return []
+            body = self._read_quiet(f"{prefix}/{nid}/lineage.json")
+            try:
+                doc_ = json.loads(body) if body else {}
+            except ValueError:
+                return []
+            return doc_.get("lineage") if isinstance(doc_, dict) and isinstance(doc_.get("lineage"), list) else []
+
+        return plan_entries(doc, bucket=self.deps.bucket, plan_id=plan_id, node_row=node_row,
+                            node_ledger=node_ledger)
+
+    def _node_row(self, plan_id: str, nid: str) -> dict:
+        """A plan node's job-registry row (``outputs``, ``inputRefs``), read once per message."""
+        cache = self.__dict__.setdefault("_node_rows", {})
+        key = f"{plan_id}#{nid}"
+        if key not in cache:
+            row: dict = {}
+            if self.deps.job_table is not None and plan_id:
+                try:
+                    row = self.deps.job_table.get_item(Key={"jobId": key}).get("Item") or {}
+                except Exception as exc:  # noqa: BLE001 - a missing node row only loses that node's precision
+                    log.warning("generated_media: node row %s unreadable: %s", key, exc)
+            cache[key] = row
+        return cache[key]
+
+    def _in_node_outputs(self, work: Work) -> list[str]:
+        """Session keys a plan's nodes made INSIDE their own turn (an ffmpeg assemble), recorded by the chainer on
+        each node's row: candidates the aggregate may not name."""
+        doc = work.plan_doc or {}
+        plan_id = str(doc.get("plan_id") or work.job_id or "")
+        keys: list[str] = []
+        for n in doc.get("nodes") or []:
+            if not isinstance(n, dict) or not n.get("node_id"):
+                continue
+            for o in self._node_row(plan_id, str(n["node_id"])).get("outputs") or []:
+                k = o.get("key") if isinstance(o, dict) else None
+                if not isinstance(k, str) or not k:
+                    continue
+                if (work.session_id and gen.is_session_source(k, work.session_id, work.project_id)) \
+                        or gen.external_refs_in(k) == [k]:
+                    keys.append(k)
+        return keys
+
+    def _read_quiet(self, key: str) -> Optional[str]:
+        try:
+            obj = self.deps.s3.get_object(Bucket=self.deps.bucket, Key=key)
+            return obj["Body"].read(1024 * 1024).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - most nodes write no ledger
+            return None
 
 
 # ---------------------------------------------------------------- folder (design D20, asset-lineage R3.3)

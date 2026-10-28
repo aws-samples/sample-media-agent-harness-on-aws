@@ -157,7 +157,7 @@ def test_control_plane_imports_nothing_from_the_runtime_stack() -> None:
     admit one of them.
     """
     forbidden = {"main", "task_agent", "mcp_manager", "tools", "render_agent",
-                 "planning_agent", "design_agent", "mcp_server"}
+                 "planning_agent", "mcp_server"}
     imported = _imported_local_modules()
     offenders = {m: sorted(s) for m, s in imported.items() if m in forbidden}
     assert not offenders, (

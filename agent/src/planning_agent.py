@@ -41,7 +41,7 @@ DDB_TABLE = os.environ.get("PLAN_STATE_TABLE", "")
 _boto_cfg = BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 4, "mode": "standard"})
 
 # Default to a reasoning-capable model
-DEFAULT_MODEL_ID = os.environ.get("PLANNING_MODEL_ID", "global.anthropic.claude-sonnet-5")
+DEFAULT_MODEL_ID = os.environ.get("PLANNING_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 
 PLANNING_SYSTEM_PROMPT = PLANNING_SYSTEM_PROMPT_TEMPLATE.format(schema=json.dumps(HIGH_LEVEL_PLAN_JSON_SCHEMA, indent=2), fanout_guidance="""
 RUNTIME FAN-OUT — collections discovered mid-plan:
@@ -91,7 +91,7 @@ async def invoke(payload, context):
         return
 
     catalog = payload.get("catalog", {})
-    # Planning is PINNED to the reasoning model (global Sonnet 5): DAG quality must not
+    # Planning is PINNED to the reasoning model (global Sonnet 5.5): DAG quality must not
     # degrade because the user selected a faster/cheaper orchestrator model. Ignore any
     # model_id propagated from the caller's pick.
     model_id = DEFAULT_MODEL_ID
@@ -112,6 +112,20 @@ async def invoke(payload, context):
     user_prompt = f"Goal: {goal}\n\n{catalog_text}\n\n" + (
         'Produce the {"high_level_plan": ..., "dag": ...} JSON.' if fused
         else "Produce the HighLevelPlan JSON.")
+
+    # Self-correction retry: plan_and_execute re-invokes the fused call with the DAG validation
+    # errors from the previous attempt (a preformatted "- type: message" string). Frame them as
+    # feedback on the model's OWN prior output so the retry prompt DIFFERS from attempt #1 — an
+    # identical prompt on the pinned reasoning model just reproduces the same invalid DAG. This
+    # replaces the retired Design Agent's identical retry mechanism.
+    validation_errors = payload.get("validation_errors")
+    if validation_errors and str(validation_errors).strip():
+        what = "DAG" if fused else "HighLevelPlan"
+        user_prompt += (
+            f"\n\nYour previous {what} JSON failed validation with these errors:\n"
+            f"{validation_errors}\n"
+            "Produce a corrected response that fixes them."
+        )
 
     # No tools — the Planning Agent produces JSON output directly
     # The think tool adds unnecessary latency for structured output tasks

@@ -63,6 +63,7 @@ import asyncio
 import re
 import json
 import logging
+import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -436,13 +437,13 @@ class _ResilientMCPMixin:
         # Normalize model-emitted args on the path Strands ACTUALLY invokes (it calls
         # MCPAgentTool.stream directly, never GatewayConnection.call_tool_sync): a unit-suffixed
         # fal ``duration`` ("7s") fails at result time with 422 int_parsing (staging 9fb4e17b),
-        # and ``fal-ai/minimax/h3-max/...`` routes to the wrong fal app (session 36685185), and
-        # h3-max REQUIRES a valid ``prompt_expansion_mode`` (staging dcd11946).
-        from tool_args import normalize_duration, normalize_endpoint_ids, normalize_minimax_h3_args
+        # and ``fal-ai/minimax/h3-max/...`` routes to the wrong fal app (session 36685185).
+        # Model-specific fields are NOT added here: a submit is checked against the model's own
+        # schema instead (``_model_input_refusal`` below, ``model_input_check``).
+        from tool_args import normalize_duration, normalize_endpoint_ids
 
         if isinstance(tool_use, dict) and isinstance(tool_use.get("input"), dict):
-            normalized = normalize_minimax_h3_args(
-                normalize_endpoint_ids(normalize_duration(tool_use["input"])))
+            normalized = normalize_endpoint_ids(normalize_duration(tool_use["input"]))
             from tool_args import declared_properties, default_inference_thinking
 
             props = declared_properties(getattr(self, "tool_spec", None))
@@ -457,6 +458,8 @@ class _ResilientMCPMixin:
                    or _off_plan_submit_refusal(getattr(self, "tool_name", ""), tool_use)
                    or _untagged_voice_refusal(getattr(self, "tool_name", ""), tool_use)
                    or _web_search_refusal(getattr(self, "tool_name", ""), tool_use))
+        if refusal is None:
+            refusal = await self._model_input_refusal(tool_use)
         if refusal is not None:
             yield ToolResultEvent(refusal)
             return
@@ -480,6 +483,65 @@ class _ResilientMCPMixin:
         _retire_missing_planned_endpoint(getattr(self, "tool_name", ""), tool_use, events)
         for ev in events:
             yield ev
+
+    async def _model_input_refusal(self, tool_use):
+        """A pre-call error result when a model submit breaks THAT model's own schema, else None.
+
+        The schema comes from the same server's ``get_model_schema`` (cached per endpoint), so nothing about any
+        model is hard-coded here. Fails OPEN on everything: not a submit, the kill switch off, no schema tool,
+        an unreadable schema or any error → None and the call proceeds unchecked (``model_input_check``).
+        """
+        try:
+            import model_input_check as mic
+
+            tool_name = getattr(self, "tool_name", "") or ""
+            verb = mic.verb_of(tool_name)
+            if not mic.enabled() or verb not in mic.SUBMIT_VERBS or not isinstance(tool_use, dict):
+                return None
+            subs = mic.submissions(verb, tool_use.get("input"))
+            if not subs:
+                return None
+            server_name = getattr(getattr(self, "mcp_tool", None), "name", "") or tool_name
+            schema_tool = mic.schema_tool_name(server_name)
+            failures = []
+            for where, endpoint, model_input in subs:
+                hit, schema = mic.cached_schema(endpoint)
+                if not hit:
+                    schema = await self._fetch_model_schema(mic, schema_tool, endpoint)
+                    mic.remember(endpoint, schema)
+                if schema is None:
+                    continue
+                probs = mic.problems(schema, model_input)
+                if probs:
+                    failures.append((where, endpoint, schema, probs))
+            if not failures:
+                return None
+            logger.warning("model_input_refused tool=%r %s", tool_name,
+                           "; ".join(f"{ep}: {', '.join(p)}" for _, ep, _, p in failures))
+            return {"toolUseId": tool_use.get("toolUseId", ""), "status": "error",
+                    "content": [{"text": mic.refusal_text(tool_name, failures)}]}
+        except Exception as exc:  # noqa: BLE001 — a check must never break a call
+            logger.warning("model input check skipped: %s", exc)
+            return None
+
+    async def _fetch_model_schema(self, mic, schema_tool: str, endpoint: str):
+        """The model's input schema from the server's ``get_model_schema``; None on any failure."""
+        try:
+            from datetime import timedelta
+
+            lease_factory = getattr(self, "_call_lease", None)
+            lease = lease_factory(self.mcp_client) if callable(lease_factory) else nullcontext()
+            with lease:
+                result = await self.mcp_client.call_tool_async(
+                    tool_use_id=f"model-schema-{uuid.uuid4().hex[:12]}", name=schema_tool,
+                    arguments={"endpoint_id": endpoint}, read_timeout_seconds=timedelta(seconds=15))
+            schema = mic.input_schema(mic.payload_of(result), endpoint)
+            if schema is None:
+                logger.info("model schema unavailable endpoint=%r tool=%r", endpoint, schema_tool)
+            return schema
+        except Exception as exc:  # noqa: BLE001 — no schema means no check
+            logger.info("model schema fetch failed endpoint=%r: %s", endpoint, exc)
+            return None
 
     async def _relink_current_client(self) -> bool:
         """Point this tool at its connection's CURRENT client when, and only when, that client
@@ -770,6 +832,22 @@ def _is_transient_missing_result(result: ToolResult) -> bool:
     return result.get("status") == "error" and (
         "not found" in blob or "no retrievable" in blob or "result body" in blob
     )
+
+
+def _lineage_inputs_from_tool_use(tool_use: Optional[ToolUse]) -> list[str]:
+    """projects.lineageEdges: every input location (canonical ``s3://``) and external URL (query-less) the start
+    tool was given, for the registrar to link the job's outputs to. ``[]`` with the flag off; never raises."""
+    if not isinstance(tool_use, dict):
+        return []
+    try:
+        from projects import lineage_contract as lc
+        if not lc.edges_enabled():
+            return []
+        from media import turn_outputs
+        canon, unresolved = turn_outputs._input_refs(tool_use.get("input"))
+        return list(dict.fromkeys([*canon, *(u["ref"] for u in unresolved)]))[:50]
+    except Exception:  # noqa: BLE001 — lineage capture is never worth failing a job over
+        return []
 
 
 def _source_media_from_tool_use(tool_use: Optional[ToolUse]) -> list[str]:
@@ -1114,6 +1192,7 @@ class JobTrackingMCPAgentTool(_ResilientMCPMixin, MCPAgentTool):
             # completion render reads it back by job_id to overlay the analysis on its
             # source. Structural + tool-agnostic (see source_media.extract_source_media).
             source_media=_source_media_from_tool_use(tool_use),
+            lineage_inputs=_lineage_inputs_from_tool_use(tool_use),
             # TRUSTED id only (asset-lineage Phase 3 (a)): the polling worker imports this job's outputs
             # under it, so a main turn whose project access is not `ok` must not stamp it.
             producing_project_id=jobs_context.trusted_project_id(),

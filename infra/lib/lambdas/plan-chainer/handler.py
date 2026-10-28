@@ -60,6 +60,9 @@ PLAN_STATE_TABLE = os.environ["PLAN_STATE_TABLE"]
 JOB_REGISTRY_TABLE = os.environ["JOB_REGISTRY_TABLE"]
 TASK_AGENT_ARN = os.environ["TASK_AGENT_RUNTIME_ARN"]
 SKILLS_S3_BUCKET = os.environ.get("SKILLS_S3_BUCKET", "")
+# projects.lineageEdges: record each node's inputs (what it was handed) and outputs (what it made) on its
+# job-registry row, which the Generated_Media registrar turns into lineage edges. Off: nothing is recorded.
+LINEAGE_EDGES = (os.environ.get("LINEAGE_EDGES") or "").strip().lower() == "true"
 ARTIFACTS_DOMAIN = os.environ.get("ARTIFACTS_DOMAIN", "")
 # A plan's node list is stored inline on the PLAN row up to this size; beyond it (a large
 # fan-out expands the graph past DynamoDB's 400KB item cap) it is offloaded to S3 with a
@@ -774,6 +777,18 @@ def handler(event, context):
         if status not in ACTIONABLE_STATUSES:
             continue
 
+        # A node that just COMPLETED records what it made on its job-registry row (`outputs`), whoever
+        # wrote the completion (a node turn, the fast path, a results fetch). projects.lineageEdges only.
+        # Best effort: never blocks chaining.
+        if LINEAGE_EDGES and status == "completed" and _became_status(record, "completed"):
+            try:
+                plan_of, node_of = _split_sk(node_id)
+                _record_node_outputs(
+                    plan_of or new_image.get("plan_id", {}).get("S", ""), node_of,
+                    new_image.get("result_s3_key", {}).get("S", ""))
+            except Exception:  # noqa: BLE001 - outputs are lineage/display aids, chaining must go on
+                logger.warning("Failed to record outputs for node %s", node_id, exc_info=True)
+
         sessions_to_check.add(session_id)
 
     # Process each affected plan
@@ -782,6 +797,151 @@ def handler(event, context):
             _process_plan(session_id)
         except Exception:
             logger.exception("Failed to process plan for session %s", session_id)
+
+def _became_status(record: dict, status: str) -> bool:
+    """True when this stream record moved the row INTO ``status`` (an INSERT, or a MODIFY from another)."""
+    old = (record.get("dynamodb", {}).get("OldImage") or {}).get("status", {}).get("S", "")
+    return old != status
+
+
+# The media (and data) a node made. Extension -> kind; anything else is not an output.
+_MEDIA_KINDS = {
+    "mp4": "video", "mov": "video", "webm": "video", "mkv": "video", "m4v": "video",
+    "png": "image", "jpg": "image", "jpeg": "image", "webp": "image", "gif": "image",
+    "wav": "audio", "mp3": "audio", "m4a": "audio", "aac": "audio", "flac": "audio", "ogg": "audio",
+}
+_NODE_OUTPUTS_MAX = 24
+_NODE_INPUT_REFS_MAX = 200
+_NODE_RESULT_READ_BYTES = 512 * 1024
+
+
+def _media_kind(key: str) -> "str | None":
+    tail = key.rsplit("/", 1)[-1]
+    if "." not in tail:
+        return None
+    return _MEDIA_KINDS.get(tail.rsplit(".", 1)[-1].lower())
+
+
+def _is_session_output_key(key: str) -> bool:
+    """A file a session MADE: under a session output root (either layout) or the shared external namespace
+    (fal results). A source the node only read (a project asset, an upload under ``input/``) is not one."""
+    return "/output/" in f"/{key}" or key.startswith("artifacts/external/")
+
+
+def _read_node_result_text(result_s3_key: str) -> str:
+    if not (SKILLS_S3_BUCKET and result_s3_key):
+        return ""
+    obj = _s3.get_object(Bucket=SKILLS_S3_BUCKET, Key=result_s3_key,
+                         Range=f"bytes=0-{_NODE_RESULT_READ_BYTES - 1}")
+    return obj["Body"].read().decode("utf-8", errors="replace")
+
+
+def node_outputs_from_result(result_text: str, upstream_keys: "set | frozenset" = frozenset()) -> list:
+    """The media files a node's result names as made by it: ``[{uri, key, kind}]``, in the order named.
+
+    Generic over node types: a gateway job's stored result, a Task-Agent turn's prose (an ffmpeg assemble run
+    inside the node registers no job -- its output exists only here), a tool fast-path's JSON. Inputs are left
+    out: files outside a session output root, and files an UPSTREAM node recorded or the node was handed (a
+    node's prose routinely names the frames it was given)."""
+    out = []
+    for key in _declared_our_bucket_keys(result_text):
+        kind = _media_kind(key)
+        if not kind or not _is_session_output_key(key) or key in upstream_keys:
+            continue
+        out.append({"uri": f"s3://{SKILLS_S3_BUCKET}/{key}", "key": key, "kind": kind})
+        if len(out) >= _NODE_OUTPUTS_MAX:
+            break
+    return out
+
+
+def _record_node_outputs(plan_id: str, node_id: str, result_s3_key: str) -> None:
+    """Stamp ``outputs`` on a completed node's job-registry row (``<plan_id>#<node_id>``), once.
+
+    The row is what ``GET /jobs`` and the jobs stream project, and what the Generated_Media registrar reads to
+    give a node's in-turn outputs (an ffmpeg assemble, a code-interpreter restyle) their lineage. Written even
+    when empty (``[]``) so a replay does no more S3 reads, and guarded by ``attribute_not_exists`` so it is
+    idempotent and never overwrites."""
+    if not (plan_id and node_id and node_id != "PLAN"):
+        return
+    job_key = {"jobId": f"{plan_id}#{node_id}"}
+    row = _job_table.get_item(Key=job_key).get("Item")
+    if not row or row.get("outputs") is not None:
+        return
+    upstream: set = set(str(k).split("/", 3)[-1] if str(k).startswith("s3://") else str(k)
+                        for k in (row.get("inputRefs") or []))
+    for dep in row.get("dependsOn") or []:
+        dep_row = _job_table.get_item(Key={"jobId": f"{plan_id}#{dep}"}).get("Item") or {}
+        for o in dep_row.get("outputs") or []:
+            if isinstance(o, dict) and o.get("key"):
+                upstream.add(str(o["key"]))
+    outputs = node_outputs_from_result(_read_node_result_text(result_s3_key), upstream)
+    try:
+        _job_table.update_item(
+            Key=job_key,
+            UpdateExpression="SET outputs = :o",
+            ConditionExpression="attribute_exists(jobId) AND attribute_not_exists(outputs)",
+            ExpressionAttributeValues={":o": outputs},
+        )
+        logger.info("Plan %s: node %s recorded %d output(s)", plan_id, node_id, len(outputs))
+    except _job_table.meta.client.exceptions.ConditionalCheckFailedException:
+        pass
+
+
+# Both stop at a backslash: the injected preview is JSON text, where a newline is the two characters `\n` (staging
+# plan 0cc48c4d handed `.../cut1_20_23.mp4\n\n**clip2:**` as one "uri").
+_HANDED_REF_RE = re.compile(r"s3://[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]/[^\s\"'<>)\]}`,\\]+")
+_HANDED_URL_RE = re.compile(r"https://[^\s\"'<>)\]}`,\\]+")
+_S3_VHOST_URL_RE = re.compile(r"^https://([a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])\.s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com/(.+)$")
+# The harness's own bookkeeping (a node's stored text, a plan manifest) is never a media input.
+_NOT_INPUT_PREFIXES = ("plans/", "jobs/", "tools/")
+
+
+def _ref_of_url(url: str) -> "str | None":
+    """``s3://bucket/key`` of OUR CDN URL or a presigned S3 URL (query dropped), else None."""
+    from urllib.parse import unquote
+
+    url = url.split("?", 1)[0].split("#", 1)[0].rstrip(".;:!?")
+    if ARTIFACTS_DOMAIN and SKILLS_S3_BUCKET and url.startswith(f"https://{ARTIFACTS_DOMAIN}/"):
+        return f"s3://{SKILLS_S3_BUCKET}/{unquote(url[len(ARTIFACTS_DOMAIN) + 9:])}"
+    m = _S3_VHOST_URL_RE.match(url)
+    return f"s3://{m.group(1)}/{unquote(m.group(2))}" if m else None
+
+
+def handed_input_refs(*texts) -> list:
+    """The media locations the chainer HANDED a node (its prompt with the dependency + prior-phase injection blocks,
+    its fast-path arguments) as ``s3://`` uris -- ``s3://`` refs, our CDN URLs and presigned S3 URLs alike -- in
+    order, unique, bounded: the node's declared inputs for lineage. Prefixes and harness bookkeeping are skipped."""
+    out: list = []
+    for t in texts:
+        if not isinstance(t, str):
+            t = json.dumps(t, default=str) if t is not None else ""
+        found = [m.group(0).rstrip(".;:!?") for m in _HANDED_REF_RE.finditer(t)]
+        found += [r for r in (_ref_of_url(m.group(0)) for m in _HANDED_URL_RE.finditer(t)) if r]
+        for ref in found:
+            key = ref[5:].split("/", 1)[-1]
+            if ref.endswith("/") or ref in out or key.startswith(_NOT_INPUT_PREFIXES):
+                continue
+            out.append(ref)
+            if len(out) >= _NODE_INPUT_REFS_MAX:
+                return out
+    return out
+
+
+def _record_node_inputs(plan_id: str, node_id: str, refs: list) -> None:
+    """Stamp ``inputRefs`` (what the node was handed) on its job-registry row. Overwritten by a retry, which is
+    handed the same inputs. Best effort; projects.lineageEdges only."""
+    if not (LINEAGE_EDGES and plan_id and node_id and refs):
+        return
+    try:
+        _job_table.update_item(
+            Key={"jobId": f"{plan_id}#{node_id}"},
+            UpdateExpression="SET inputRefs = :r",
+            ConditionExpression="attribute_exists(jobId)",
+            ExpressionAttributeValues={":r": list(refs)[:_NODE_INPUT_REFS_MAX]},
+        )
+    except Exception:  # noqa: BLE001 - lineage never blocks a dispatch
+        logger.debug("Plan %s: node %s input refs not recorded", plan_id, node_id, exc_info=True)
+
 
 def _plan_sk(plan_id: str) -> str:
     """Sort key of a plan's own row.
@@ -2561,11 +2721,16 @@ def _prepare_node_dispatch(session_id, plan_id, actor_id, node_def, all_nodes, n
         except Exception:
             dep_outputs = {}
 
-        prompt += _dependency_injection_text(node_def, dep_outputs, node_states, session_id, plan_id)
+        _dep_block = _dependency_injection_text(node_def, dep_outputs, node_states, session_id, plan_id)
+        prompt += _dep_block
         # Cross-plan (guided-mode phase handoff): resolve external_inputs against the
         # referenced prior-phase plan's manifest so a later phase gets the producer's
         # EXACT deliverable uris rather than the model reconstructing a wrong-uuid path.
-        prompt += _external_injection_text(node_def, session_id, plan_id)
+        _ext_block = _external_injection_text(node_def, session_id, plan_id)
+        prompt += _ext_block
+        if LINEAGE_EDGES:
+            _record_node_inputs(plan_id, node_id, handed_input_refs(
+                prompt, (node_def.get("config") or {}).get("arguments")))
 
     # Tier-1 error-aware self-correction (P2): on a retry, hand the Task Agent the exact
     # error from the prior attempt so it can correct the cause rather than repeat it.

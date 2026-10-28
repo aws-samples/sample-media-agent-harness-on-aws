@@ -46,6 +46,8 @@ import { ToolkitLookup, ToolkitLookupProps } from "./toolkit/toolkit-lookup";
 import { grantRenditionRead, HybridSearchRoleLookup } from "./toolkit/hybrid-search-role-lookup";
 import { AgentRegistryProvider } from "./distribution/agent-registry-resource";
 import { delegatedTokenIssuerFunctionName } from "./projects/projects-stack";
+import { addPreloadResource } from "./preload";
+import { PERSONAL_SAMPLES, PERSONAL_SAMPLES_DIR } from "./personal-samples";
 
 /**
  * Render per-category cutover flags as `CAPABILITY_SOURCE_*` env vars.
@@ -305,8 +307,8 @@ export class AgentInfraStack extends cdk.Stack {
     };
 
     // Runtime fan-out (map/gather) master switch. One context flag flips it on across
-    // the FOUR places that must agree — main agent (validator executability gate),
-    // planning + design agents (map/gather emission), and the plan-chainer Lambda
+    // the places that must agree — main agent (validator executability gate),
+    // the planning agent (map/gather emission in the fused DAG), and the plan-chainer Lambda
     // (runtime expansion). Off by default; enable with `-c dynamicFanoutEnabled=true`.
     const dynamicFanoutEnabled =
       this.node.tryGetContext("dynamicFanoutEnabled") === true ||
@@ -2789,6 +2791,13 @@ export class AgentInfraStack extends cdk.Stack {
         s3Allowlist: ingCfg.s3Allowlist ?? [],
         rebuildConcurrency: ingCfg.rebuildConcurrency ?? 8,
         orphanSweep: ingCfg.orphanSweep ?? true,
+        // projects.lineageEdges reaches every reader of INGESTION_CONFIG (the Main/Task runtimes via
+        // RuntimeConfigSecret, the proxy, the Asset_Service, Generated_Media). The key is written ONLY when on,
+        // so an off env's JSON — and every template that embeds it — is byte-identical.
+        ...(projectsCfg.lineageEdges ? { lineageEdges: true } : {}),
+        // Phase 1 entity-metadata workflows: like lineageEdges, the key is written ONLY when on, so an off
+        // env's JSON — and every template embedding it — stays byte-identical.
+        ...(ingCfg.entityMetadata ? { entityMetadata: true } : {}),
       });
 
       // Collect the ingestion Lambda sources. `agent/src/ingestion` and `agent/src/projects` are
@@ -2821,8 +2830,8 @@ export class AgentInfraStack extends cdk.Stack {
       // modules are stdlib-only (kms:Sign/Verify + jwslite).
       // These Lambdas decode USER uploads, so they take the advisory-free releases (pip-audit 2026-10):
       // pillow 13.0.0 (the runtime zip stays on 12.x only because strands-agents-tools requires
-      // pillow < 13) and pypdf 6.21.1 (also the dev-extra pin in agent/pyproject.toml).
-      const ingestionRequirements: string[] = ["pillow==13.0.0", "pypdf==6.21.1"];
+      // pillow < 13) and pypdf 6.21.2 (also the dev-extra pin in agent/pyproject.toml).
+      const ingestionRequirements: string[] = ["pillow==13.0.0", "pypdf==6.21.2"];
       const ingestionHash = crypto
         .createHash("sha256")
         .update(JSON.stringify({ ingestionRequirements, ingestionCode, v: "ingestion-p0-v2" }))
@@ -2905,12 +2914,28 @@ export class AgentInfraStack extends cdk.Stack {
               sessionsTableArn: sessionsTable.tableArn,
             }
           : undefined,
+        personalSamples: projectsCfg.ingestion.personalSamples ? PERSONAL_SAMPLES : undefined,
       });
       // The Asset_Service references the deploy-time zip by (bucket, key); make the nested stack wait
       // for the packager so the object exists before the function is created.
       ingestionStack.node.addDependency(ingestionZip);
       ingestionStack.node.addDependency(heroFrameZip);
       (this as { ingestionStack?: IngestionStack }).ingestionStack = ingestionStack;
+
+      // Personal samples: upload `infra/assets/samples/` (the demo tour's 0-demo.mp4 and its NOTICE) ONCE to the
+      // Ingest bucket under `samples/`; the Asset_Service copies them into each user's Personal project. Only
+      // these keys are touched: `prune: false` never deletes anything else under `samples/`, and the objects stay
+      // on a stack delete (users' copies are their own files). The bucket stays private (no new grant to it).
+      if (projectsCfg.ingestion.personalSamples) {
+        new s3deploy.BucketDeployment(this, "PersonalSamplesAsset", {
+          sources: [s3deploy.Source.asset(PERSONAL_SAMPLES_DIR)],
+          destinationBucket: skillsBucket,
+          destinationKeyPrefix: "samples/",
+          prune: false,
+          retainOnDelete: true,
+          memoryLimit: 512,
+        });
+      }
     }
 
     // Append-only `asset_events` audit history (`AssetAuditStack`, asset-lineage Phase 3 / D6): a
@@ -2971,7 +2996,7 @@ export class AgentInfraStack extends cdk.Stack {
     // Inter-runtime ARNs live in SSM parameters under this path (one per sub-runtime, written
     // AFTER the runtimes exist — see "Runtime ARN parameters" below), NOT in any runtime's env.
     // An env var holding `<other>.agentRuntimeArn` is a GetAtt, which made task wait for render and
-    // main wait for all four, serialising the runtime updates (render → task → main, ~4 min each).
+    // main wait for all the others, serialising the runtime updates (render → task → main, ~4 min each).
     // The path is a plain string, so neither this secret nor any runtime depends on a runtime.
     const runtimeArnParamPath = `/${projectName}-${envName}/runtime-arns`;
     const runtimeArnParamReadStatements = (): iam.PolicyStatement[] => [
@@ -3125,7 +3150,7 @@ export class AgentInfraStack extends cdk.Stack {
       })
     );
     // Bucket-wide read+write, DELIBERATELY left that way (asset-lineage Phase 3 narrowed the sandbox,
-    // the aws-mcp proxy and the planning/design runtimes instead). The Task Agent hosts the Lab
+    // the aws-mcp proxy and the planning runtime instead). The Task Agent hosts the Lab
     // service and the full tool set, so it legitimately writes `users/<actor>/{drafts,published}/*`
     // (every Lab CRUD), `artifacts/*` (the `artifact` tool, renders, imports), `projects/*` and
     // `plans/*`. Narrowing it would be a prefix list that is the whole bucket minus `skills/`, which
@@ -3461,6 +3486,9 @@ export class AgentInfraStack extends cdk.Stack {
         // asset-lineage Phase 3 (a): plan deliverables land under the plan's producing project, and
         // each node dispatch forwards that project so the node's own writes do too.
         ...(sessionOutputLayout === "project" ? { SESSION_OUTPUT_LAYOUT: "project" } : {}),
+        // projects.lineageEdges: each node's job row records what it was handed (`inputRefs`) and what it
+        // made (`outputs`), which Generated_Media turns into lineage edges. Absent (off) everywhere else.
+        ...(props.envConfig?.projects?.lineageEdges ? { LINEAGE_EDGES: "true" } : {}),
       },
     });
 
@@ -3612,41 +3640,6 @@ export class AgentInfraStack extends cdk.Stack {
     skillsBucket.grantPut(planningAgentRuntime, "plans/*");
     planStateTable.grantReadWriteData(planningAgentRuntime);
 
-    // ---- Design Agent Runtime ----
-    const designAgentRuntime = new agentcore.Runtime(this, "DesignAgentRuntime", {
-      runtimeName: `${projectName.replace(/-/g, "_")}_design_agent`,
-      agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromS3(
-        {
-          bucketName: agentCodeBucket.bucketName,
-          objectKey: zipObjectKey,
-        },
-        agentcore.AgentCoreRuntime.PYTHON_3_13,
-        ["opentelemetry-instrument", "design_agent.py"],
-      ),
-      protocolConfiguration: agentcore.ProtocolType.HTTP,
-      networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingPublicNetwork(),
-      environmentVariables: {
-        AWS_REGION: this.region,
-        SKILLS_S3_BUCKET: skillsBucket.bucketName,
-        PLAN_STATE_TABLE: planStateTable.tableName,
-        DYNAMIC_FANOUT_ENABLED: dynamicFanoutFlag,
-      },
-    });
-    designAgentRuntime.node.addDependency(zipPackager);
-    designAgentRuntime.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources: [
-          "arn:aws:bedrock:*::foundation-model/*",
-          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
-        ],
-      })
-    );
-    // Same shape as the Planning Agent: no tools, one write — `plans/<session>/design/output.json`.
-    skillsBucket.grantRead(designAgentRuntime);
-    skillsBucket.grantPut(designAgentRuntime, "plans/*");
-    planStateTable.grantReadWriteData(designAgentRuntime);
-
     // ---- Render Agent Runtime ----
     //
     // Dedicated runtime for artifact rendering (artifact-render-agent spec,
@@ -3729,8 +3722,8 @@ export class AgentInfraStack extends cdk.Stack {
         AWS_REGION: this.region,
         DEPLOY_ENV: envName,
         BYPASS_TOOL_CONSENT: "true",
-        // The sub-agent ARNs (TASK_/PLANNING_/DESIGN_/RENDER_AGENT_RUNTIME_ARN) are deliberately
-        // NOT here. As env they were GetAtts that made this runtime wait for all four sub-runtimes
+        // The sub-agent ARNs (TASK_/PLANNING_/RENDER_AGENT_RUNTIME_ARN) are deliberately
+        // NOT here. As env they were GetAtts that made this runtime wait for all three sub-runtimes
         // to update first; they are SSM parameters under RUNTIME_ARN_PARAM_PATH instead (written
         // after the runtimes, below), hydrated by runtime_config_bootstrap.py at startup and
         // re-read lazily at call time by agent/src/runtime_arns.py.
@@ -3754,14 +3747,14 @@ export class AgentInfraStack extends cdk.Stack {
     agentRuntime.node.addDependency(zipPackager);
     // Read the externalized runtime config at startup (secretsmanager:GetSecretValue + kms:Decrypt).
     runtimeConfigSecret.grantRead(agentRuntime);
-    // Read the inter-runtime ARN parameters (all four sub-agents).
+    // Read the inter-runtime ARN parameters (all sub-agents).
     for (const s of runtimeArnParamReadStatements()) agentRuntime.addToRolePolicy(s);
 
     // ---- Runtime ARN parameters ----
     // One SSM parameter per sub-runtime ARN, named for the env var the agent reads
     // (`<path>/TASK_AGENT_RUNTIME_ARN`, ...). These depend on the runtimes; NO runtime depends on
     // them (readers get only the string path via RuntimeConfigSecret and a string-ARN grant), so
-    // all six runtimes update in parallel instead of render → task → main. Consequence: on a
+    // all sub-runtimes update in parallel instead of render → task → main. Consequence: on a
     // brand-new environment a runtime can start before these exist, so the agent resolves them
     // lazily at call time as well as at startup (agent/src/runtime_arns.py).
     // `infra/test/runtime-parallel.synth.test.ts` fails if a runtime → runtime edge comes back.
@@ -3771,7 +3764,6 @@ export class AgentInfraStack extends cdk.Stack {
       ["AGENT_RUNTIME_ARN", agentRuntime],
       ["TASK_AGENT_RUNTIME_ARN", taskAgentRuntime],
       ["PLANNING_AGENT_RUNTIME_ARN", planningAgentRuntime],
-      ["DESIGN_AGENT_RUNTIME_ARN", designAgentRuntime],
       ["RENDER_AGENT_RUNTIME_ARN", renderAgentRuntime],
     ];
     for (const [envVarName, rt] of runtimeArnParams) {
@@ -3786,11 +3778,11 @@ export class AgentInfraStack extends cdk.Stack {
     // the env-var payload at 1536 bytes; the first fan-out failed on task/main for exactly that
     // reason. Their bulk config now comes from RuntimeConfigSecret (see above), so every env fits
     // (main ~741B, task ~348B). Measured in staging: platform cold start main V1 ≈8.9s vs task V2
-    // ≈0.9s, planning V1 6.5–7.8s → V2 ≈2.0s. Declared explicitly because task/planning/design/mcp
+    // ≈0.9s, planning V1 6.5–7.8s → V2 ≈2.0s. Declared explicitly because task/planning/mcp
     // were left on V2 by the failed fan-out while the template said nothing — drift a fresh env
     // (prod) would not reproduce. PlatformVersion is a non-replacement property: in-place, ARNs
     // preserved, reversible. Render carries its own override above.
-    for (const rt of [mcpRuntime, taskAgentRuntime, planningAgentRuntime, designAgentRuntime, agentRuntime]) {
+    for (const rt of [mcpRuntime, taskAgentRuntime, planningAgentRuntime, agentRuntime]) {
       (rt.node.defaultChild as cdk.CfnResource).addPropertyOverride("PlatformVersion", "V2");
     }
 
@@ -3850,12 +3842,11 @@ export class AgentInfraStack extends cdk.Stack {
     // into a paged CloudWatch alarm on the existing resilience SNS topic.
     //
     // Every runtime publishes to ONE namespace+metric (no dimensions), so the
-    // filters aggregate and a single alarm covers all six runtimes.
+    // filters aggregate and a single alarm covers all five runtimes.
     const importErrorRuntimes: { id: string; runtime: agentcore.Runtime }[] = [
       { id: "Main", runtime: agentRuntime },
       { id: "Task", runtime: taskAgentRuntime },
       { id: "Planning", runtime: planningAgentRuntime },
-      { id: "Design", runtime: designAgentRuntime },
       { id: "Render", runtime: renderAgentRuntime },
       { id: "Mcp", runtime: mcpRuntime },
     ];
@@ -4584,6 +4575,42 @@ export class AgentInfraStack extends cdk.Stack {
     // external invoke config resolution (custom-agents seam fix). Read-only:
     // the runtime never writes lab assets.
     labArtifactsBucket.grantRead(taskAgentRuntime);
+
+    // ---- Deploy-time preload (design docs/design-2026-10-27-admin-preload-and-preanalyzed-ingest.md) ----
+    //
+    // Gated: only created when `envConfig.preload` is set (operator passed `-c ownerEmail=…` and/or
+    // `-c preloadPath=…`) AND projects/ingestion exist (the preload seeds Project rows and queues assets
+    // the ingestion pipeline then analyzes). With no preload context the construct is not instantiated at
+    // all, so a normal deploy is byte-identical and nothing extra runs. When configured but no package is
+    // present in the Ingest bucket, the Lambda itself no-ops (SUCCESS); a package present without an
+    // ownerEmail fails the deploy loudly (both decided in `preload.handler.locate_package`). The Ingest
+    // bucket is the shared `skillsBucket`; skills publish to the Lab asset-index table + artifacts bucket
+    // exactly as a user's own private Lab publish would.
+    if (props.envConfig?.preload && projectsStack && ingestionStack) {
+      const preload = addPreloadResource(this, "PreloadFn", {
+        projectName,
+        envName,
+        ingestBucket: skillsBucket,
+        projectsTable: projectsStack.projectsTable,
+        assetIndexTable: labAssetIndexTable,
+        artifactsBucket: labArtifactsBucket,
+        userPool,
+        ownerEmail: props.envConfig.preload.ownerEmail,
+        preloadPath: props.envConfig.preload.preloadPath,
+        // Re-run trigger: an operator nonce wins (manual same-commit redeploy after uploading a package),
+        // else the app version, which CI changes every build. Without either, the handler runs on first
+        // create only. This is the fix for the former constant salt that never re-ran on redeploy.
+        reinvokeSalt: props.envConfig.preload.preloadNonce ?? props.appVersion,
+        // The no-Docker zip packager adds PyYAML (the Lab skill validator needs it; the managed runtime lacks it).
+        packaging: {
+          codeBucket: agentCodeBucket,
+          packagerServiceToken: packagerProvider.serviceToken,
+          baseCode: agentCode,
+        },
+      });
+      // Run only once the ingestion pipeline (sweep + tick) can ingest what the preload queues.
+      preload.node.addDependency(ingestionStack);
+    }
 
     // ================================================================
     // Capability control plane — AWS Agent Registry projection
@@ -6105,11 +6132,6 @@ export class AgentInfraStack extends cdk.Stack {
     new cdk.CfnOutput(this, "PlanningAgentRuntimeArn", {
       value: planningAgentRuntime.agentRuntimeArn,
       description: "Planning agent runtime ARN",
-    });
-
-    new cdk.CfnOutput(this, "DesignAgentRuntimeArn", {
-      value: designAgentRuntime.agentRuntimeArn,
-      description: "Design agent runtime ARN",
     });
 
     new cdk.CfnOutput(this, "RenderAgentRuntimeArn", {

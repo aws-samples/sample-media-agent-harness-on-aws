@@ -25,8 +25,8 @@ AGENT = Path(__file__).resolve().parents[1]
 SRC = AGENT / "src"
 STACK = AGENT.parent / "infra" / "lib" / "agent-infra-stack.ts"
 
-# The five AgentCore runtimes' entrypoints (`opentelemetry-instrument <file>` in the stack).
-ENTRYPOINTS = ("main.py", "task_agent.py", "planning_agent.py", "design_agent.py", "render_agent.py")
+# The AgentCore runtimes' entrypoints (`opentelemetry-instrument <file>` in the stack).
+ENTRYPOINTS = ("main.py", "task_agent.py", "planning_agent.py", "render_agent.py")
 
 
 def _lambda_only_packages() -> set[str]:

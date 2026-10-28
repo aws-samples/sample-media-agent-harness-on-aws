@@ -407,7 +407,9 @@ def make_project_tools(project_id: str, *, function_name: Optional[str] = None, 
 
         To show a project IMAGE inside your reply instead -- a diagram or still beside the text it explains --
         do not call this; write `![<caption>](asset:<asset_id>)` in your reply. It renders inline, and the user
-        can expand it to the Renderer. Keep video, timelines and analysis results in the Renderer.
+        can expand it to the Renderer. An image you saved in THIS turn has no asset id yet: write its output file
+        name instead, `![<caption>](asset:<file name>)` (it resolves in this chat's output folder). Keep video,
+        timelines and analysis results in the Renderer.
 
         Args:
             asset_id: The asset's id from project_status, e.g. "image:6f1c...".

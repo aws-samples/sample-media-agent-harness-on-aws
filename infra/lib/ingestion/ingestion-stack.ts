@@ -72,6 +72,12 @@ export interface IngestionStackProps extends cdk.NestedStackProps {
 
   // ---- INGESTION_CONFIG JSON (also set directly on the Asset_Service env for P0) ----
   readonly ingestionConfigJson: string;
+  /**
+   * Personal samples (`infra/lib/personal-samples.ts`): the Asset_Service copies each into a user's Personal
+   * project. Present → `PERSONAL_SAMPLES` env + read of exactly these `samples/` keys + write of exactly
+   * `projects/*\/<fileName>`. Absent → neither.
+   */
+  readonly personalSamples?: ReadonlyArray<{ key: string; fileName: string; contentType: string; version: string }>;
 
   /**
    * The environment's M2C OAuth client and proxy (output) bucket (`envConfig.media`). When every field is
@@ -235,11 +241,32 @@ export class IngestionStack extends cdk.NestedStack {
         // P0 reads INGESTION_CONFIG from its own env (Lambda env has no V2 1536-byte cap). It is ALSO
         // in RuntimeConfigSecret (design §20) for the later pipeline Lambdas.
         INGESTION_CONFIG: props.ingestionConfigJson,
+        ...(props.personalSamples?.length ? { PERSONAL_SAMPLES: JSON.stringify(props.personalSamples) } : {}),
         ...(props.runtimeConfigSecretArn
           ? { RUNTIME_CONFIG_SECRET_ARN: props.runtimeConfigSecretArn }
           : {}),
       },
     });
+
+    // Personal samples: the Asset_Service copies each shared `samples/` object into a user's Personal project
+    // (CopyObject = GetObject on the source + PutObject on the destination). Both grants name exactly the
+    // configured keys — never the whole bucket and never other project bytes.
+    if (props.personalSamples?.length) {
+      this.assetServiceRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "IngestBucketReadPersonalSamples",
+          actions: ["s3:GetObject"],
+          resources: props.personalSamples.map((s) => `${ingestArn}/${s.key}`),
+        }),
+      );
+      this.assetServiceRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "IngestBucketWritePersonalSampleCopies",
+          actions: ["s3:PutObject"],
+          resources: props.personalSamples.map((s) => `${ingestArn}/projects/*/${s.fileName}`),
+        }),
+      );
+    }
 
     // Resource policy: IAM limits who may invoke the writer (design §2). The identity grants on these
     // caller roles are added by the parent.

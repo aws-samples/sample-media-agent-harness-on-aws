@@ -3,17 +3,17 @@
 Fan-out failed in production because the map pointed straight at an async producer whose output
 is an S3 pointer, forcing the runtime to guess (the deleted `_distinct_speakers` heuristics). The
 durable fix moves list-derivation into a planner-emitted collector node and makes the map runtime
-dumb — so the guidance the design/planning agents carry MUST steer toward that shape. These are
-source-content assertions (the prompts are built at import behind a feature flag), matching the
-`test_mirror_env` pattern.
+dumb — so the planner guidance (the DAG design rules now live in `prompts/design.py`, bundled into
+the fused planning call) MUST steer toward that shape. These are source-content assertions (the
+prompts are built at import behind a feature flag), matching the `test_mirror_env` pattern.
 """
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 
 
-def test_design_agent_teaches_collector_fanout():
-    src = ((_SRC / "design_agent.py").read_text() + (_SRC / "prompts" / "design.py").read_text())
+def test_design_rules_teach_collector_fanout():
+    src = (_SRC / "prompts" / "design.py").read_text()
     low = src.lower()
     assert "collector" in low                          # the concept is named
     assert "over.from" in src                          # map references a node, resolved dumbly
@@ -41,8 +41,8 @@ def test_planning_agent_diarize_reads_original_not_sibling_extract_output():
     assert "TWO INDEPENDENT sub-goals" in src
 
 
-def test_design_agent_teaches_author_then_format_for_large_pdf():
-    src = ((_SRC / "design_agent.py").read_text() + (_SRC / "prompts" / "design.py").read_text())
+def test_design_rules_teach_author_then_format_for_large_pdf():
+    src = (_SRC / "prompts" / "design.py").read_text()
     assert "AUTHOR node" in src and "FORMAT node" in src   # the two-node split
     assert "BY REFERENCE" in src                           # renderer loads text by ref, not inline
     assert "never receive the document inline" in src.lower()

@@ -52,7 +52,6 @@ describe('Runtime V2 env-var budget (1536-byte cap)', () => {
     'RenderAgentRuntime',
     'TaskAgentRuntime',
     'PlanningAgentRuntime',
-    'DesignAgentRuntime',
     'AgentRuntime',
   ];
 
@@ -81,7 +80,7 @@ describe('Runtime V2 env-var budget (1536-byte cap)', () => {
     // what made render → task → main update one after another. They are SSM parameters now.
     const keys = keysOf(runtimeEnvBlock(id));
     for (const arn of ['TASK_AGENT_RUNTIME_ARN', 'PLANNING_AGENT_RUNTIME_ARN',
-      'DESIGN_AGENT_RUNTIME_ARN', 'RENDER_AGENT_RUNTIME_ARN']) {
+      'RENDER_AGENT_RUNTIME_ARN']) {
       expect(keys, `${id} must not inline ${arn}`).not.toContain(arn);
     }
   });
@@ -90,7 +89,7 @@ describe('Runtime V2 env-var budget (1536-byte cap)', () => {
     // Undeclared V2 was drift left by the failed fan-out; a fresh env (prod) would get V1.
     expect(code).toMatch(/renderAgentRuntime\.node\.defaultChild[\s\S]{0,120}"PlatformVersion",\s*"V2"/);
     expect(code).toMatch(
-      /for \(const rt of \[mcpRuntime, taskAgentRuntime, planningAgentRuntime, designAgentRuntime, agentRuntime\]\)[\s\S]{0,160}"PlatformVersion", "V2"/,
+      /for \(const rt of \[mcpRuntime, taskAgentRuntime, planningAgentRuntime, agentRuntime\]\)[\s\S]{0,160}"PlatformVersion", "V2"/,
     );
   });
 });

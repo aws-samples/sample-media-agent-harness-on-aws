@@ -20,6 +20,7 @@ from moto import mock_aws
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from ingestion import collection, contract, records  # noqa: E402
+from ingestion import reducer  # noqa: E402
 from ingestion import workflows as W  # noqa: E402
 from ingestion.handlers.dispatcher import Dispatcher, execution_name  # noqa: E402
 from ingestion.handlers.tick import Deps, Tick  # noqa: E402
@@ -52,6 +53,7 @@ class FakeM2C:
         self.indexed: list[dict] = []
         self.collections: list[dict] = []
         self.s3 = None
+        self.out = dict(OUT)  # step -> (label, key, fixture); extended by the entity-metadata test
         self.image_answer = json.dumps({"description": "A red bicycle against a white wall.",
                                         "objects": ["bicycle"], "entities": ["Acme"]})
 
@@ -99,7 +101,7 @@ class FakeM2C:
                 key = f"bedrock-inference/{uuid.uuid4()}/response.jsonl"
                 self.s3.put_object(Bucket=M2C, Key=key, Body=json.dumps(line).encode())
                 return {"status": "SUCCEEDED", "outputs": [{"label": "response", "uri": f"s3://{M2C}/{key}"}]}
-            label, key, _ = OUT[step]
+            label, key, _ = self.out[step]
             return {"status": "SUCCEEDED", "output_s3_prefix": f"s3://{M2C}/{step}-run",
                     "outputs": [{"label": "other", "uri": f"s3://{M2C}/x"}, {"label": label, "uri": f"s3://{M2C}/{key}"}]}
         if name == "hybrid-search-admin___delete_collection":
@@ -162,7 +164,7 @@ def stream_event(aids):
 
 
 class Harness:
-    def __init__(self, store, s3, m2c):
+    def __init__(self, store, s3, m2c, entity_metadata=False):
         self.clock = [1_000_000.0]
         self.store, self.m2c, self.sfn = store, m2c, FakeSFN()
         m2c.s3 = s3
@@ -170,7 +172,8 @@ class Harness:
         self.dispatcher = Dispatcher(store, self.sfn, "arn:aws:states:us-west-2:1:stateMachine:ai",
                                      clock=lambda: self.clock[0])
         self.tick = Tick(Deps(store=store, m2c=m2c, s3=s3, ingest_bucket=INGEST,
-                              dispatch=self.dispatcher.dispatch_project, clock=lambda: self.clock[0]))
+                              dispatch=self.dispatcher.dispatch_project, clock=lambda: self.clock[0],
+                              cfg=reducer.Config(entity_metadata=entity_metadata)))
 
     def drive(self, max_ticks=200):
         """Run every started execution's tick loop until all are done (round robin, like parallel SFNs)."""
@@ -259,6 +262,150 @@ def test_video_reaches_indexed_with_real_outputs(env):
     # Idle now: the sweep clears the SCHED marker.
     h.dispatcher.handle({})
     assert store.scheduled_projects() == []
+
+
+def _entity_fixtures(s3):
+    """Upload the three entity-metadata workflow output fixtures to the fake M2C bucket; return the ``out`` map."""
+    ent_out = {
+        W.FACE_RECOGNITION: ("face-metadata", "face/facemetadata.json", "entities/facemetadata.json"),
+        W.PROGRAM_STRUCTURE: ("structure", "psa/structure.json", "entities/structure.json"),
+        W.CAST_RESOLUTION: ("persons", "cast/persons.json", "entities/persons.json"),
+    }
+    for _label, key, fx in ent_out.values():
+        s3.put_object(Bucket=M2C, Key=key, Body=(FX.parent / fx).read_bytes())
+    return ent_out
+
+
+def _scene_entities(s3, row):
+    """Every scene doc's named_entities string, read back from the stored Document_Record."""
+    body = s3.get_object(Bucket=INGEST, Key=row["doc"]["recordKey"])["Body"].read().decode()
+    out = []
+    for d in records.parse(body):
+        if d["doc_type"] == "scene":
+            out.append(next((c["value"] for c in d["content"] if c["field"] == "named_entities"), ""))
+    return out
+
+
+def test_video_with_entity_metadata_folds_names_into_scene_named_entities(env):
+    store, s3 = env
+    # The entity-metadata workflows' outputs (real staging facemetadata/structure + the cast describe_tool
+    # contract example) uploaded to the fake M2C bucket.
+    m2c = FakeM2C()
+    m2c.out.update(_entity_fixtures(s3))
+    h = Harness(store, s3, m2c, entity_metadata=True)
+    (aid,) = register(store)
+    h.dispatcher.handle(stream_event([aid]))
+    h.drive()
+
+    row = h.row(aid)
+    assert row["status"] == "indexed", row.get("failure")
+    # Phase 1 adds NO new doc types / no new scope — the indexed document counts match the flag-off run.
+    assert row["doc"]["counts"] == {"shot": 15, "scene": 15, "utterance": 11, "topic": 1}
+    # The three workflows were actually submitted (right tool names).
+    called = {name for name, _ in m2c.calls}
+    assert {"face-recognition___recognize_faces", "program-structure-analysis___analyze_program_structure",
+            "cast-resolution___resolve_cast"} <= called
+    # The entities are now SEARCHABLE: they live in the scene docs' named_entities, NOT an asset blob.
+    assert "ontology" not in row and "entities" not in row
+    scene_ents = _scene_entities(s3, row)
+    joined = " || ".join(scene_ents)
+    # The resolved celebrity identity, a cast actor name, and a program-segment label all folded (the
+    # names whose appearance spans fall within this 52 s clip's scene timeline).
+    assert "Kevin Kilner" in joined          # face-recognition identity
+    assert "Miriam Okafor" in joined         # cast-resolution actor name
+    assert any(("office" in e or "beach coast" in e) for e in scene_ents)  # program-structure sequence setting
+    # Every enriched scene doc still passes the contract (named_entities is a valid scene field).
+    body = s3.get_object(Bucket=INGEST, Key=row["doc"]["recordKey"])["Body"].read().decode()
+    contract.check(records.parse(body), aid, 10**9)
+    # A scene only carries names whose appearance span overlaps it — not every scene gets every name.
+    assert any(e == "" or "Kevin Kilner" not in e for e in scene_ents)
+    counts_match_rows(h)
+
+
+def test_video_without_entity_metadata_scene_docs_are_unchanged(env):
+    store, s3 = env
+    # Baseline: the flag-OFF run's stored record digest (no folding, no entity inputs).
+    base = FakeM2C()
+    hb = Harness(store, s3, base)
+    (aid0,) = register(store)
+    hb.dispatcher.handle(stream_event([aid0]))
+    hb.drive()
+    base_row = hb.row(aid0)
+    base_scene_ents = _scene_entities(s3, base_row)
+
+    # Even with the fixtures present, flag OFF means the workflows never run and the scene docs are identical.
+    m2c = FakeM2C()
+    m2c.out.update(_entity_fixtures(s3))
+    h = Harness(store, s3, m2c)  # flag OFF (default)
+    (aid,) = register(store)
+    h.dispatcher.handle(stream_event([aid]))
+    h.drive()
+    row = h.row(aid)
+    assert row["status"] == "indexed", row.get("failure")
+    assert "ontology" not in row and "entities" not in row
+    # Identical scene named_entities as the flag-off baseline (the fold is a pure no-op when off; the
+    # document digests themselves differ only because the two assets have different asset ids).
+    assert _scene_entities(s3, row) == base_scene_ents
+    # None of the entity-metadata workflows were submitted.
+    called = {name for name, _ in m2c.calls}
+    assert not any("face-recognition" in c or "program-structure" in c or "cast-resolution" in c
+                   for c in called)
+    counts_match_rows(h)
+
+
+def test_face_failure_still_indexes_with_cast_blocked_and_other_names_still_folded(env):
+    # A terminal face-recognition failure is best-effort: the asset still reaches `indexed`, cast-resolution
+    # is SKIPPED (blocked on face), and the program-structure names it DID get still fold into the scenes.
+    store, s3 = env
+    m2c = FakeM2C(fail=W.FACE_RECOGNITION)
+    m2c.out.update(_entity_fixtures(s3))
+    h = Harness(store, s3, m2c, entity_metadata=True)
+    (aid,) = register(store)
+    h.dispatcher.handle(stream_event([aid]))
+    h.drive()
+
+    row = h.row(aid)
+    assert row["status"] == "indexed", row.get("failure")
+    assert row["doc"]["counts"] == {"shot": 15, "scene": 15, "utterance": 11, "topic": 1}
+    steps = row["steps"]
+    assert steps[W.FACE_RECOGNITION]["status"] == "FAILED"
+    assert "exploded" in steps[W.FACE_RECOGNITION]["error"]  # per-step error persisted for the panel
+    assert steps[W.CAST_RESOLUTION]["status"] == reducer.SKIPPED
+    assert W.FACE_RECOGNITION in steps[W.CAST_RESOLUTION]["error"]  # reason names the blocking step
+    assert steps[W.PROGRAM_STRUCTURE]["status"] == "SUCCEEDED"
+    # cast-resolution never submitted; program-structure was.
+    called = {name for name, _ in m2c.calls}
+    assert "cast-resolution___resolve_cast" not in called
+    assert "program-structure-analysis___analyze_program_structure" in called
+    # No people/cast names (those workflows did not succeed), but the program-structure labels still folded.
+    joined = " || ".join(_scene_entities(s3, row))
+    assert "Kevin Kilner" not in joined and "Miriam Okafor" not in joined
+    assert any(("office" in e or "beach coast" in e or "blackframes" in e) for e in _scene_entities(s3, row))
+    assert "ontology" not in row and "entities" not in row
+    counts_match_rows(h)
+
+
+def test_program_structure_failure_still_indexes_with_people_and_cast_folded(env):
+    # The independent program-structure step fails; face + cast succeed → indexed, their names still fold,
+    # no segment labels, asset never fails.
+    store, s3 = env
+    m2c = FakeM2C(fail=W.PROGRAM_STRUCTURE)
+    m2c.out.update(_entity_fixtures(s3))
+    h = Harness(store, s3, m2c, entity_metadata=True)
+    (aid,) = register(store)
+    h.dispatcher.handle(stream_event([aid]))
+    h.drive()
+
+    row = h.row(aid)
+    assert row["status"] == "indexed", row.get("failure")
+    assert row["steps"][W.PROGRAM_STRUCTURE]["status"] == "FAILED"
+    joined = " || ".join(_scene_entities(s3, row))
+    assert "Kevin Kilner" in joined and "Miriam Okafor" in joined
+    # program-structure labels absent (that step failed); people/cast still fold.
+    assert not any(("office" in e or "beach coast" in e or "blackframes" in e)
+                   for e in _scene_entities(s3, row))
+    assert "ontology" not in row and "entities" not in row
+    counts_match_rows(h)
 
 
 def test_five_slots_then_the_rest_start_in_order(env):

@@ -17,6 +17,11 @@ FRAME_CAPTURE = "frame capture"
 ENRICHMENT = "shot-metadata-enrichment"
 CONVERSATION_ANALYSIS = "conversation-analysis"
 IMAGE_DESCRIPTION = "image description"
+# Entity-metadata workflows (Phase 1, flag-gated): their outputs are folded into the scene documents'
+# searchable ``named_entities``, not stored as a side-channel asset blob.
+FACE_RECOGNITION = "face-recognition"            # Person identities (incl. celebrity recognition)
+PROGRAM_STRUCTURE = "program-structure-analysis"  # Program elements / segments
+CAST_RESOLUTION = "cast-resolution"              # Characters (actor -> role)
 
 TERMINAL = frozenset({"SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"})
 UNSUCCESSFUL = frozenset({"FAILED", "TIMED_OUT", "ABORTED"})
@@ -46,6 +51,15 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
                                         "conversation-analysis___get_job_status", ("analysis",)),
     IMAGE_DESCRIPTION: WorkflowSpec(IMAGE_DESCRIPTION, "bedrock-inference___run_inference",
                                     "bedrock-inference___get_job_status", ("response",)),
+    # Entity-metadata workflows. Tool names, args and output labels verified live against the staging M2C
+    # gateway target config + describe_tool contracts (docs/entity-metadata-workflows.md). Only the
+    # one labelled output each stage READS is declared here (mirrors the other specs).
+    FACE_RECOGNITION: WorkflowSpec(FACE_RECOGNITION, "face-recognition___recognize_faces",
+                                   "face-recognition___get_job_status", ("face-metadata",)),
+    PROGRAM_STRUCTURE: WorkflowSpec(PROGRAM_STRUCTURE, "program-structure-analysis___analyze_program_structure",
+                                    "program-structure-analysis___get_job_status", ("structure",)),
+    CAST_RESOLUTION: WorkflowSpec(CAST_RESOLUTION, "cast-resolution___resolve_cast",
+                                  "cast-resolution___get_job_status", ("persons",)),
 }
 IMAGE_RENDITION = "image rendition"  # done in IngestTick itself (Pillow), not an M2C workflow
 DOCUMENT_EXTRACT = "document extract"  # done in IngestTick itself (pypdf), not an M2C workflow
@@ -96,6 +110,50 @@ def enrichment_args(shots_run_prefix: str, transcript_uri: Optional[str] = None,
 
 def conversation_analysis_args(transcript_uri: str, token: Optional[str] = None) -> dict:
     return _with_token({"transcript_s3uri": transcript_uri}, token)
+
+
+# --------------------------------------------------------------------------- entity metadata (Phase 1)
+def face_recognition_args(source_uri: str, token: Optional[str] = None) -> dict:
+    """face-recognition needs only the source URI (``asset_s3uri``); it runs its own frame extraction.
+
+    ``celebrity_recognition`` defaults true on the tool, so celebrity naming happens without passing it.
+    No ``use_batch`` (this tool does not take one).
+    """
+    return _with_token({"asset_s3uri": source_uri}, token)
+
+
+def program_structure_args(shots_run_prefix: str, shot_metadata_run_prefix: str,
+                           conversation_run_prefix: Optional[str] = None,
+                           transcript_uri: Optional[str] = None, token: Optional[str] = None) -> dict:
+    """``shots_run_prefix`` and ``shot_metadata_run_prefix`` are REQUIRED run prefixes (no trailing slash).
+
+    ``mode`` is left to the tool's ``auto`` default. Conversation-analysis + transcript widen the
+    products (news detection, gap map) and are passed only when the source had speech. No ``use_batch``.
+    """
+    args: dict = {"shot_segmentation_s3uri": shots_run_prefix.rstrip("/"),
+                  "shot_metadata_s3uri": shot_metadata_run_prefix.rstrip("/")}
+    if conversation_run_prefix:
+        args["conversation_analysis_s3uri"] = conversation_run_prefix.rstrip("/")
+    if transcript_uri:
+        args["transcript_s3uri"] = transcript_uri
+    return _with_token(args, token)
+
+
+def cast_resolution_args(face_run_prefix: str, shots_run_prefix: str, shot_metadata_run_prefix: str,
+                         diarization_run_prefix: Optional[str] = None, token: Optional[str] = None) -> dict:
+    """Bind identities into person/character entities. All inputs are sibling RUN PREFIXES.
+
+    face-recognition is the always-present identity source for video; shot-segmentation is REQUIRED for
+    the on-screen text reads that yield character/cast pairs, and shot-metadata supplies overlay-text
+    names. speech-diarization is added only when the source had speech. ``use_batch``/``read_onscreen_text``
+    are left to the tool's defaults (true), so character pairs and batch pricing apply.
+    """
+    args: dict = {"face_recognition_s3uri": face_run_prefix.rstrip("/"),
+                  "shot_segmentation_s3uri": shots_run_prefix.rstrip("/"),
+                  "shot_metadata_s3uri": shot_metadata_run_prefix.rstrip("/")}
+    if diarization_run_prefix:
+        args["speech_diarization_s3uri"] = diarization_run_prefix.rstrip("/")
+    return _with_token(args, token)
 
 
 # speech-diarization's failure text for a source with no decodable audio stream. Matched so a silent video is

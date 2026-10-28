@@ -182,6 +182,69 @@ def test_entities_normalized():
     assert D.clean_entities([" A,  B ", "a b", "", "  ", "C", 5]) == "A B, C"
 
 
+# ----------------------------------------------- entity-metadata fold into scene named_entities (overlap)
+def _scene_entities(res):
+    """(start_ms, end_ms) -> the scene doc's named_entities string ("" when absent)."""
+    out = {}
+    for d in res.documents:
+        if d["doc_type"] == "scene":
+            out[(d["start_ms"], d["end_ms"])] = next(
+                (c["value"] for c in d["content"] if c["field"] == "named_entities"), "")
+    return out
+
+
+def _M(name, s, e):
+    return A.EntityMentionIn(name, s, e)
+
+
+def test_entity_fold_appends_only_names_overlapping_the_scene_span():
+    scenes = [_scene(0, 10), _scene(10, 20)]
+    res = D.build_video("video:x", [], scenes, [], [], 100,
+                        people=[_M("Kevin Kilner", 5, 8)],          # overlaps [0,10) only
+                        cast=[_M("Det. Rios", 12, 15), _M("Tomas Vega", 12, 15)],  # [10,20) only
+                        segments=[_M("office", 0, 20)])             # overlaps both
+    ents = _scene_entities(res)
+    assert ents[(0, 10)] == "Kevin Kilner, office"
+    assert ents[(10, 20)] == "Det. Rios, Tomas Vega, office"
+
+
+def test_entity_fold_touching_spans_do_not_overlap():
+    # [0,10) and a mention at [10,20): zero overlap (< 1 ms), the same rule _best_overlap uses.
+    res = D.build_video("video:x", [], [_scene(0, 10)], [], [], 100, people=[_M("Edge", 10, 20)])
+    assert _scene_entities(res)[(0, 10)] == ""
+
+
+def test_entity_fold_preserves_enrichment_entities_and_dedupes_case_insensitively():
+    scenes = [_scene(0, 10, entities=("Acme", "Bob"))]
+    res = D.build_video("video:x", [], scenes, [], [], 100,
+                        people=[_M("acme", 1, 9)],          # case-insensitive duplicate of "Acme"
+                        cast=[_M("Carol", 1, 9)])
+    # existing enrichment entities kept first (first casing wins), new name appended, dup dropped.
+    assert _scene_entities(res)[(0, 10)] == "Acme, Bob, Carol"
+
+
+def test_entity_fold_off_is_byte_identical_to_no_entity_args():
+    scenes = [_scene(0, 10, entities=("Acme",)), _scene(10, 20)]
+    shots = [ShotIn(0, 10, "s3://b/k.jpg")]
+    base = D.build_video("video:x", shots, scenes, [], [], 100)
+    # 1. empty entity lists == omitting them entirely
+    empty = D.build_video("video:x", shots, scenes, [], [], 100, people=[], cast=[], segments=[])
+    assert empty.documents == base.documents
+    # 2. mentions that overlap NO scene leave the documents byte-identical too
+    none_overlap = D.build_video("video:x", shots, scenes, [], [], 100,
+                                 people=[_M("Nobody", 500, 600)])
+    assert none_overlap.documents == base.documents
+
+
+def test_entity_fold_enriched_docs_pass_the_contract():
+    scenes = [_scene(0, 10, entities=("Acme",)), _scene(10, 20)]
+    res = D.build_video("video:x", [ShotIn(0, 10, "s3://b/k.jpg")], scenes, [], [], 100,
+                        people=[_M("Kevin Kilner", 1, 9)], cast=[_M("Det. Rios", 11, 19)],
+                        segments=[_M("end credits", 0, 20)])
+    contract.check(res.documents, "video:x", 100)  # raises on any violation
+    assert "Kevin Kilner" in _scene_entities(res)[(0, 10)]
+
+
 def test_utterance_parents_greatest_overlap_ties_earlier_start():
     scenes = [_scene(0, 10), _scene(10, 20)]
     topics = [TopicIn(0, 15, "t1"), TopicIn(5, 20, "t2")]

@@ -82,9 +82,10 @@ REPORT_GOAL = ("Phase 3 report for nba.mp4: one node sg5_compliance_report with 
                "external_inputs [{plan: plan-content-moderation-foundation, node: sg1_segment_shots}]")
 
 
-def test_a_direct_plan_whose_goal_consumes_external_inputs_takes_the_design_path(monkeypatch):
+def test_a_direct_plan_whose_goal_consumes_external_inputs_takes_the_plan_path(monkeypatch):
     """Staging session d6a560a8: the single-node Phase 3 report plans went direct, so the chainer never
-    resolved their external_inputs and every report guessed keys and invented findings."""
+    resolved their external_inputs and every report guessed keys and invented findings. A goal that
+    consumes a prior phase must take the DAG (plan) path, never direct dispatch."""
     calls = []
 
     def fake_invoke_runtime(arn, payload):
@@ -95,21 +96,24 @@ def test_a_direct_plan_whose_goal_consumes_external_inputs_takes_the_design_path
 
     monkeypatch.setattr(pae, "PLANNING_AGENT_ARN", "planning-arn")
     monkeypatch.setattr(pae, "TASK_AGENT_ARN", "task-arn")
-    monkeypatch.setattr(pae, "DESIGN_AGENT_ARN", "design-arn")
     monkeypatch.setattr(pae, "_invoke_runtime", fake_invoke_runtime)
     monkeypatch.setattr(pae, "_dispatch_direct",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("_dispatch_direct called")))
     seen = {}
 
-    def fake_design(hlp, catalog, tokens, session_id="", validation_errors=None):
-        seen["mode"] = hlp.execution_mode
-        seen["sub_goals"] = [sg.id for sg in hlp.sub_goals]
-        return None, "design stopped by the test"
+    def fake_self_retry(*, fused_dag, planning_payload, available_tools, cumulative_tokens):
+        # Reaching here proves the reroute flipped the plan onto the standard/DAG path.
+        seen["reached"] = True
+        seen["fused_dag"] = fused_dag
+        return None, "plan path stopped by the test"
 
-    monkeypatch.setattr(pae, "_call_design_agent", fake_design)
-    pae.plan_and_execute({"toolUseId": "tu-1", "input": {"goal": REPORT_GOAL}})
-    assert seen == {"mode": "standard", "sub_goals": ["sg1"]}
+    monkeypatch.setattr(pae, "_plan_with_self_retry", fake_self_retry)
+    result = pae.plan_and_execute({"toolUseId": "tu-1", "input": {"goal": REPORT_GOAL}})
+    assert seen.get("reached") is True, "a prior-phase goal must reach the DAG self-retry path"
+    # A rerouted direct plan carries no fused DAG, so the self-retry starts from nothing and re-plans.
+    assert seen["fused_dag"] is None
     assert calls == ["planning-arn"]
+    assert result["status"] == "error"
 
 
 def test_consumes_prior_phase_reads_goal_constraints_and_the_planners_text():
@@ -121,9 +125,9 @@ def test_consumes_prior_phase_reads_goal_constraints_and_the_planners_text():
     assert pae._consumes_prior_phase("report", "", hlp)
 
 
-def test_the_synthesized_step_keeps_the_planners_skills(monkeypatch):
-    """A direct plan with no sub_goals is rerouted with one synthesized step; the planner's
-    direct_dispatch_params.skills (strings or dicts) must ride on it, not be dropped."""
+def test_a_no_subgoal_direct_plan_reroutes_without_crashing(monkeypatch):
+    """A rerouted direct plan with no sub_goals synthesizes one so the HLP stays coherent, and still
+    takes the plan path (never direct dispatch)."""
     plan = _plan(["content_moderation", {"name": "pdf"}])
     plan["sub_goals"] = []
 
@@ -133,14 +137,17 @@ def test_the_synthesized_step_keeps_the_planners_skills(monkeypatch):
         raise AssertionError(f"direct dispatch to {arn}")
 
     monkeypatch.setattr(pae, "PLANNING_AGENT_ARN", "planning-arn")
-    monkeypatch.setattr(pae, "DESIGN_AGENT_ARN", "design-arn")
     monkeypatch.setattr(pae, "_invoke_runtime", fake_invoke_runtime)
+    monkeypatch.setattr(pae, "_dispatch_direct",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("_dispatch_direct called")))
     seen = {}
 
-    def fake_design(hlp, catalog, tokens, session_id="", validation_errors=None):
-        seen["skills"] = [sg.suggested_skills for sg in hlp.sub_goals]
-        return None, "design stopped by the test"
+    def fake_self_retry(*, fused_dag, planning_payload, available_tools, cumulative_tokens):
+        seen["reached"] = True
+        return None, "plan path stopped by the test"
 
-    monkeypatch.setattr(pae, "_call_design_agent", fake_design)
-    pae.plan_and_execute({"toolUseId": "tu-1", "input": {"goal": REPORT_GOAL}})
-    assert seen == {"skills": [["content_moderation", "pdf"]]}
+    monkeypatch.setattr(pae, "_plan_with_self_retry", fake_self_retry)
+    result = pae.plan_and_execute({"toolUseId": "tu-1", "input": {"goal": REPORT_GOAL}})
+    assert seen.get("reached") is True
+    assert result["status"] == "error"
+

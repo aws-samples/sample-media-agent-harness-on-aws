@@ -763,6 +763,8 @@ const PASSTHROUGH_FIELDS = [
   "jobId",
   // A stored file a run deliberately left unindexed (`no_speech` audio): the card's neutral "Not indexed" badge.
   "indexSkippedReason",
+  // A Personal sample (the demo tour's 0-demo.mp4): listed first, and kept first by the + menu's re-sort.
+  "pinned",
 ] as const;
 
 /**

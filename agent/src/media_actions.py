@@ -22,6 +22,7 @@ the proxy then sends the GeneratedMedia turn message that registers them as proj
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -65,6 +66,9 @@ class MediaAction:
     points_ms: list[int] = field(default_factory=list)
     ranges_ms: list[tuple[int, int]] = field(default_factory=list)
     box: Optional[tuple[float, float, float, float]] = None
+    # Clip only: opt in to the fast keyframe-granular STREAM COPY instead of the frame-accurate
+    # re-encode default. Not frame-accurate — it cuts at the keyframe before `in`.
+    fast: bool = False
 
 
 _ACTION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
@@ -104,12 +108,17 @@ def parse_action(raw: Any) -> MediaAction:
             a, b = _ms(r.get("inMs"), "inMs"), _ms(r.get("outMs"), "outMs")
             if b <= a:
                 raise MediaActionError("a range must end after it starts")
-            # Only a CROP re-encodes; a clip is a stream copy (~0.1 s at any length), so it has no length cap.
+            # A clip now RE-ENCODES by default (frame-accurate), but we keep no length cap: a long
+            # clip can opt into the fast stream copy. Only a CROP, which always re-encodes a full
+            # pass with a filter, is capped here.
             if op == "crop" and (b - a) / 1000.0 > MAX_RANGE_S:
                 raise MediaActionError(f"crops longer than {int(MAX_RANGE_S)} s go through the agent")
             act.ranges_ms.append((a, b))
         if op == "clip" and not act.ranges_ms:
             raise MediaActionError("clip needs at least one range")
+        if op == "clip":
+            # Opt-in fast path: keyframe-granular stream copy, explicitly NOT frame-accurate.
+            act.fast = bool(raw.get("fast"))
         if op == "crop":
             box = raw.get("box")
             if not isinstance(box, dict):
@@ -152,24 +161,97 @@ def plan_outputs(act: MediaAction, prefix: str) -> list[dict]:
     jobs: list[dict] = []
     if act.op == "frame":
         for i, p in enumerate(act.points_ms):
-            jobs.append({"kind": "image", "at": p / 1000.0,
+            jobs.append({"kind": "image", "at_ms": p,
                          "key": f"{prefix}{stem}_frame_{_tc(p)}_{p % 1000:03d}_{tag}{i}.jpg"})
     elif act.op == "clip":
         for i, (a, b) in enumerate(act.ranges_ms):
-            jobs.append({"kind": "video", "in": a / 1000.0, "out": b / 1000.0,
+            jobs.append({"kind": "video", "in_ms": a, "out_ms": b, "fast": bool(act.fast),
                          "key": f"{prefix}{stem}_clip_{_tc(a)}-{_tc(b)}_{tag}{i}.mp4"})
     else:
         trim = act.ranges_ms[0] if act.ranges_ms else None
         jobs.append({"kind": "video", "box": list(act.box or ()),
-                     "in": trim[0] / 1000.0 if trim else None, "out": trim[1] / 1000.0 if trim else None,
+                     "in_ms": trim[0] if trim else None, "out_ms": trim[1] if trim else None,
                      "key": f"{prefix}{stem}_crop_{tag}.mp4"})
     return jobs
+
+
+# --------------------------------------------------------------------------------------------- frame-grid snapping
+
+# PURE, importable helpers (unit-tested in test_media_actions.py) that the sandbox program ALSO uses —
+# their source is injected verbatim by build_sandbox_code so there is a single definition. They take
+# the UI's integer MILLISECONDS and a probed fps, and return exact ffmpeg seek times on the frame grid.
+
+
+def _fmt_seconds(t: float) -> str:
+    """Format a seconds value for an ffmpeg ``-ss``/``-t`` argument (sub-millisecond precision)."""
+    return f"{float(t):.6f}"
+
+
+def snap_frame(at_ms: int, fps: Optional[float]) -> tuple:
+    """Snap an instant (ms) to the nearest frame on the fps grid.
+
+    Returns ``(at_t, at_frame)`` where ``at_t`` is that frame's exact presentation time in seconds.
+    With ``fps`` None/<=0 (unknown) returns the unsnapped time and ``at_frame`` None."""
+    at_s = at_ms / 1000.0
+    if not fps or fps <= 0:
+        return at_s, None
+    at_frame = int(round(at_s * fps))
+    return at_frame / fps, at_frame
+
+
+def snap_clip(in_ms: int, out_ms: int, fps: Optional[float]) -> tuple:
+    """Snap a clip's in/out (ms) to the fps frame grid.
+
+    Returns ``(in_t, dur, in_frame, out_frame)``. The clip covers frames ``[in_frame, out_frame)``,
+    so its duration is ``(out_frame - in_frame) / fps`` and ``in_t`` is frame ``in_frame``'s exact
+    time. ``out_frame`` is guarded to be at least ``in_frame + 1`` (one whole frame). With ``fps``
+    None/<=0 (unknown) returns the unsnapped in/out and both frame indices None."""
+    in_s = in_ms / 1000.0
+    out_s = out_ms / 1000.0
+    if not fps or fps <= 0:
+        return in_s, max(0.0, out_s - in_s), None, None
+    in_frame = int(round(in_s * fps))
+    out_frame = int(round(out_s * fps))
+    if out_frame <= in_frame:
+        out_frame = in_frame + 1
+    return in_frame / fps, (out_frame - in_frame) / fps, in_frame, out_frame
+
+
+def frame_cmd(ffmpeg: str, src: str, dst: str, at_t: float) -> list:
+    """ffmpeg argv to extract exactly one frame at ``at_t`` (accurate input seek + ``-frames:v 1``)."""
+    return [ffmpeg, "-y", "-ss", _fmt_seconds(at_t), "-i", src, "-frames:v", "1", "-q:v", "2", dst]
+
+
+def clip_cmd(ffmpeg: str, src: str, dst: str, in_t: float, dur: float, has_audio: bool,
+             fast: bool = False) -> list:
+    """ffmpeg argv for a clip.
+
+    DEFAULT: a frame-accurate accurate-seek RE-ENCODE — ``-ss`` before ``-i`` then ``-t``, with the
+    crop path's x264 settings (libx264 / superfast / crf 20 / yuv420p), AAC audio when present else
+    ``-an``, ``+faststart``. Modern ffmpeg input-seek + re-encode is frame-exact.
+
+    ``fast=True``: the keyframe-granular STREAM COPY (``-c copy``). It is NOT frame-accurate — it can
+    only cut at the keyframe before ``in_t`` and relies on the MP4 edit list to mask the pre-roll."""
+    ss, t = _fmt_seconds(in_t), _fmt_seconds(dur)
+    if fast:
+        return [ffmpeg, "-y", "-ss", ss, "-i", src, "-t", t,
+                "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", dst]
+    cmd = [ffmpeg, "-y", "-ss", ss, "-i", src, "-t", t,
+           "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p", "-threads", "0"]
+    cmd += ["-c:a", "aac"] if has_audio else ["-an"]
+    cmd += ["-movflags", "+faststart", dst]
+    return cmd
+
+
+# The helpers injected into the sandbox program (single definition, shared with the unit tests).
+_SANDBOX_HELPERS = (_fmt_seconds, snap_frame, snap_clip, frame_cmd, clip_cmd)
 
 
 # --------------------------------------------------------------------------------------------- sandbox program
 
 # Appended after the bundled crop script (its helpers: _ensure_ffmpeg_ffprobe, probe_dimensions, probe_has_audio,
-# resolve_crop). Every parameter arrives as a JSON literal. The source is cached per sandbox by its s3 identity.
+# probe_fps, resolve_crop) and the snapping/command helpers injected from this module. Every parameter arrives
+# as a JSON literal. The source is cached per sandbox by its s3 identity.
 _RUNNER = r'''
 import os, json, hashlib, subprocess, tempfile, urllib.request
 
@@ -192,7 +274,7 @@ def _cached_source():
     return path, True
 
 def _copyable(ffprobe, path):
-    """Whether a clip can be a stream copy into MP4: H.264/HEVC video, and AAC/MP3 audio or none."""
+    """Whether a clip CAN be a stream copy into MP4: H.264/HEVC video, and AAC/MP3 audio or none."""
     try:
         r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", path],
                            capture_output=True, text=True, timeout=30)
@@ -209,34 +291,43 @@ try:
     _s3 = boto3.client("s3", region_name=_REGION)  # per cell: credentials can be re-injected between cells
     _ffmpeg, _ffprobe = _ensure_ffmpeg_ffprobe()
     _local, _hit = _cached_source()
+    _fps = probe_fps(_ffprobe, _local)          # frames/sec on the real frame grid, or None (unknown)
+    _audio = probe_has_audio(_ffprobe, _local)
     _outs = []
     with tempfile.TemporaryDirectory() as _td:
         for _i, _j in enumerate(_JOBS):
             _dst = os.path.join(_td, "out%d%s" % (_i, ".jpg" if _j["kind"] == "image" else ".mp4"))
             if _j["kind"] == "image":
-                _cmd = [_ffmpeg, "-y", "-ss", str(_j["at"]), "-i", _local, "-frames:v", "1", "-q:v", "2", _dst]
+                # Snap the requested instant to the nearest real frame and seek there exactly.
+                _at_t, _at_frame = snap_frame(_j["at_ms"], _fps)
+                _cmd = frame_cmd(_ffmpeg, _local, _dst, _at_t)
                 _ct = "image/jpeg"
-            elif not _j.get("box") and _copyable(_ffprobe, _local):
-                # A plain clip is a STREAM COPY: no re-encode, ~0.1 s for any length. The input seek lands on the
-                # keyframe before `in`, and the MP4 edit list ffmpeg writes hides that pre-roll, so playback starts
-                # on the exact marked frame (measured: the first shown frame is the source frame at `in`).
-                _cmd = [_ffmpeg, "-y", "-ss", str(_j["in"]), "-i", _local, "-t", str(_j["out"] - _j["in"]),
-                        "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", _dst]
+            elif not _j.get("box"):
+                # A plain clip: snap in/out to the frame grid and RE-ENCODE for frame accuracy by
+                # default. The opt-in `fast` flag restores the keyframe-granular stream copy, used
+                # only when the source codecs are actually copyable into MP4.
+                _in_t, _dur, _inf, _outf = snap_clip(_j["in_ms"], _j["out_ms"], _fps)
+                _fast = bool(_j.get("fast")) and _copyable(_ffprobe, _local)
+                _cmd = clip_cmd(_ffmpeg, _local, _dst, _in_t, _dur, _audio, _fast)
                 _ct = "video/mp4"
             else:
+                # Crop: always re-encode (filtered pass), with the snapped trim when a range is given.
                 _cmd = [_ffmpeg, "-y"]
-                if _j.get("in") is not None:
-                    _cmd += ["-ss", str(_j["in"])]
-                _cmd += ["-i", _local]
-                if _j.get("in") is not None and _j.get("out") is not None:
-                    _cmd += ["-t", str(_j["out"] - _j["in"])]
-                if _j.get("box"):
-                    _w, _h = probe_dimensions(_ffprobe, _local)
-                    _c = resolve_crop(tuple(_j["box"]), "normalized", _w, _h)
-                    _cmd += ["-vf", "crop=%d:%d:%d:%d" % (_c["w"], _c["h"], _c["x"], _c["y"])]
-                # Crop (and a source that cannot be copied) re-encodes; superfast keeps a 10 s crop to a few seconds.
+                _in_ms, _out_ms = _j.get("in_ms"), _j.get("out_ms")
+                if _in_ms is not None and _out_ms is not None:
+                    _in_t, _dur, _inf, _outf = snap_clip(_in_ms, _out_ms, _fps)
+                    _cmd += ["-ss", _fmt_seconds(_in_t), "-i", _local, "-t", _fmt_seconds(_dur)]
+                elif _in_ms is not None:
+                    _in_t, _in_frame = snap_frame(_in_ms, _fps)
+                    _cmd += ["-ss", _fmt_seconds(_in_t), "-i", _local]
+                else:
+                    _cmd += ["-i", _local]
+                _w, _h = probe_dimensions(_ffprobe, _local)
+                _c = resolve_crop(tuple(_j["box"]), "normalized", _w, _h)
+                _cmd += ["-vf", "crop=%d:%d:%d:%d" % (_c["w"], _c["h"], _c["x"], _c["y"])]
+                # superfast keeps a 10 s crop to a few seconds.
                 _cmd += ["-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p", "-threads", "0"]
-                _cmd += ["-c:a", "aac"] if probe_has_audio(_ffprobe, _local) else ["-an"]
+                _cmd += ["-c:a", "aac"] if _audio else ["-an"]
                 _cmd += ["-movflags", "+faststart", _dst]
                 _ct = "video/mp4"
             _r = subprocess.run(_cmd, capture_output=True, text=True, timeout=_TIMEOUT)
@@ -255,7 +346,7 @@ print(_SENTINEL_TOKEN + json.dumps(_out))
 
 def build_sandbox_code(script_src: str, act: MediaAction, jobs: list[dict], *, bucket: str, domain: str,
                        region: str, timeout: float = ACTION_TIMEOUT_S) -> str:
-    """The bundled crop script (as a library) + the injected params + the runner."""
+    """The bundled crop script (as a library) + the snapping helpers + the injected params + the runner."""
     from tools.crop_video import _as_library
 
     params = {
@@ -263,9 +354,12 @@ def build_sandbox_code(script_src: str, act: MediaAction, jobs: list[dict], *, b
         "_DOMAIN": domain, "_REGION": region, "_TIMEOUT": float(timeout), "_SENTINEL_TOKEN": _SENTINEL,
     }
     # Each value as json.loads of a JSON string literal: JSON is NOT Python (`null` / `true` raised NameError in the
-    # sandbox for a crop with no time range, whose jobs carry "in": null), and a quoted JSON string always is.
+    # sandbox for a crop with no time range, whose jobs carry "in_ms": null), and a quoted JSON string always is.
     header = "import json as _json\n" + "\n".join(f"{k} = _json.loads({json.dumps(json.dumps(v))})" for k, v in params.items())
-    return f"{_as_library(script_src)}\n\n# --- injected params + runner ---\n{header}\n{_RUNNER}"
+    # The pure snapping/command helpers, injected verbatim so the sandbox and the unit tests share one definition.
+    helpers = "\n\n".join(inspect.getsource(fn) for fn in _SANDBOX_HELPERS)
+    return (f"{_as_library(script_src)}\n\n# --- snapping + command helpers ---\n{helpers}\n"
+            f"\n# --- injected params + runner ---\n{header}\n{_RUNNER}")
 
 
 # --------------------------------------------------------------------------------------------- warm sandboxes
@@ -382,11 +476,21 @@ def run_action(act: MediaAction, *, session_id: str, project_id: Optional[str]) 
         if not res.get("ok"):
             raise RuntimeError(res.get("error") or "the sandbox reported a failure")
         outputs = []
+        planned = {j["key"]: j for j in jobs}
         for o in res.get("outputs") or []:
             key = o["key"]
-            outputs.append({"kind": o["kind"], "name": key.rsplit("/", 1)[-1], "key": key,
-                            "s3uri": f"s3://{bucket}/{key}",
-                            "url": f"https://{domain}/{key}" if domain else key})
+            item = {"kind": o["kind"], "name": key.rsplit("/", 1)[-1], "key": key,
+                    "s3uri": f"s3://{bucket}/{key}",
+                    "url": f"https://{domain}/{key}" if domain else key}
+            # The SOURCE time range the output was cut from (lineage edges): a frame's instant, a clip's in/out.
+            job = planned.get(key) or {}
+            if job.get("at_ms") is not None:
+                at_s = round(job["at_ms"] / 1000.0, 3)
+                item["range"] = {"start": at_s, "end": at_s}
+            elif job.get("in_ms") is not None and job.get("out_ms") is not None:
+                item["range"] = {"start": round(job["in_ms"] / 1000.0, 3),
+                                 "end": round(job["out_ms"] / 1000.0, 3)}
+            outputs.append(item)
         return {"type": RESULT_TYPE, "ok": True, "action_id": act.action_id, "op": act.op, "outputs": outputs,
                 "source": {"s3uri": act.source_uri, "asset_id": act.asset_id, "name": act.source_name},
                 "sourceCached": bool(res.get("sourceCached")),

@@ -51,10 +51,13 @@ ORCHESTRATOR_ASSEMBLED_SHA = "830fb08fc10b568fe35ebef5346f6f53b30c631235964f20f6
 
 
 def _live_named() -> dict:
-    import design_agent, planning_agent, render_agent, task_agent, main
+    import planning_agent, render_agent, task_agent, main
+    from prompts.design import design_system_prompt
     from lab import chat_agent
     return {
-        "design.DESIGN_SYSTEM_PROMPT": design_agent.DESIGN_SYSTEM_PROMPT,
+        # The DAG design rules stay in prompts/design.py (the Design Agent runtime is retired; the
+        # fused planning call bundles this verbatim). Byte-identity is unchanged.
+        "design.DESIGN_SYSTEM_PROMPT": design_system_prompt(),
         "planning.PLANNING_SYSTEM_PROMPT": planning_agent.PLANNING_SYSTEM_PROMPT,
         "planning.FUSED_SYSTEM_PROMPT": planning_agent._fused_system_prompt(),
         "render.RENDER_SYSTEM_PROMPT": render_agent.RENDER_SYSTEM_PROMPT,

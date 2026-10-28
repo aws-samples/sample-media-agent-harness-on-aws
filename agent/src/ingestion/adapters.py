@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Optional
 
+import logging
+
+log = logging.getLogger(__name__)
+
 _FRAME_RE = re.compile(r"frame_(\d+)\.jpe?g$", re.IGNORECASE)
 _HMS_RE = re.compile(r"^(\d+):([0-5]?\d):([0-5]?\d(?:\.\d+)?)$")
 
@@ -279,3 +283,278 @@ def technical_from_probe(probe: Any) -> Optional[dict]:
         }) if a else None,
     })
     return out if (out.get("video") or out.get("audio")) else None
+
+
+# ----------------------------------------------------------------------------- entity metadata (Phase 1)
+# These convert a raw toolkit output into a compact, JSON-safe structure captured in the step's ``facts``.
+# They are pure and never raise: an unreadable field is dropped, exactly like the document adapters above.
+# The compact rows are then flattened into timed entity MENTIONS (:func:`person_mentions`,
+# :func:`cast_mentions`, :func:`segment_mentions`) that the document builder folds into the member scenes'
+# ``named_entities`` by time overlap, so the names are searchable in hybrid search (they are NOT stored as a
+# side-channel metadata blob on the asset row). Shapes verified against live staging outputs and the
+# targets' describe_tool contracts (docs/entity-metadata-workflows.md).
+
+def _is_index(v: Any) -> bool:
+    """A non-negative integer id (``person_id`` / ``sequence_id`` are 0-based), not a bool."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _index(v: Any) -> Optional[int]:
+    return v if _is_index(v) else None
+
+
+def _ints(items: Any) -> tuple[int, ...]:
+    """Non-negative ints from a list (``shot_ids`` / ``scene_ids``), dropping anything else."""
+    return tuple(x for x in (items if isinstance(items, list) else []) if _is_index(x))
+
+
+def ms_int(v: Any) -> Optional[int]:
+    """A value already in milliseconds (int/float/str) → whole ms, half up. ``None`` if unreadable.
+
+    face-recognition and cast-resolution emit ``begin_ms``/``end_ms`` directly; this is the ms twin of
+    :func:`sec_to_ms` (which is for the seconds-valued fields).
+    """
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        d = Decimal(str(v).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    if not d.is_finite():
+        return None
+    return int(d.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def _score(v: Any) -> Optional[float]:
+    """A finite number (break-candidate ``score`` may legitimately be 0 or negative), else ``None``."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(f, 4) if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def _spans(appearances: Any) -> list[dict]:
+    """``[{begin_ms, end_ms}]`` (already ms) → ``[{start_ms, end_ms}]`` with start < end, dropping junk."""
+    out: list[dict] = []
+    for a in appearances if isinstance(appearances, list) else []:
+        if not isinstance(a, dict):
+            continue
+        b, e = ms_int(a.get("begin_ms")), ms_int(a.get("end_ms"))
+        if b is not None and e is not None and b < e:
+            out.append({"start_ms": b, "end_ms": e})
+    return out
+
+
+def _warn_if_dropped(tool: str, field: str, raw: Any, emitted: list) -> None:
+    """These three adapters were written against a ``describe_tool`` example / a handful of live runs; a
+    silent output-shape drift would make them yield nothing while the workflow reported success. A
+    non-empty input that produces zero emitted rows is that signature — log it (INFO) so drift is visible
+    in the step logs instead of surfacing as inexplicably empty entity-metadata rows."""
+    if isinstance(raw, list) and raw and not emitted:
+        log.info("%s: %d %s in the output produced 0 compact rows - possible output-shape drift",
+                 tool, len(raw), field)
+
+
+def person_identities(face_metadata: Optional[dict]) -> list[dict]:
+    """face-recognition ``facemetadata.json`` → compact Person-identity rows (asset metadata).
+
+    These are REAL identities (celebrity recognition / collection matches), not the generic names the
+    enrichment step attaches per scene: ``named`` distinguishes a resolved identity from an anonymous
+    track (which keeps its ``Person_N`` placeholder). ``screen_ms`` comes from ``total_screen_time_sec``;
+    appearance spans are already in ms.
+    """
+    out: list[dict] = []
+    for p in (face_metadata or {}).get("people") or []:
+        if not isinstance(p, dict) or not _is_index(p.get("person_id")):
+            continue
+        out.append(_compact({
+            "person_id": int(p["person_id"]),
+            "name": _s(p.get("name")),
+            "named": bool(p.get("named")),
+            "name_source": _s(p.get("name_source")),
+            "screen_ms": sec_to_ms(p.get("total_screen_time_sec")),
+            "appearances": _spans(p.get("appearances")),
+        }))
+    _warn_if_dropped("face-recognition", "people", (face_metadata or {}).get("people"), out)
+    return out
+
+
+def program_structure(structure: Optional[dict]) -> dict:
+    """program-structure-analysis ``structure.json`` → compact Program-element metadata.
+
+    Marker and sequence spans are in SECONDS in the source → whole ms. Only marker kinds that are present
+    (non-empty) are kept; empty structural slots are dropped.
+    """
+    s = structure if isinstance(structure, dict) else {}
+    markers_in = s.get("markers") if isinstance(s.get("markers"), dict) else {}
+    markers_out: dict[str, list] = {}
+    for kind, spans in markers_in.items():
+        rows = []
+        for m in spans if isinstance(spans, list) else []:
+            if not isinstance(m, dict):
+                continue
+            st, en = sec_to_ms(m.get("start")), sec_to_ms(m.get("end"))
+            if st is not None and en is not None:
+                rows.append(_compact({"start_ms": st, "end_ms": en, "kinds": list(strs(m.get("kinds"))),
+                                      "shot_ids": list(_ints(m.get("shot_ids")))}))
+        if rows:
+            markers_out[str(kind)] = rows
+    sequences = []
+    for seq in s.get("sequences") or []:
+        if not isinstance(seq, dict):
+            continue
+        sequences.append(_compact({
+            "sequence_id": _index(seq.get("sequence_id")),
+            "start_ms": sec_to_ms(seq.get("start")),
+            "end_ms": sec_to_ms(seq.get("end")),
+            "scene_ids": list(_ints(seq.get("scene_ids"))),
+            "settings": list(strs(seq.get("settings"))),
+        }))
+    breaks = []
+    for b in s.get("break_candidates") or []:
+        if isinstance(b, dict):
+            at = sec_to_ms(b.get("at"))
+            if at is not None:
+                breaks.append(_compact({"at_ms": at, "score": _score(b.get("score"))}))
+    out: dict = {"mode": _s(s.get("mode"))}
+    if markers_out:
+        out["markers"] = markers_out
+    if sequences:
+        out["sequences"] = sequences
+    if breaks:
+        out["break_candidates"] = breaks
+    if (markers_in or s.get("sequences") or s.get("break_candidates")) and not (
+            markers_out or sequences or breaks):
+        log.info("program-structure-analysis: a non-empty structure.json produced no markers, sequences "
+                 "or break candidates - possible output-shape drift")
+    return _compact(out)
+
+
+def cast_characters(persons_doc: Optional[dict]) -> list[dict]:
+    """cast-resolution ``persons.json`` → compact Character rows (actor → role).
+
+    ``name`` is the actor (``null`` means the pipeline abstained — a wrong name is worse than none, so
+    ``named`` is False then); ``character_name`` is additive, present only when a credits card paired the
+    actor with a character. ``screen_ms``/``speech_ms`` from the seconds fields; spans already in ms.
+    """
+    out: list[dict] = []
+    for p in (persons_doc or {}).get("persons") or []:
+        if not isinstance(p, dict) or not _is_index(p.get("person_id")):
+            continue
+        name = _s(p.get("name"))
+        out.append(_compact({
+            "person_id": int(p["person_id"]),
+            "name": name,
+            "named": bool(name),
+            "character_name": _s(p.get("character_name")),
+            "role": _s(p.get("role")),
+            "type": _s(p.get("type")),
+            "aliases": list(strs(p.get("aliases"))),
+            "speaker_ids": list(strs(p.get("speaker_ids"))),
+            "screen_ms": sec_to_ms(p.get("screen_sec")),
+            "speech_ms": sec_to_ms(p.get("speech_sec")),
+            "appearances": _spans(p.get("appearances")),
+        }))
+    _warn_if_dropped("cast-resolution", "persons", (persons_doc or {}).get("persons"), out)
+    return out
+
+
+# ----------------------------------------------------------------- entity mentions (fold into scenes)
+@dataclass(frozen=True)
+class EntityMentionIn:
+    """A single display name/label and the ms span it appears in. The document builder folds each mention
+    into the ``named_entities`` of every scene whose span overlaps ``[start_ms, end_ms)`` (Req: entities
+    searchable in hybrid search). ``start_ms < end_ms`` is guaranteed by the builders below."""
+    name: str
+    start_ms: int
+    end_ms: int
+
+
+def _mention_spans(appearances: Any) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for a in appearances if isinstance(appearances, list) else []:
+        if not isinstance(a, dict):
+            continue
+        s, e = a.get("start_ms"), a.get("end_ms")
+        if isinstance(s, int) and not isinstance(s, bool) and isinstance(e, int) and not isinstance(e, bool) \
+                and s < e:
+            out.append((s, e))
+    return out
+
+
+def person_mentions(people: Any) -> list[EntityMentionIn]:
+    """face-recognition :func:`person_identities` rows → one mention per (name, appearance).
+
+    The display name is the resolved identity (a recognised celebrity like ``Kevin Kilner``) or, for an
+    anonymous track, its ``Person_N`` placeholder. A row with no name or no appearance span contributes
+    nothing."""
+    out: list[EntityMentionIn] = []
+    for p in people if isinstance(people, list) else []:
+        if not isinstance(p, dict):
+            continue
+        name = _s(p.get("name")).strip()
+        if not name:
+            continue
+        for s, e in _mention_spans(p.get("appearances")):
+            out.append(EntityMentionIn(name, s, e))
+    return out
+
+
+def cast_mentions(cast: Any) -> list[EntityMentionIn]:
+    """cast-resolution :func:`cast_characters` rows → mentions for the character name AND the actor name.
+
+    Both are folded (per appearance) when present: the character (``Det. Rios``) and the actor (``Tomas
+    Vega``). A row that abstained on the actor name still contributes its character name, and vice versa."""
+    out: list[EntityMentionIn] = []
+    for c in cast if isinstance(cast, list) else []:
+        if not isinstance(c, dict):
+            continue
+        names = [n for n in (_s(c.get("character_name")).strip(), _s(c.get("name")).strip()) if n]
+        if not names:
+            continue
+        for s, e in _mention_spans(c.get("appearances")):
+            for name in names:
+                out.append(EntityMentionIn(name, s, e))
+    return out
+
+
+def _humanize(v: Any) -> str:
+    """A marker kind / sequence setting label for search: ``end_credits`` → ``end credits``. ``""`` for junk."""
+    return " ".join(str(v).replace("_", " ").split()) if isinstance(v, str) and v.strip() else ""
+
+
+def segment_mentions(program: Any) -> list[EntityMentionIn]:
+    """program-structure-analysis :func:`program_structure` → Segment / Program-element label mentions.
+
+    A sequence contributes each of its ``settings`` (the setting of that part of the program) over the
+    sequence span; a marker contributes its kind (``opening credits``, ``end credits``, …) over the marker
+    span. Labels are humanised (underscores → spaces) so they read as search terms. Structural grouping of
+    the member scenes under a Segment parent is a future enhancement (it needs a hybrid-search backend
+    change — see ``contract.first_violation``'s ``segment_parent_id`` rejection)."""
+    prog = program if isinstance(program, dict) else {}
+    out: list[EntityMentionIn] = []
+    for seq in prog.get("sequences") or []:
+        if not isinstance(seq, dict):
+            continue
+        s, e = seq.get("start_ms"), seq.get("end_ms")
+        if not (isinstance(s, int) and not isinstance(s, bool) and isinstance(e, int)
+                and not isinstance(e, bool) and s < e):
+            continue
+        for setting in seq.get("settings") or []:
+            label = _humanize(setting)
+            if label:
+                out.append(EntityMentionIn(label, s, e))
+    markers = prog.get("markers") if isinstance(prog.get("markers"), dict) else {}
+    for kind, spans in markers.items():
+        label = _humanize(kind)
+        if not label:
+            continue
+        for m in spans if isinstance(spans, list) else []:
+            if not isinstance(m, dict):
+                continue
+            s, e = m.get("start_ms"), m.get("end_ms")
+            if isinstance(s, int) and not isinstance(s, bool) and isinstance(e, int) \
+                    and not isinstance(e, bool) and s < e:
+                out.append(EntityMentionIn(label, s, e))
+    return out

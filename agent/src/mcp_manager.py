@@ -606,8 +606,8 @@ class GatewayConnection:
         if client is None:
             raise RuntimeError(f"Gateway '{self.name}' is not connected")
         tool_use_id = f"{tool_name}-{uuid.uuid4().hex}"
-        from tool_args import normalize_duration, normalize_endpoint_ids, normalize_minimax_h3_args
-        arguments = normalize_minimax_h3_args(normalize_endpoint_ids(normalize_duration(arguments)))
+        from tool_args import normalize_duration, normalize_endpoint_ids
+        arguments = normalize_endpoint_ids(normalize_duration(arguments))
         with self.call_lease(client):
             return client.call_tool_sync(tool_use_id, tool_name, arguments)
 

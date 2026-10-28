@@ -76,6 +76,8 @@ export interface AssetCardProps {
   dragIds?(asset: AssetView): string[];
   /** ⋯ → Move to folder… for this one file (the section opens its folder picker). */
   onMove?(asset: AssetView): void;
+  /** ⋯ → Lineage: the Projects Lineage view focused on this file's chain. Absent where lineage is off. */
+  onLineage?(asset: AssetView): void;
 }
 
 /** An asset's folder path, or `''` for the top level. */
@@ -87,7 +89,7 @@ export type AssetLayout = 'grid' | 'list';
 
 export default function AssetCard({
   asset, projectId, sessionId, onDelete, onRetry, onOpenError, layout = 'grid', inFolder = false, shownIn,
-  selected = false, selecting = false, onSelectedChange, dragIds, onMove,
+  selected = false, selecting = false, onSelectedChange, dragIds, onMove, onLineage,
 }: AssetCardProps) {
   const { assetId, kind, displayName, status } = asset;
   const [thumb, setThumb] = useState<string | null>(null);
@@ -251,7 +253,7 @@ export default function AssetCard({
     </>
   ) : null;
 
-  const hasActions = !!onDelete || (status === 'failed' && !!onRetry);
+  const hasActions = !!onDelete || !!onLineage || (status === 'failed' && !!onRetry);
   const menuEl = !hasActions ? null : (
     <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
       <button
@@ -275,6 +277,19 @@ export default function AssetCard({
               if (e.key === 'Escape') setMenuOpen(false);
             }}
           >
+            {onLineage && (
+              <button
+                type="button"
+                role="menuitem"
+                style={menuItemStyle}
+                onClick={() => {
+                  setMenuOpen(false);
+                  onLineage(asset);
+                }}
+              >
+                Lineage
+              </button>
+            )}
             {status === 'failed' && onRetry && (
               <button
                 type="button"
@@ -400,6 +415,7 @@ export default function AssetCard({
   const statusBadge = indexed ? null : badgeEl;
   const menu = [
     ...(onMove ? [{ label: 'Move to folder…', icon: 'folder' as const, onClick: () => onMove(asset) }] : []),
+    ...(onLineage ? [{ label: 'Lineage', onClick: () => onLineage(asset) }] : []),
     ...(sessionId && (kind === 'video' || kind === 'image') ? [{
       label: 'Find similar', icon: 'expand' as const,
       onClick: () => findSimilar({ ref: { project_id: projectId, asset_id: assetId, frame_s3_key: null }, kind,

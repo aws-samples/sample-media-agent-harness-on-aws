@@ -16,7 +16,7 @@ PyYAML==6.0.2
 # deployed extraction runs in the IngestTick Lambda, which installs pypdf via infra
 # `ingestionRequirements`; this pin lets the CI pytest env import ingestion/pdf.py so
 # the document-indexing tests run instead of ModuleNotFoundError-degrading to no_text_layer.
-pypdf==6.21.1
+pypdf==6.21.2
 # Security floors (pip-audit, 2026-10; mirrored in pyproject.toml [tool.uv]
 # constraint-dependencies). The runtimes serve HTTP through bedrock-agentcore's Starlette app.
 starlette>=1.3.1

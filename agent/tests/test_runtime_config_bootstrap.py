@@ -61,7 +61,7 @@ def test_entrypoints_import_bootstrap_before_firstparty():
     # The MCP proxy (agent/mcp-servers/aws-mcp/mcp_server.py) is a separate package with a tiny
     # env and is intentionally excluded. These five agent/src runtimes carry the large env.
     for f in ["main.py", "task_agent.py", "planning_agent.py",
-              "design_agent.py", "render_agent.py"]:
+              "render_agent.py"]:
         text = (root / f).read_text()
         assert "import runtime_config_bootstrap" in text, f"{f}: missing bootstrap import"
         boot = text.index("import runtime_config_bootstrap")
@@ -73,7 +73,7 @@ def test_entrypoints_import_bootstrap_before_firstparty():
 # --- runtime-ARN SSM parameters (RUNTIME_ARN_PARAM_PATH) ---------------------------------------
 
 _ARN_KEYS = ("TASK_AGENT_RUNTIME_ARN", "PLANNING_AGENT_RUNTIME_ARN",
-             "DESIGN_AGENT_RUNTIME_ARN", "RENDER_AGENT_RUNTIME_ARN", "RUNTIME_ARN_PARAM_PATH")
+             "RENDER_AGENT_RUNTIME_ARN", "RUNTIME_ARN_PARAM_PATH")
 
 
 @pytest.fixture
@@ -119,7 +119,7 @@ def test_hydrates_runtime_arns_from_ssm_path_after_secret(arn_env, mod):
     assert os.environ["TASK_AGENT_RUNTIME_ARN"] == "arn:task"
     assert os.environ["PLANNING_AGENT_RUNTIME_ARN"] == "arn:planning"
     assert os.environ["RENDER_AGENT_RUNTIME_ARN"] == "already-set"
-    assert "DESIGN_AGENT_RUNTIME_ARN" not in os.environ  # absent param stays absent
+    assert "TASK_AGENT_RUNTIME_ARN" in os.environ
     assert ssm.calls[0]["Path"] == path and len(ssm.calls) == 2  # paginated
     assert n == 3  # path + task + planning
 

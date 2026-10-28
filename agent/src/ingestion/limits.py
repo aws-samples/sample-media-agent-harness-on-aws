@@ -27,6 +27,7 @@ __all__ = [
     "kind_for",
     "limit_for",
     "limits_from_env",
+    "entity_metadata_enabled",
     "admit",
     "output_kind_for",
 ]
@@ -128,6 +129,24 @@ def limits_from_env(env: Optional[Mapping[str, str]] = None) -> dict[str, int]:
             if isinstance(v, int) and not isinstance(v, bool) and v > 0:
                 limits[kind] = v
     return limits
+
+
+def entity_metadata_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
+    """``INGESTION_CONFIG.entityMetadata`` (Phase 1 entity-metadata workflows). Default False.
+
+    Gates whether the entity-metadata toolkit tools are REQUIRED at registration
+    (``catalog.missing_tools``); the reducer's own :class:`reducer.Config.entity_metadata` gates
+    submission. Both read the same key.
+    """
+    env = os.environ if env is None else env
+    raw = env.get("INGESTION_CONFIG", "")
+    if not raw:
+        return False
+    try:
+        cfg = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return bool(cfg.get("entityMetadata")) if isinstance(cfg, dict) else False
 
 
 def admit(kind: str, size: int, limits: Mapping[str, int]) -> Optional[str]:

@@ -856,6 +856,21 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
     return () => window.removeEventListener('session-render-updated', handler as EventListener);
   }, [activeSession, rightCollapsed]);
 
+  // The Lineage view's "Open chat": that chat, scrolled to the turn that made the file (its `<turnId>-u` message).
+  const handleSelectSessionRef = useRef<((id: string) => void) | null>(null);
+  const handleOpenChatAtTurn = useCallback((id: string, turnId?: string) => {
+    handleSelectSessionRef.current?.(id);
+    if (!turnId) return;
+    let tries = 0;
+    const tick = () => {
+      const el = document.querySelector(`[data-message-id="${CSS.escape(`${turnId}-u`)}"]`)
+        ?? document.querySelector(`[data-message-id="${CSS.escape(`${turnId}-a`)}"]`);
+      if (el) { el.scrollIntoView({ block: 'center' }); return; }
+      if (++tries < 40) window.setTimeout(tick, 150);
+    };
+    window.setTimeout(tick, 150);
+  }, []);
+
   const handleSelectSession = useCallback((id: string) => {
     setActiveSession(id);
     switchSession(id);
@@ -892,6 +907,7 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
       applyServerRenders(serverRenders);
     }).catch(() => { /* keep cached (already applied) */ });
   }, [switchSession, sessions]);
+  handleSelectSessionRef.current = handleSelectSession;
 
   const handleSessionInputStarted = useCallback((id: string) => {
     retainedSessionIdsRef.current.add(id);
@@ -2017,6 +2033,7 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
               onSelectedChange={persistProjectsSelected}
               graphFocus={projectsGraphFocus}
               folderFocus={projectsFolderFocus}
+              onOpenChat={handleOpenChatAtTurn}
             />
           </div>
         )}

@@ -77,6 +77,8 @@ export function ChatAssetCard(p: ChatAssetCardProps) {
   return (
     <MediaCard as="span" testId="chat-asset-card" kind={kindForCard} title={p.name} meta={sub}
       thumb={p.kind === 'image' && !p.needsConsent ? p.src : null}
+      // An image in chat keeps its own shape, scaled to the bubble's width: never cropped to 16:9.
+      fitWidth={p.kind === 'image'}
       videoSrc={p.kind === 'video' ? p.src : null}
       badge={p.kind === 'video' && duration !== null ? fmtDur(duration) : undefined}
       pictureOverride={p.kind === 'image' && p.needsConsent ? (

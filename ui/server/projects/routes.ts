@@ -58,6 +58,7 @@ import { dispatchAssetRoute } from "./ingestionRoutes";
 // Ingestion write routes (uploads, registration, s3-locations, remove, chat-copy, capabilities).
 import { dispatchIngestionWriteRoute } from "./uploadRoutes";
 import { bearerToken } from "./turnGate";
+import { ensurePersonalSamples } from "./personalSamples";
 // Knowledge-graph routes (`/projects/:pid/graph*`), backed by the x86 graph-reader Lambda.
 import { dispatchGraphRoute } from "./graphRoutes";
 import { dispatchMomentsSearch } from "./momentsSearch";
@@ -203,7 +204,14 @@ export function createProjectsHandler(deps: ProjectsRouteDeps = {}) {
       // /projects
       if (parts.length === 0) {
         if (method === "GET") {
-          await ensurePersonalProject(actor);
+          const personal = await ensurePersonalProject(actor);
+          // The demo tour's sample (0-demo.mp4) in the caller's own Personal project: once per actor per
+          // process, waited on briefly, never a failure of this list (personalSamples.ts). Not under dev bypass.
+          if (process.env.DEV_BYPASS_AUTH !== "true") {
+            const userToken =
+              (typeof req.userToken === "string" && req.userToken) || bearerToken(req.headers?.authorization) || undefined;
+            await ensurePersonalSamples(actor, personal.projectId, userToken);
+          }
           const projects = await projectRegistry().list(actor);
           sendJson(res, 200, { projects });
           return;

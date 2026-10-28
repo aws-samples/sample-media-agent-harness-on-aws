@@ -281,6 +281,14 @@ def persist_url(url: str, *, s3_client, bucket: str, prefix: str,
             "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
     logger.info("persist: copied %d bytes from %s -> %s",
                 len(body), urllib.parse.urlparse(url).hostname, key)
+    # Lineage (projects.lineageEdges): the ONE place every mirror (tool results, plan results, the render
+    # harvest) copies third-party media, so the origin -> copy mapping and the copy's attribution to the tool
+    # call that returned it are recorded here. A no-op with the flag off; never raises.
+    try:
+        from media import turn_outputs
+        turn_outputs.note_external_copy(url, f"s3://{bucket}/{key}")
+    except Exception:  # noqa: BLE001 - lineage must never break a copy
+        pass
     return {"source_url": url, "url": new_url, "key": key,
             "content_type": content_type, "bytes": len(body)}
 

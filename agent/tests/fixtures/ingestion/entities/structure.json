@@ -1,0 +1,28 @@
+{
+  "workflow_id": "5b35fade-2c43-5ec8-bd08-f22233cab8be",
+  "mode": "narrative",
+  "markers": {
+    "blackframes": [
+      {"start": 0.0, "end": 0.967633, "shot_ids": [0], "kinds": ["black"]}
+    ],
+    "slate": [],
+    "bars_and_tone": [],
+    "opening_title": [],
+    "interior_title_cards": [],
+    "end_credits": [
+      {"start": 581.580999, "end": 718.851466, "shot_ids": [83, 84, 85],
+       "kinds": ["credit_roll", "logo_bumper"]}
+    ],
+    "textless_tail": []
+  },
+  "break_candidates": [
+    {"at": 580.11, "score": 2.0, "evidence": {"black_sec": 2.87, "silent": true}}
+  ],
+  "sequences": [
+    {"sequence_id": 0, "start": 0.0, "end": 0.967633, "scene_ids": [0], "threads": [[0]],
+     "settings": [], "evidence": []},
+    {"sequence_id": 1, "start": 1.001, "end": 581.547633, "scene_ids": [1, 2, 3],
+     "threads": [[1, 2, 3]], "settings": ["beach_coast", "office"],
+     "evidence": [{"scene_id": 3, "joins": 2, "via": "cast", "people": ["Reid Scott"]}]}
+  ]
+}

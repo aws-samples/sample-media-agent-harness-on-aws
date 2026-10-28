@@ -612,7 +612,7 @@ async def read_gateway_catalog(
 #:
 #: ``invokedVia`` is deliberately explicit, because the harness has two sub-agent
 #: invocation paths (``dispatch_tool`` for task/render, ``plan_and_execute_tool`` for
-#: planning/design) and stating one implies every runtime is a dispatch target.
+#: planning) and stating one implies every runtime is a dispatch target.
 #:
 #: ``arnEnv`` is the environment variable naming the deployed runtime. It is read at
 #: read from the environment (see ``_builtin_runtime_state``), which is why a Capability
@@ -642,19 +642,6 @@ BUILTIN_CAPABILITIES: tuple[dict[str, Any], ...] = (
         ),
         "invokedVia": "plan_and_execute_tool",
         "arnEnv": "PLANNING_AGENT_RUNTIME_ARN",
-    },
-    {
-        "category": "specialty-agent",
-        "slug": "design-agent",
-        "displayName": "Design Agent",
-        "version": "1",
-        "agentAvailability": ("main",),
-        "description": (
-            "Expands a HighLevelPlan into a detailed executable DAG "
-            "(design/brainstorming)."
-        ),
-        "invokedVia": "plan_and_execute_tool",
-        "arnEnv": "DESIGN_AGENT_RUNTIME_ARN",
     },
     {
         "category": "specialty-agent",

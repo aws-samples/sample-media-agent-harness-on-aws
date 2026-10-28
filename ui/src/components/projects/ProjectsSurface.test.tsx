@@ -23,6 +23,12 @@ const mocks = vi.hoisted(() => ({
   patchSessionProject: vi.fn(),
   listAssets: vi.fn(),
   peekGraphEnabled: vi.fn(() => false),
+  peekLineageEnabled: vi.fn(() => false),
+}));
+vi.mock('./lineage/LineageTab', () => ({
+  default: ({ project, initialFocus }: { project: { id: string }; initialFocus?: string | null }) => (
+    <div data-testid="lineage-tab-mock" data-focus={initialFocus ?? ''}>{project.id}</div>
+  ),
 }));
 vi.mock('./graph/GraphTab', () => ({
   default: ({ project, focusIds }: { project: { id: string }; focusIds?: string[] }) => (
@@ -76,6 +82,7 @@ beforeEach(() => {
   mocks.patchSessionProject.mockResolvedValue({ ok: true, value: undefined });
   mocks.listAssets.mockResolvedValue({ ok: true, value: { assets: [] } });
   mocks.peekGraphEnabled.mockReturnValue(false);
+  mocks.peekLineageEnabled.mockReturnValue(false);
 });
 afterEach(cleanup);
 
@@ -360,5 +367,39 @@ describe('ProjectsSurface graph focus (from a chat graph result)', () => {
     await renderSurface({ selectedId: OWNED.projectId,
       graphFocus: { projectId: SHARED.projectId, nodeIds: ['x'], nonce: 1 } });
     expect(screen.queryByTestId('graph-tab-mock')).toBeNull();
+  });
+});
+
+describe('ProjectsSurface Lineage tab (/config.lineageEnabled)', () => {
+  const ASSET = { assetId: 'video:00000000-0000-4000-8000-000000000001', displayName: 'final.mp4', kind: 'video',
+    status: 'ready', sourceSize: 1024 };
+
+  it('appears only where lineage is on, and the asset menu offers Lineage only then', async () => {
+    mocks.listAssets.mockResolvedValue({ ok: true, value: { assets: [ASSET] } });
+    await renderSurface({ selectedId: OWNED.projectId });
+    expect(screen.queryByRole('tab', { name: 'Lineage (beta)' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'More for final.mp4' }));
+    expect(screen.queryByRole('menuitem', { name: 'Lineage' })).toBeNull();
+  });
+
+  it('switches to the whole-project Lineage view', async () => {
+    mocks.peekLineageEnabled.mockReturnValue(true);
+    await renderSurface({ selectedId: OWNED.projectId });
+    expect(screen.getByRole('tab', { name: 'Assets' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('tab', { name: 'Lineage (beta)' }));
+    const tab = screen.getByTestId('lineage-tab-mock');
+    expect(tab).toHaveTextContent(OWNED.projectId);
+    expect(tab).toHaveAttribute('data-focus', '');
+    expect(screen.queryByText(ASSETS_EMPTY_TITLE)).toBeNull();
+  });
+
+  it("an asset's ⋯ → Lineage opens the view focused on that asset", async () => {
+    mocks.peekLineageEnabled.mockReturnValue(true);
+    mocks.listAssets.mockResolvedValue({ ok: true, value: { assets: [ASSET] } });
+    await renderSurface({ selectedId: OWNED.projectId });
+    fireEvent.click(screen.getByRole('button', { name: 'More for final.mp4' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Lineage' }));
+    expect(screen.getByRole('tab', { name: 'Lineage (beta)' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('lineage-tab-mock')).toHaveAttribute('data-focus', ASSET.assetId);
   });
 });

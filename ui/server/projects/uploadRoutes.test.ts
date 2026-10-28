@@ -13,7 +13,7 @@ import type { AssetServiceCall, AssetServiceReply } from "./assetServiceClient";
 import { InMemoryTransactStore } from "./inMemoryStore";
 import { ASSET_LIST_PK_ATTR, ASSET_LIST_SK_ATTR, assetKey, projectPk } from "./schema";
 import type { Item } from "./store";
-import { UPLOAD_URL_TTL_S, dispatchIngestionWriteRoute, s3UploadOps } from "./uploadRoutes";
+import { UPLOAD_URL_TTL_S, dispatchIngestionWriteRoute, s3UploadOps, turnIdsOf } from "./uploadRoutes";
 import type { IngestionWriteDeps, UploadS3 } from "./uploadRoutes";
 
 const PID = "p0123456789abcdef0123456789abcdef";
@@ -820,6 +820,49 @@ describe("POST /projects/:pid/assets/{move,rename-folder,resolve-locations} (org
     expect((await run("POST", [PID, "assets", "import-status"], deps, { body: { junk: 1 } })).body.prefix).toBe(`projects/${PID}/import/`);
     expect((await run("POST", [PID, "assets", "rescan-import"], deps)).body).toEqual({ ingested: 1 });
     expect(svc.calls.map((c) => [c.command, c.args])).toEqual([["import_status", {}], ["rescan_import", {}]]);
+  });
+
+  it("forwards the lineage read (allowlisted args only) and passes 404 lineage_not_enabled through", async () => {
+    const graph = { nodes: [{ id: AID, stage: "final" }], edges: [], gaps: [], stats: { nodes: 1 }, truncated: false };
+    const svc = fakeAssetService({ lineage: () => ({ ok: true, value: graph }) });
+    const deps = { checkAccess: allow, invokeAssetService: svc.invoke };
+    const ok = await run("POST", [PID, "assets", "lineage"], deps, {
+      body: { assetId: AID, direction: "ancestors", depth: 3, maxNodes: 50, sessionId: "s1", userId: "spoof" } });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ ...graph, chats: {} });
+    expect(svc.calls[0].command).toBe("lineage");
+    expect(svc.calls[0].args).toEqual({ assetId: AID, direction: "ancestors", depth: 3, maxNodes: 50, sessionId: "s1" });
+    const off = fakeAssetService({ lineage: () => ({ ok: false, status: 404,
+      error: { code: "lineage_not_enabled", message: "Lineage is not enabled in this environment" } }) });
+    const r = await run("POST", [PID, "assets", "lineage"], { checkAccess: allow, invokeAssetService: off.invoke }, {
+      body: { direction: "project" } });
+    expect(r.status).toBe(404);
+    const denied = await run("POST", [PID, "assets", "lineage"], { checkAccess: deny, invokeAssetService: svc.invoke }, {
+      body: { direction: "project" } });
+    expect(denied.status).toBe(404);
+    expect(svc.calls).toHaveLength(1);
+  });
+
+  it("adds chat provenance: title + turn number for the actor's own chats, nothing of another member's", async () => {
+    const graph = { nodes: [{ id: AID, sessionId: "s-mine", turnId: "t-2" }, { id: "x", sessionId: "s-theirs" }],
+      edges: [{ from: "x", to: AID, sessionId: "s-mine", turnId: "t-2" }] };
+    const svc = fakeAssetService({ lineage: () => ({ ok: true, value: graph }) });
+    const sessionTurns = vi.fn(async (sid: string) => sid === "s-mine"
+      ? { actorId: ACTOR, title: "Watercolor chain", turnIds: ["t-1", "t-2", "t-3"] }
+      : { actorId: "someone-else", title: "Their secret chat", turnIds: ["t-9"] });
+    const r = await run("POST", [PID, "assets", "lineage"], { checkAccess: allow, invokeAssetService: svc.invoke, sessionTurns }, {
+      body: { direction: "project" } });
+    expect(r.body.chats).toEqual({
+      "s-mine": { mine: true, title: "Watercolor chain", turns: { "t-1": 1, "t-2": 2, "t-3": 3 } },
+      "s-theirs": { mine: false },
+    });
+    expect(JSON.stringify(r.body)).not.toContain("Their secret chat");
+    expect(sessionTurns).toHaveBeenCalledTimes(2);
+  });
+
+  it("turnIdsOf reads turn ids in order, once each", () => {
+    expect(turnIdsOf([{ id: "t-1-u", turnId: "t-1" }, { id: "t-1-a" }, { id: "t-2-u" }, { id: "t-2-x", role: "action" }, {}]))
+      .toEqual(["t-1", "t-2"]);
   });
 
   it("does not claim an unknown verb or a GET", async () => {

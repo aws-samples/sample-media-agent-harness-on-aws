@@ -40,12 +40,16 @@ export function isAttachableFromProject(a: AssetView): boolean {
   return a.status !== 'removed' && a.visibility !== 'session';
 }
 
-/** The newest {@link RECENT_ASSET_LIMIT} attachable assets, newest first. */
+/** The newest {@link RECENT_ASSET_LIMIT} attachable assets, newest first — pinned samples (0-demo.mp4) first of all. */
 export function pickRecentAssets(assets: readonly AssetView[]): AssetView[] {
   const live = assets.filter(isAttachableFromProject);
   // The route already answers newest first; order by `registeredAt` too, where both rows carry one, so a
   // differently ordered page still shows the newest. The sort is stable, so rows without it keep their place.
+  // A pinned sample stays on top: the demo tour attaches the first video listed here.
   const ordered = [...live].sort((a, b) => {
+    const pa = a.pinned === true ? 1 : 0;
+    const pb = b.pinned === true ? 1 : 0;
+    if (pa !== pb) return pb - pa;
     const ta = typeof a.registeredAt === 'string' ? Date.parse(a.registeredAt) : NaN;
     const tb = typeof b.registeredAt === 'string' ? Date.parse(b.registeredAt) : NaN;
     if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;

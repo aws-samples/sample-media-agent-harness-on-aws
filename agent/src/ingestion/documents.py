@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from projects.document_locator import DOCUMENT_SCOPE, PAGE_STRIDE_MS, page_of_span  # noqa: F401 -- re-exported
 
-from .adapters import SceneIn, ShotIn, TopicIn, TurnIn
+from .adapters import EntityMentionIn, SceneIn, ShotIn, TopicIn, TurnIn
 
 SCENE_TEXT_MAX = 8000
 SCOPES = ("shot", "scene", "utterance", "topic")
@@ -147,6 +147,12 @@ def _best_overlap(s: int, e: int, cands: list[dict]) -> Optional[dict]:
     return best
 
 
+def _overlapping_names(s: int, e: int, mentions: Sequence[EntityMentionIn]) -> list[str]:
+    """Every mention name whose span overlaps ``[s, e)`` by ≥ 1 ms, in mention order (the same ≥ 1 ms rule
+    :func:`_best_overlap` uses). Used to fold face/cast/program entities into a scene's ``named_entities``."""
+    return [m.name for m in mentions if min(e, m.end_ms) - max(s, m.start_ms) >= 1]
+
+
 # ------------------------------------------------------------------------------------- speech docs
 def _speech_docs(asset_id: str, turns: Sequence[TurnIn], topics: Sequence[TopicIn], d: int,
                  scenes: list[dict]) -> tuple[list[dict], list[dict], int]:
@@ -191,8 +197,19 @@ def _speech_docs(asset_id: str, turns: Sequence[TurnIn], topics: Sequence[TopicI
 
 # ----------------------------------------------------------------------------------------- builders
 def build_video(asset_id: str, shots: Sequence[ShotIn], scenes: Sequence[SceneIn], turns: Sequence[TurnIn],
-                topics: Sequence[TopicIn], duration_ms: int) -> BuildResult:
-    """Req 5.1–5.22, 5.24. Pass empty ``turns``/``topics`` for a video with no detectable speech (Req 5.18)."""
+                topics: Sequence[TopicIn], duration_ms: int, *,
+                people: Sequence[EntityMentionIn] = (), cast: Sequence[EntityMentionIn] = (),
+                segments: Sequence[EntityMentionIn] = ()) -> BuildResult:
+    """Req 5.1–5.22, 5.24. Pass empty ``turns``/``topics`` for a video with no detectable speech (Req 5.18).
+
+    ``people`` (face-recognition identities), ``cast`` (cast-resolution character/actor names) and
+    ``segments`` (program-structure Segment / Program-element labels) are timed entity mentions
+    (:class:`EntityMentionIn`). Each scene's ``named_entities`` is its enrichment entities PLUS every
+    mention whose span overlaps the scene (de-duplicated and cleaned by :func:`clean_entities`), so the
+    entities are searchable through ``scene_named_entities_fts`` instead of a side-channel asset blob.
+    All three default empty, so a caller that passes none (the flag-off path) yields byte-identical scene
+    documents. Structural ``segment_parent_id`` grouping of a Segment's member scenes is a future
+    enhancement (needs a hybrid-search backend change; ``contract`` rejects the field today)."""
     d = int(duration_ms)
     omitted = truncated = 0
     sdocs: list[dict] = []
@@ -202,7 +219,11 @@ def build_video(asset_id: str, shots: Sequence[ShotIn], scenes: Sequence[SceneIn
         if not text or not _valid(sc.start_ms, sc.end_ms, d):
             omitted += 1
             continue
-        doc = _text_doc(asset_id, "scene", sc.start_ms, sc.end_ms, text, clean_entities(sc.entities))
+        folded = (_overlapping_names(sc.start_ms, sc.end_ms, people)
+                  + _overlapping_names(sc.start_ms, sc.end_ms, cast)
+                  + _overlapping_names(sc.start_ms, sc.end_ms, segments))
+        entities = clean_entities(list(sc.entities) + folded)
+        doc = _text_doc(asset_id, "scene", sc.start_ms, sc.end_ms, text, entities)
         trunc_flags[id(doc)] = cut
         sdocs.append(doc)
     sdocs, dup = _dedupe(sdocs)

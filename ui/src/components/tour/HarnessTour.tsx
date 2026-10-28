@@ -110,16 +110,36 @@ function dragRange() {
 const VIDEO_NAME = /\.(mp4|mov|m4v|webm|mkv)\b/i;
 const videoItems = () => [...document.querySelectorAll<HTMLElement>('[data-testid="plus-menu-recent-asset"]')]
   .filter((b) => b.getAttribute('aria-disabled') !== 'true' && VIDEO_NAME.test(b.getAttribute('aria-label') || ''));
-async function attachFirstVideo() {
-  if (!document.querySelector('[data-testid="plus-menu-asset-search"]')) { click(byLabel('Attach and tools')); await later(500); }
-  if (!videoItems().length) {
-    const search = document.querySelector<HTMLInputElement>('[data-testid="plus-menu-asset-search"]');
-    if (search) {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, '.mp4');
-      search.dispatchEvent(new Event('input', { bubbles: true }));
-      await later(1500);
+/** The tour's video: every user's Personal project holds it, pinned first (`infra/lib/personal-samples.ts`). */
+export const DEMO_VIDEO = '0-demo.mp4';
+const demoItem = () => videoItems().find((b) => (b.getAttribute('aria-label') || '').startsWith(`${DEMO_VIDEO},`)
+  || (b.getAttribute('aria-label') || '') === DEMO_VIDEO);
+const plusMenuOpen = () => !!document.querySelector('[data-testid="plus-menu-asset-search"]');
+async function searchPlusMenu(text: string) {
+  const search = document.querySelector<HTMLInputElement>('[data-testid="plus-menu-asset-search"]');
+  if (!search) return;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, text);
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  await later(1500);
+}
+/** Attach the demo video: switch the (still empty) session to Personal if it is elsewhere, then pick
+ *  `0-demo.mp4` by name. Falls back to the first video when the demo is not there (e.g. a user who deleted it). */
+export async function attachDemoVideo() {
+  if (!plusMenuOpen()) { click(byLabel('Attach and tools')); await later(500); }
+  if (!demoItem()) {
+    // The session's project is the + menu's checked radio; Personal's row is labelled "Personal, private, …".
+    const personal = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((r) => /, private, /.test(r.getAttribute('aria-label') || ''));
+    if (personal && personal.getAttribute('aria-checked') !== 'true') {
+      personal.click();
+      await later(800);
+      if (!plusMenuOpen()) { click(byLabel('Attach and tools')); await later(800); }
     }
   }
+  if (!demoItem()) await searchPlusMenu(DEMO_VIDEO);
+  const demo = demoItem();
+  if (demo) { demo.click(); return; }
+  if (!videoItems().length) await searchPlusMenu('.mp4');
   videoItems()[0]?.click();
 }
 
@@ -145,8 +165,8 @@ const STEPS: TourStep[] = [
     done: isEmptySession, doIt: () => click(byLabel(/^(\+\s*)?New session$/)),
     body: <>Every chat is a <b>session</b> with its own conversation and results. Click <b>New session</b>.</> },
   { section: 'Chat', kind: 'do', title: 'Bring a video', find: byLabel('Attach and tools'), place: 'top',
-    done: () => count('[data-testid="attached-file-chip"]') > 0, doIt: attachFirstVideo,
-    body: <>Click <b>+</b> and pick a video from your project's files. It's attached by reference — nothing is copied.</> },
+    done: () => count('[data-testid="attached-file-chip"]') > 0, doIt: attachDemoVideo,
+    body: <>Click <b>+</b> and pick <b>{DEMO_VIDEO}</b>, the first file in your <b>Personal</b> project: a short recording of this app. It's attached by reference — nothing is copied.</> },
   { section: 'Chat', kind: 'do', title: 'Ask about it',
     before: () => window.dispatchEvent(new CustomEvent('chat-input:set', { detail: { value: FIRST_ASK } })),
     find: all(bySelector('textarea[aria-label="Chat message input"]'), byLabel('Send message')), place: 'top',

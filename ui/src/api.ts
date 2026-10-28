@@ -487,8 +487,8 @@ export async function listSkills(forceRefresh = false): Promise<SkillInfo[]> {
   }, forceRefresh);
 }
 
-// `listBuiltInAgents` / `peekBuiltInAgents` are gone. The four sub-agent runtimes are
-// static (a literal plus four env vars), so the Agents panel reads them out of the
+// `listBuiltInAgents` / `peekBuiltInAgents` are gone. The three sub-agent runtimes are
+// static (a literal plus three env vars), so the Agents panel reads them out of the
 // Capability API page it already has — see `toBuiltInAgents`. Fetching them here woke
 // the agent runtime and paid a cold start to be told a constant. The runtime's
 // `mcp_list_agents` action still exists for non-SPA callers.

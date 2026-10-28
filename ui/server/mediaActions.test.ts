@@ -3,8 +3,22 @@
 import { describe, it, expect, vi } from "vitest";
 import { Readable } from "node:stream";
 import {
-  handleMediaActions, parseMediaActionRequest, resultFrameIn, type MediaActionsDeps,
+  handleMediaActions, parseMediaActionRequest, resultFrameIn, timelineLineage, type MediaActionsDeps,
 } from "./mediaActions";
+
+describe("timelineLineage (lineage edges)", () => {
+  const o = { kind: "image" as const, name: "f.jpg", url: "u", key: "k/f.jpg", s3uri: "s3://skills/k/f.jpg" };
+  it("carries the source time range and the op's settings", () => {
+    expect(timelineLineage({ ...o, range: { start: 12.5, end: 12.5 } }, "s3://ingest/src.mp4", { op: "frame" })).toEqual({
+      output: "s3://skills/k/f.jpg", inputs: ["s3://ingest/src.mp4"], tool: "timeline_frame", via: "timeline",
+      ranges: [{ input: "s3://ingest/src.mp4", start: 12.5, end: 12.5, unit: "s" }], settings: { op: "frame" },
+    });
+    const crop = timelineLineage({ ...o, range: { start: 1, end: Number.NaN } }, "s3://ingest/src.mp4",
+      { op: "crop", box: { x: 0.1, y: 0, w: 0.5, h: 1 } });
+    expect(crop.ranges).toBeUndefined();
+    expect(crop.settings).toEqual({ op: "crop", box: [0.1, 0, 0.5, 1] });
+  });
+});
 
 const PID = "p" + "a".repeat(32);
 const SID = "11111111-2222-4333-8444-555555555555";
@@ -97,7 +111,8 @@ describe("POST /media/actions", () => {
     // registration: lineage output ← source
     expect(d.calls.notify[0]).toMatchObject({ sessionId: SID, turnId: "act-1", projectId: PID, actorSub: "u1" });
     expect(d.calls.notify[0].summary.lineage).toEqual([
-      { output: "s3://skills/k/trailer_clip.mp4", inputs: ["s3://ingest/projects/x/trailer.mp4"], tool: "timeline_clip" },
+      { output: "s3://skills/k/trailer_clip.mp4", inputs: ["s3://ingest/projects/x/trailer.mp4"], tool: "timeline_clip",
+        via: "timeline", settings: { op: "clip" } },
     ]);
     // the action line
     expect(d.calls.record[0].m).toMatchObject({ id: "act-1-x", role: "action", turnId: "act-1",

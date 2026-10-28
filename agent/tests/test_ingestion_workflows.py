@@ -40,9 +40,40 @@ def test_every_spec_names_real_tools():
               "media-processing___process_media", "media-processing___get_job_status",
               "shot-metadata-enrichment___enrich_shot_metadata", "shot-metadata-enrichment___get_job_status",
               "conversation-analysis___analyze_conversation", "conversation-analysis___get_job_status",
-              "bedrock-inference___run_inference", "bedrock-inference___get_job_status"}
+              "bedrock-inference___run_inference", "bedrock-inference___get_job_status",
+              # Entity-metadata workflows (Phase 1) — verified live against the staging M2C gateway target config
+              # (docs/entity-metadata-workflows.md).
+              "face-recognition___recognize_faces", "face-recognition___get_job_status",
+              "program-structure-analysis___analyze_program_structure",
+              "program-structure-analysis___get_job_status",
+              "cast-resolution___resolve_cast", "cast-resolution___get_job_status"}
     for spec in W.WORKFLOWS.values():
         assert spec.submit_tool in listed and spec.status_tool in listed
+
+
+def test_entity_metadata_specs_and_args():
+    assert W.WORKFLOWS[W.FACE_RECOGNITION].labels == ("face-metadata",)
+    assert W.WORKFLOWS[W.PROGRAM_STRUCTURE].labels == ("structure",)
+    assert W.WORKFLOWS[W.CAST_RESOLUTION].labels == ("persons",)
+    # face-recognition: only the source URI, no use_batch / history_scope.
+    assert W.face_recognition_args(SRC) == {"asset_s3uri": SRC}
+    assert "use_batch" not in W.face_recognition_args(SRC)
+    # program-structure: the two required run prefixes; conversation + transcript only when supplied.
+    assert W.program_structure_args("s3://m/shots/", "s3://m/enrich/") == {
+        "shot_segmentation_s3uri": "s3://m/shots", "shot_metadata_s3uri": "s3://m/enrich"}
+    full = W.program_structure_args("s3://m/shots", "s3://m/enrich", "s3://m/conv/", "s3://m/t.json")
+    assert full["conversation_analysis_s3uri"] == "s3://m/conv" and full["transcript_s3uri"] == "s3://m/t.json"
+    assert "use_batch" not in full
+    # cast-resolution: face + shots + shot-metadata prefixes; speech-diar only when supplied.
+    assert W.cast_resolution_args("s3://m/face/", "s3://m/shots/", "s3://m/enrich/") == {
+        "face_recognition_s3uri": "s3://m/face", "shot_segmentation_s3uri": "s3://m/shots",
+        "shot_metadata_s3uri": "s3://m/enrich"}
+    withspk = W.cast_resolution_args("s3://m/face", "s3://m/shots", "s3://m/enrich", "s3://m/diar/")
+    assert withspk["speech_diarization_s3uri"] == "s3://m/diar"
+    # Rerun tokens thread through all three.
+    for args in (W.face_recognition_args(SRC, "r2-ab"), W.program_structure_args("a", "b", token="r2-ab"),
+                 W.cast_resolution_args("a", "b", "c", token="r2-ab")):
+        assert args["idempotency_token"] == "r2-ab"
 
 
 @pytest.mark.parametrize("text,match", [
@@ -112,6 +143,25 @@ def test_catalog_required_and_missing():
     assert catalog.refusal(("a", "b")) == "the M2C catalog is missing a, b"
     with pytest.raises(ValueError):
         catalog.required_tools("document")
+
+
+def test_catalog_entity_metadata_flag_gates_the_new_tools():
+    # OFF (default): the entity-metadata tools are neither required nor reported missing.
+    base = catalog.required_tools("video")
+    assert "face-recognition___recognize_faces" not in base
+    assert catalog.missing_tools(["video"], base) == ()
+    # ON: the three entity-metadata workflows' tools become required for video (and only video).
+    ent = catalog.required_tools("video", entity_metadata=True)
+    for t in ("face-recognition___recognize_faces", "face-recognition___get_job_status",
+              "program-structure-analysis___analyze_program_structure",
+              "program-structure-analysis___get_job_status",
+              "cast-resolution___resolve_cast", "cast-resolution___get_job_status"):
+        assert t in ent
+    assert catalog.required_tools("audio", entity_metadata=True) == catalog.required_tools("audio")  # video-only
+    # An env missing the entity-metadata tools passes when OFF, refuses when ON.
+    assert catalog.missing_tools(["video"], base, entity_metadata=False) == ()
+    missing = catalog.missing_tools(["video"], base, entity_metadata=True)
+    assert set(missing) == set(ent) - set(base) and missing[0].startswith("face-recognition")
 
 
 # --------------------------------------------------------------------------------------- outputs

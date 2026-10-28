@@ -66,7 +66,7 @@ test('Agents (c) built-in sub-agents are listed in the Agents tab', async ({ pag
   // the "Yours" list and mask a missing built-in.
   const builtinPanel = page.getByTestId('builtin-agents');
   await expect(builtinPanel).toBeVisible({ timeout: 15000 });
-  for (const label of ['Task Agent', 'Render Agent', 'Planning Agent', 'Design Agent']) {
+  for (const label of ['Task Agent', 'Render Agent', 'Planning Agent']) {
     await expect(builtinPanel.getByText(label, { exact: true }).first(),
       `built-in "${label}" should be listed`).toBeVisible({ timeout: 15000 });
   }

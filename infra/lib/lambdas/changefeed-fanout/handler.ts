@@ -85,6 +85,8 @@ interface Job {
   planNodeId: string | null;
   dependsOn: string[];
   artifactUrls: string[];
+  /** What a completed plan node made (recorded by the plan chainer); omitted until then. */
+  outputs?: { uri: string; key: string; kind: string }[];
 }
 
 interface JobUpdateEvent {
@@ -149,7 +151,23 @@ function projectJob(image: Record<string, unknown>): Job | null {
     artifactUrls: Array.isArray(image.artifactUrls)
       ? image.artifactUrls.filter((x): x is string => typeof x === "string")
       : [],
+    // Same as `GET /jobs` (ui/server/jobsProjection.ts projectOutputs): only well-formed media entries.
+    ...(Array.isArray(image.outputs) ? { outputs: projectOutputs(image.outputs) } : {}),
   };
+}
+
+const OUTPUT_KINDS = new Set(["video", "image", "audio"]);
+
+function projectOutputs(raw: unknown[]): { uri: string; key: string; kind: string }[] {
+  const out: { uri: string; key: string; kind: string }[] = [];
+  for (const o of raw) {
+    if (!o || typeof o !== "object") continue;
+    const { uri, key, kind } = o as Record<string, unknown>;
+    if (typeof uri === "string" && typeof key === "string" && typeof kind === "string" && OUTPUT_KINDS.has(kind)) {
+      out.push({ uri, key, kind });
+    }
+  }
+  return out;
 }
 
 /**

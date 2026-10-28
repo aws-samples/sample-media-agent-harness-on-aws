@@ -70,7 +70,8 @@ def test_plan_outputs_are_deterministic_and_under_the_session_output_prefix():
         f"projects/{PID}/sessions/{SID}/output/trailer_frame_0026_500_34abcd1.jpg",
     ]
     clip = ma.plan_outputs(ma.parse_action(_raw("clip", ranges=[{"inMs": 23000, "outMs": 30000}])), "p/")
-    assert clip == [{"kind": "video", "in": 23.0, "out": 30.0, "key": "p/trailer_clip_0023-0030_34abcd0.mp4"}]
+    assert clip == [{"kind": "video", "in_ms": 23000, "out_ms": 30000, "fast": False,
+                     "key": "p/trailer_clip_0023-0030_34abcd0.mp4"}]
 
 
 def test_sandbox_program_injects_params_verbatim_and_disables_the_script_cli():
@@ -213,9 +214,16 @@ def test_the_entrypoint_branches_before_any_agent_setup():
     assert "Agent(" not in mod.replace("never builds a Strands Agent", "") and "build_model" not in mod
 
 
-def test_a_plain_clip_is_a_stream_copy_and_a_crop_reencodes_fast():
-    from media_actions import _RUNNER
-    assert '"-c", "copy"' in _RUNNER and "_copyable(_ffprobe, _local)" in _RUNNER
+def test_a_plain_clip_reencodes_by_default_and_fast_is_opt_in():
+    # The default clip is a frame-accurate RE-ENCODE (no stream copy); the fast opt-in restores it.
+    from media_actions import _RUNNER, clip_cmd
+    # The runner snaps + re-encodes by default, and only stream-copies behind the fast flag.
+    assert "snap_clip(_j[\"in_ms\"], _j[\"out_ms\"], _fps)" in _RUNNER
+    assert 'bool(_j.get("fast")) and _copyable(_ffprobe, _local)' in _RUNNER
+    default = clip_cmd("ffmpeg", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True)
+    assert "-c:v" in default and "libx264" in default and "copy" not in default
+    fast = clip_cmd("ffmpeg", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True, fast=True)
+    assert fast[fast.index("-c") + 1] == "copy" and "libx264" not in fast
     assert '"-preset", "superfast"' in _RUNNER and '"veryfast"' not in _RUNNER
 
 
@@ -247,13 +255,139 @@ def test_a_stream_copy_clip_starts_on_the_exact_marked_frame(tmp_path):
 
 
 def test_the_injected_params_are_valid_python_for_a_crop_with_no_time_range():
-    # Staging 2026-10-19: a crop with no marked range has jobs with "in": None; written as JSON (`null`) into the
+    # Staging 2026-10-19: a crop with no marked range has jobs with "in_ms": None; written as JSON (`null`) into the
     # sandbox program it raised NameError: name 'null' is not defined. Every param must load as Python.
     act = ma.parse_action(_raw("crop", box={"x": 0.317, "y": 0, "w": 0.316, "h": 1}))
     jobs = ma.plan_outputs(act, "p/")
-    assert jobs[0]["in"] is None
+    assert jobs[0]["in_ms"] is None
     code = ma.build_sandbox_code("", act, jobs, bucket="b", domain="d", region="us-west-2")
     header = code.split("# --- injected params + runner ---\n", 1)[1].split("\nimport os", 1)[0]
     ns: dict = {}
     exec(header, ns)  # noqa: S102 - the header we generate
-    assert ns["_JOBS"][0]["in"] is None and ns["_JOBS"][0]["box"] == [0.317, 0.0, 0.316, 1.0]
+    assert ns["_JOBS"][0]["in_ms"] is None and ns["_JOBS"][0]["box"] == [0.317, 0.0, 0.316, 1.0]
+
+# ------------------------------------------------------------------ frame-grid snapping (pure)
+@pytest.mark.parametrize("fps", [24000.0 / 1001, 24.0, 25.0, 30000.0 / 1001, 30.0, 60.0])
+def test_a_between_frame_ms_snaps_to_the_nearest_frame_and_back_to_its_exact_time(fps):
+    # Pick frame 100's exact time, nudge it a few ms off the grid; it must snap back to frame 100.
+    frame = 100
+    exact_ms = int(round(frame / fps * 1000))
+    for nudge in (-7, -3, 2, 6):
+        at_t, at_frame = ma.snap_frame(exact_ms + nudge, fps)
+        assert at_frame == frame
+        assert at_t == pytest.approx(frame / fps)
+        # at_t lands on a real frame boundary: at_t * fps is (within fp tolerance) an integer.
+        assert at_t * fps == pytest.approx(round(at_t * fps))
+
+
+@pytest.mark.parametrize("fps", [24000.0 / 1001, 24.0, 25.0, 30000.0 / 1001, 30.0, 60.0])
+def test_snap_clip_covers_the_expected_half_open_frame_count(fps):
+    # A clip from frame 10 to frame 55 covers [10, 55) = 45 frames.
+    in_ms = int(round(10 / fps * 1000))
+    out_ms = int(round(55 / fps * 1000))
+    in_t, dur, in_frame, out_frame = ma.snap_clip(in_ms, out_ms, fps)
+    assert (in_frame, out_frame) == (10, 55)
+    assert out_frame - in_frame == 45
+    assert in_t == pytest.approx(10 / fps)
+    assert dur == pytest.approx(45 / fps)
+
+
+def test_snap_clip_guards_out_greater_than_in():
+    # in and out that round to the same frame still yield at least one whole frame.
+    in_t, dur, in_frame, out_frame = ma.snap_clip(1000, 1005, 30.0)
+    assert out_frame == in_frame + 1
+    assert dur == pytest.approx(1 / 30.0)
+
+
+def test_snap_is_a_no_op_fallback_when_fps_is_unknown():
+    # fps None (probe could not determine it): unsnapped times, no frame indices, no error.
+    at_t, at_frame = ma.snap_frame(1234, None)
+    assert at_frame is None and at_t == pytest.approx(1.234)
+    in_t, dur, in_frame, out_frame = ma.snap_clip(1000, 4500, None)
+    assert in_frame is None and out_frame is None
+    assert in_t == pytest.approx(1.0) and dur == pytest.approx(3.5)
+    # A fps of 0 (degenerate rational) is treated as unknown too.
+    assert ma.snap_frame(1000, 0)[1] is None
+
+
+# ------------------------------------------------------------------ command construction (pure)
+def test_clip_cmd_reencodes_with_snapped_times_by_default():
+    at_30fps = 15 / 30.0            # frame 15
+    in_t, dur, _, _ = ma.snap_clip(500, 1000, 30.0)
+    cmd = ma.clip_cmd("ff", "in.mp4", "out.mp4", in_t, dur, has_audio=True)
+    assert "copy" not in cmd
+    assert cmd[:2] == ["ff", "-y"]
+    # -ss comes BEFORE -i (accurate input seek), carrying the snapped in_t and duration.
+    assert cmd.index("-ss") < cmd.index("-i")
+    assert cmd[cmd.index("-ss") + 1] == f"{in_t:.6f}"
+    assert cmd[cmd.index("-t") + 1] == f"{dur:.6f}"
+    assert "libx264" in cmd and "-crf" in cmd and "aac" in cmd
+    assert at_30fps  # frame-grid sanity: 0.5 s is frame 15 at 30fps
+
+
+def test_clip_cmd_without_audio_uses_an():
+    cmd = ma.clip_cmd("ff", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=False)
+    assert "-an" in cmd and "aac" not in cmd
+
+
+def test_clip_cmd_fast_restores_the_stream_copy():
+    cmd = ma.clip_cmd("ff", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True, fast=True)
+    assert cmd[cmd.index("-c") + 1] == "copy"
+    assert "libx264" not in cmd and "-crf" not in cmd
+    assert cmd.index("-ss") < cmd.index("-i")
+
+
+def test_frame_cmd_seeks_to_the_snapped_time_and_grabs_one_frame():
+    at_t, at_frame = ma.snap_frame(1000, 30000.0 / 1001)   # ~frame 30 at 29.97
+    cmd = ma.frame_cmd("ff", "in.mp4", "out.jpg", at_t)
+    assert cmd.index("-ss") < cmd.index("-i")              # accurate input seek
+    assert cmd[cmd.index("-ss") + 1] == f"{at_t:.6f}"
+    assert cmd[cmd.index("-frames:v") + 1] == "1"
+    assert at_frame == 30
+
+
+def test_clip_action_carries_the_fast_flag_into_its_jobs():
+    on = ma.parse_action(_raw("clip", ranges=[{"inMs": 0, "outMs": 5000}], fast=True))
+    assert on.fast is True and ma.plan_outputs(on, "p/")[0]["fast"] is True
+    off = ma.parse_action(_raw("clip", ranges=[{"inMs": 0, "outMs": 5000}]))
+    assert off.fast is False and ma.plan_outputs(off, "p/")[0]["fast"] is False
+
+
+def test_probe_fps_parses_avg_then_r_frame_rate(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "skills/video-processing/scripts/crop_video.py"
+    spec = importlib.util.spec_from_file_location("crop_video_fps", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._parse_rational_fps("30000/1001") == pytest.approx(29.97, abs=0.01)
+    assert mod._parse_rational_fps("24/1") == 24.0
+    assert mod._parse_rational_fps("25") == 25.0
+    # Unknown forms fall back to None.
+    assert mod._parse_rational_fps("0/0") is None
+    assert mod._parse_rational_fps("") is None
+    assert mod._parse_rational_fps(None) is None
+
+    class _FP:
+        def __init__(self, stdout):
+            self.stdout = stdout
+            self.returncode = 0
+
+    import json as _json
+    calls = {}
+
+    def fake_run(args, **kw):
+        calls["args"] = args
+        return _FP(_json.dumps({"streams": [{"avg_frame_rate": "0/0", "r_frame_rate": "30/1"}]}))
+
+    # monkeypatch so the shared stdlib subprocess.run is restored after this test.
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    # avg is unusable (0/0) -> falls back to r_frame_rate = 30.
+    assert mod.probe_fps("ffprobe", "x.mp4") == 30.0
+    assert any("avg_frame_rate" in str(a) for a in calls["args"])
+
+    def boom(args, **kw):
+        raise OSError("no ffprobe")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    assert mod.probe_fps("ffprobe", "x.mp4") is None   # best-effort: unknown, not an error

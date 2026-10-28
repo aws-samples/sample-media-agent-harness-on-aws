@@ -106,6 +106,9 @@ docs/WEEKLY-CHANGES-*.md
 *.mov
 *.mkv
 *.wav
+# The one exception: the Personal sample the deploy uploads (the demo tour's 0-demo.mp4, ~7 MB,
+# infra/lib/personal-samples.ts). It ships with the repo so every deploy, prod included, needs no manual upload.
+!infra/assets/samples/*.mp4
 
 # M2C service repos — each is a SEPARATE git repo cloned in-tree for local
 # reference/dev (they have their own .git). They are never part of this repo;

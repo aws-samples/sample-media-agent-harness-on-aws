@@ -44,6 +44,13 @@ export interface MediaCardProps {
   posterAt?: number;
   /** Fit the picture whole (a frame strip, a vertical crop) instead of filling the box. */
   contain?: boolean;
+  /**
+   * An image at its OWN aspect ratio, never cropped (chat: a wide or tall image read badly cut to 16:9). It fits a
+   * box as wide as the container and {@link FIT_MAX_HEIGHT_PX} tall, by whichever side is longer, and is never
+   * enlarged past its own size; the card shrinks to the picture. Only while there is a `thumb` — the loading
+   * skeleton keeps the 16:9 box.
+   */
+  fitWidth?: boolean;
   /** Bottom-right badge: a duration, a moment's length. */
   badge?: string;
   /** Bottom-left badge: a moment's range. */
@@ -114,10 +121,12 @@ export function MediaCard(p: MediaCardProps) {
   const showActs = hover || menuOpen || NO_HOVER;
 
   let picture: React.ReactNode;
+  const fitWidth = !!p.fitWidth && !p.pictureOverride && !!p.thumb;
   if (p.pictureOverride) {
     picture = p.pictureOverride;
   } else if (p.thumb) {
-    picture = <img src={p.thumb} alt={p.title} loading="lazy" style={{ ...fillStyle, objectFit: p.contain ? 'contain' : 'cover' }}
+    picture = <img src={p.thumb} alt={p.title} loading="lazy"
+      style={fitWidth ? fitWidthImgStyle : { ...fillStyle, objectFit: p.contain ? 'contain' : 'cover' }}
       onLoad={(e) => p.onMediaMeta?.({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
       onError={p.onMediaError} />;
   } else if (p.videoSrc) {
@@ -142,12 +151,14 @@ export function MediaCard(p: MediaCardProps) {
     // An open menu lifts the whole card: the icon row is transformed (its own stacking context), so the menu's
     // z-index alone cannot clear the next row of cards, which painted over it.
     <Root style={{ ...(p.selected || p.highlight ? { ...cardStyle, ...cardSelStyle } : cardStyle), ...(p.as === 'span' ? spanRootStyle : null),
+      ...(fitWidth && p.as === 'span' ? spanFitWidthStyle : null),
       ...(menuOpen ? { zIndex: theme.zIndex.popover } : null) }}
-      data-testid={p.testId ?? 'media-card'} data-kind={p.kind}
+      data-testid={p.testId ?? 'media-card'} data-kind={p.kind} data-fit={fitWidth ? 'width' : undefined}
       {...p.dataAttrs} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       onFocus={() => setHover(true)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setHover(false); }}
       draggable={!!p.onDragStart} onDragStart={p.onDragStart}>
-      <span style={p.selecting && p.onSelectedChange ? { ...mediaStyle, cursor: 'pointer' } : mediaStyle} onClick={pictureClick}
+      <span style={{ ...mediaStyle, ...(fitWidth ? mediaFitWidthStyle : null),
+        ...(p.selecting && p.onSelectedChange ? { cursor: 'pointer' } : null) }} onClick={pictureClick}
         data-card-media="">
         {picture}
         {(p.kind === 'video' || p.videoSrc) && !p.overlay && <span style={playStyle} aria-hidden="true"><span style={playGlyphStyle} /></span>}
@@ -256,6 +267,18 @@ const mediaStyle: React.CSSProperties = {
   background: theme.colors.surfaceSubtle, borderRadius: `${theme.radius.panel}px ${theme.radius.panel}px 0 0`,
 };
 const fillStyle: React.CSSProperties = { position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block' };
+// `fitWidth`: the picture sets the box (no 16:9 frame) and is never cropped. It is scaled down to fit the container's
+// width and FIT_MAX_HEIGHT_PX, so the longer side decides: a wide strip spans the bubble, a portrait stops at the
+// height cap. Auto width/height with both maxima keep the aspect ratio, and nothing is enlarged past its natural size
+// (a 204×271 face crop used to be blown up to the bubble's full width).
+export const FIT_MAX_HEIGHT_PX = 380;
+const mediaFitWidthStyle: React.CSSProperties = { aspectRatio: 'auto' };
+const fitWidthImgStyle: React.CSSProperties = {
+  display: 'block', width: 'auto', height: 'auto', maxWidth: '100%', maxHeight: FIT_MAX_HEIGHT_PX, margin: '0 auto',
+};
+// In chat the card hugs the picture (up to the whole bubble, not the 380px card cap); a minimum keeps the name and
+// actions readable under a small image, which then sits centred on the stage colour.
+const spanFitWidthStyle: React.CSSProperties = { width: 'fit-content', maxWidth: '100%', minWidth: 'min(100%, 240px)' };
 const tileStyle: React.CSSProperties = { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: theme.colors.textTertiary };
 const playStyle: React.CSSProperties = {
   position: 'absolute', left: '50%', top: '50%', width: 34, height: 34, marginLeft: -17, marginTop: -17, borderRadius: theme.radius.pill,

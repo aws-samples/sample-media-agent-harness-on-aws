@@ -104,7 +104,7 @@ import custom_agent_tool
 # `model_id` (see _resolve_request_model) — the Agent is constructed fresh for
 # every request, so the model belongs in that construction alongside the
 # per-actor skills/tools/hooks rather than being mutated on a shared object.
-DEFAULT_ORCHESTRATOR_MODEL_ID = "global.anthropic.claude-opus-5"
+DEFAULT_ORCHESTRATOR_MODEL_ID = "global.anthropic.claude-opus-5-5"
 
 
 def _resolve_request_model(payload: dict, fallback):
@@ -223,7 +223,6 @@ MEMORY_ASYNC_WRITES = os.environ.get("MEMORY_ASYNC_WRITES", "1").strip().lower()
 )
 MEMORY_WRITE_BATCH_SIZE = max(2, min(100, int(os.environ.get("MEMORY_WRITE_BATCH_SIZE", "50"))))
 PLANNING_AGENT_ARN = os.environ.get("PLANNING_AGENT_RUNTIME_ARN", "")
-DESIGN_AGENT_ARN = os.environ.get("DESIGN_AGENT_RUNTIME_ARN", "")
 PLAN_STATE_TABLE = os.environ.get("PLAN_STATE_TABLE", "")
 LAB_ASSET_INDEX_TABLE = os.environ.get("ASSET_INDEX_TABLE", "")
 LAB_ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET", "")

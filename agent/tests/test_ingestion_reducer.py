@@ -181,3 +181,193 @@ def test_failure_step_for_document():
     assert R.failure_step_for("document", "analyzing", {}) == W.DOCUMENT_EXTRACT
     done = {W.DOCUMENT_EXTRACT: {"status": "SUCCEEDED"}}
     assert R.failure_step_for("document", "analyzing", done) == "document build"
+
+
+# --------------------------------------------------------------- entity-metadata workflows (Phase 1, flag-gated)
+ENTITY_CFG = R.Config(entity_metadata=True)
+
+
+def wave2_ready(speech=True):
+    """Wave 1 done + wave 2 done (enrichment, conversation if speech, face-recognition), with the output
+    prefixes a wave-3 submission reads."""
+    diar = ok("d", outputPrefix="s3://m/diar-run", **SPEECH) if speech else \
+        ok("d", outputPrefix="s3://m/diar-run", facts={"hasSpeech": False}, outputs={})
+    steps = {W.SHOT_SEGMENTATION: ok("s", outputPrefix="s3://m/shots-run"),
+             W.SPEECH_DIARIZATION: diar, W.FRAME_CAPTURE: ok("f"),
+             W.ENRICHMENT: ok("e", outputPrefix="s3://m/enrich-run",
+                              inputs=["s", "d"] if speech else ["s"]),
+             W.FACE_RECOGNITION: ok("frec", outputPrefix="s3://m/face-run", inputs=[])}
+    if speech:
+        steps[W.CONVERSATION_ANALYSIS] = ok("c", outputPrefix="s3://m/conv-run", inputs=["d"])
+    return steps
+
+
+def test_flag_off_is_unchanged_video_pipeline():
+    # Start: wave 2 is enrichment (+conversation), NOT face-recognition.
+    assert R.plan_video(wave1(), NOW, 1).submit == (W.ENRICHMENT, W.CONVERSATION_ANALYSIS)
+    assert W.FACE_RECOGNITION not in R.plan_video(wave1(), NOW, 1).submit
+    # A seeded face step is ignored, and the build happens after wave 2 (no wave 3 required).
+    assert R.plan_video(wave2_ready(), NOW, 1) == R.Plan(build=True)
+
+
+def test_entity_face_recognition_submits_in_wave1():
+    # Change: face-recognition has no upstream dep, so with the flag ON it is in the FIRST submit batch,
+    # alongside shot-segmentation / speech-diarization / frame-capture — not deferred until wave 1 finishes.
+    plan = R.plan_video({}, NOW, 1, ENTITY_CFG)
+    assert plan.submit == R.VIDEO_WAVE1 + (W.FACE_RECOGNITION,)
+    assert plan.fail is None and plan.build is False
+    # Flag OFF: the first batch is wave 1 only, face is NOT submitted.
+    assert R.plan_video({}, NOW, 1).submit == R.VIDEO_WAVE1
+    assert W.FACE_RECOGNITION not in R.plan_video({}, NOW, 1).submit
+    # Even while wave 1 is still running, face rides along (submitted once, then tracked as in-flight).
+    running_w1 = {s: running(s) for s in R.VIDEO_WAVE1}
+    assert R.plan_video(running_w1, NOW, 1, ENTITY_CFG).submit == (W.FACE_RECOGNITION,)
+
+
+def test_entity_face_in_wave1_is_best_effort_and_never_fatal():
+    # face-recognition FAILS this run while wave 1 is still in flight: it is skipped (not in the fatal
+    # wave-1 gate), the asset is NOT failed, and wave 1 is still "not done" purely on its own three steps.
+    steps = {W.SHOT_SEGMENTATION: running("s"), W.SPEECH_DIARIZATION: running("d"),
+             W.FRAME_CAPTURE: running("f"), W.FACE_RECOGNITION: failed("frec", inputs=[])}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.fail is None and plan.build is False and plan.submit == ()
+
+
+def test_entity_face_recognition_catches_up_alongside_enrichment():
+    # If wave 1 completed before face had been submitted (synthetic state: no face record yet), face still
+    # submits — now in the enrichment batch — so it is never dropped. The build still gates on it later.
+    plan = R.plan_video(wave1(), NOW, 1, ENTITY_CFG)
+    assert plan.submit == (W.ENRICHMENT, W.CONVERSATION_ANALYSIS, W.FACE_RECOGNITION)
+    assert R.inputs_for(W.FACE_RECOGNITION, wave1(), True) == ()
+    assert R.submit_arguments(W.FACE_RECOGNITION, wave1(), "s3://src", None) == {"asset_s3uri": "s3://src"}
+
+
+def test_entity_wave3_submits_program_structure_and_cast_after_wave2():
+    steps = wave2_ready()
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.fail is None and plan.build is False
+    assert plan.submit == (W.PROGRAM_STRUCTURE, W.CAST_RESOLUTION)
+    # Inputs (reuse keys): PSA consumes shots+enrichment (+conversation+diar when speech);
+    # cast consumes face+shots+enrichment (+diar when speech).
+    assert R.inputs_for(W.PROGRAM_STRUCTURE, steps, True) == ("s", "e", "c", "d")
+    assert R.inputs_for(W.CAST_RESOLUTION, steps, True) == ("frec", "s", "e", "d")
+    ps = R.submit_arguments(W.PROGRAM_STRUCTURE, steps, "s3://src", None)
+    assert ps == {"shot_segmentation_s3uri": "s3://m/shots-run", "shot_metadata_s3uri": "s3://m/enrich-run",
+                  "conversation_analysis_s3uri": "s3://m/conv-run", "transcript_s3uri": "s3://m/t.json"}
+    cr = R.submit_arguments(W.CAST_RESOLUTION, steps, "s3://src", None)
+    assert cr == {"face_recognition_s3uri": "s3://m/face-run", "shot_segmentation_s3uri": "s3://m/shots-run",
+                  "shot_metadata_s3uri": "s3://m/enrich-run", "speech_diarization_s3uri": "s3://m/diar-run"}
+
+
+def test_entity_build_only_after_wave3_done():
+    steps = {**wave2_ready(),
+             W.PROGRAM_STRUCTURE: ok("ps", inputs=["s", "e", "c", "d"]),
+             W.CAST_RESOLUTION: ok("cr", inputs=["frec", "s", "e", "d"])}
+    assert R.plan_video(steps, NOW, 1, ENTITY_CFG) == R.Plan(build=True)
+
+
+def test_cast_and_program_gate_behind_wave2():
+    # face-recognition still running → wave 2 not done → no wave-3 submission, no build.
+    running_face = {**wave2_ready(), W.FACE_RECOGNITION: running("frec")}
+    assert R.plan_video(running_face, NOW, 1, ENTITY_CFG) == R.Plan()
+    # enrichment still running → same (cast/program depend on the enrichment run).
+    running_enrich = {**wave2_ready(), W.ENRICHMENT: running("e", inputs=["s", "d"])}
+    assert R.plan_video(running_enrich, NOW, 1, ENTITY_CFG) == R.Plan()
+
+
+def test_entity_silent_video_omits_speech_inputs():
+    steps = wave2_ready(speech=False)
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.submit == (W.PROGRAM_STRUCTURE, W.CAST_RESOLUTION)
+    assert R.inputs_for(W.PROGRAM_STRUCTURE, steps, False) == ("s", "e")
+    assert R.inputs_for(W.CAST_RESOLUTION, steps, False) == ("frec", "s", "e")
+    ps = R.submit_arguments(W.PROGRAM_STRUCTURE, steps, "s3://src", None)
+    assert ps == {"shot_segmentation_s3uri": "s3://m/shots-run", "shot_metadata_s3uri": "s3://m/enrich-run"}
+    assert "transcript_s3uri" not in ps and "conversation_analysis_s3uri" not in ps
+    cr = R.submit_arguments(W.CAST_RESOLUTION, steps, "s3://src", None)
+    assert "speech_diarization_s3uri" not in cr
+
+
+# ------------------------------------------------------- entity-metadata best-effort (non-fatal), Change 1 + 2
+def failed(job, seq=1, **kw):
+    return {"status": "FAILED", "jobId": job, "runSeq": seq, "inputs": [], "error": "boom", **kw}
+
+
+def test_entity_step_failure_is_never_fatal_and_does_not_hold_the_build():
+    # A load-bearing wave is all done; every entity-metadata step terminally FAILED this run → build, not fail.
+    steps = {**wave2_ready(), W.FACE_RECOGNITION: failed("frec", inputs=[]),
+             W.PROGRAM_STRUCTURE: failed("ps", inputs=["s", "e", "c", "d"]),
+             W.CAST_RESOLUTION: failed("cr", inputs=["frec", "s", "e", "d"])}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.fail is None and plan.build is True and plan.submit == ()
+
+
+def test_program_structure_failure_still_builds_with_the_cast_that_succeeded():
+    steps = {**wave2_ready(),
+             W.PROGRAM_STRUCTURE: failed("ps", inputs=["s", "e", "c", "d"]),
+             W.CAST_RESOLUTION: ok("cr", inputs=["frec", "s", "e", "d"])}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.fail is None and plan.build is True
+
+
+def test_face_failure_blocks_cast_rather_than_failing_it():
+    # face-recognition failed this run → cast-resolution is BLOCKED (its identities can't resolve), not
+    # submitted and not an independent failure; program-structure (independent) still submits.
+    steps = {**wave2_ready(), W.FACE_RECOGNITION: failed("frec", inputs=[])}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.fail is None
+    assert plan.submit == (W.PROGRAM_STRUCTURE,)
+    assert W.CAST_RESOLUTION not in plan.submit
+    assert [s for s, _ in plan.blocked] == [W.CAST_RESOLUTION]
+    assert W.FACE_RECOGNITION in plan.blocked[0][1]  # reason names the failed upstream step
+
+
+def test_face_failure_then_program_done_builds_with_cast_blocked():
+    steps = {**wave2_ready(), W.FACE_RECOGNITION: failed("frec", inputs=[]),
+             W.PROGRAM_STRUCTURE: ok("ps", inputs=["s", "e", "c", "d"]),
+             W.CAST_RESOLUTION: {"status": R.SKIPPED, "runSeq": 1, "inputs": ["frec", "s", "e", "d"]}}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.build is True and plan.fail is None and plan.submit == ()
+
+
+def test_an_already_skipped_cast_is_still_reported_blocked_but_not_resubmitted():
+    steps = {**wave2_ready(), W.FACE_RECOGNITION: failed("frec", inputs=[]),
+             W.CAST_RESOLUTION: {"status": R.SKIPPED, "runSeq": 1, "inputs": ["frec", "s", "e", "d"]}}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert W.CAST_RESOLUTION not in plan.submit
+    assert [s for s, _ in plan.blocked] == [W.CAST_RESOLUTION]
+    assert plan.submit == (W.PROGRAM_STRUCTURE,)
+
+
+def test_an_entity_failure_from_an_earlier_run_is_rerun():
+    # Re-add (run 2): face FAILED in run 1 → not current → resubmitted; program SUCCEEDED in run 1 with
+    # unchanged inputs → reused (NOT resubmitted). Only the failed entity-metadata step reruns.
+    steps = {**wave2_ready(),
+             W.FACE_RECOGNITION: failed("frec", seq=1, inputs=[]),
+             W.PROGRAM_STRUCTURE: ok("ps", inputs=["s", "e", "c", "d"])}
+    plan = R.plan_video(steps, NOW, 2, ENTITY_CFG)
+    assert plan.fail is None
+    assert plan.submit == (W.FACE_RECOGNITION,)
+    assert W.PROGRAM_STRUCTURE not in plan.submit
+
+
+def test_entity_timeout_or_call_failures_are_skipped_not_fatal():
+    late = running("frec", inputs=[], submittedAt=NOW - 6 * 3600 - 1)
+    steps = {**wave2_ready(), W.FACE_RECOGNITION: late,
+             W.PROGRAM_STRUCTURE: ok("ps", inputs=["s", "e", "c", "d"])}
+    plan = R.plan_video(steps, NOW, 1, ENTITY_CFG)
+    assert plan.fail is None  # a timed-out entity-metadata step does not fail the asset
+    assert [s for s, _ in plan.blocked] == [W.CAST_RESOLUTION]  # face unusable → cast blocked
+
+
+def test_flag_off_failure_step_attribution_ignores_entity_steps():
+    # Change 2: with the flag OFF the entity-metadata steps never exist, so an unexpected internal error on an
+    # otherwise-complete video must fall back to "document build", NOT the never-run "face-recognition".
+    assert R.VIDEO_STEPS == R.VIDEO_WAVE1 + (W.ENRICHMENT, W.CONVERSATION_ANALYSIS)
+    assert W.FACE_RECOGNITION not in R.VIDEO_STEPS
+    complete = {W.SHOT_SEGMENTATION: ok("s"), W.SPEECH_DIARIZATION: ok("d", **SPEECH),
+                W.FRAME_CAPTURE: ok("f"), W.ENRICHMENT: ok("e"), W.CONVERSATION_ANALYSIS: ok("c")}
+    assert R.failure_step_for("video", "analyzing", complete) == "document build"
+    # An incomplete video still attributes to the first missing load-bearing step.
+    assert R.failure_step_for("video", "analyzing", {}) == W.SHOT_SEGMENTATION
+

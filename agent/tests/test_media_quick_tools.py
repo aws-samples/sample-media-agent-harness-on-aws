@@ -45,6 +45,29 @@ def test_clip_video_takes_every_range_and_has_no_length_cap(captured):
     assert captured["act"].ranges_ms == [(0, 1000), (10000, 600500)]  # a 10-min clip is a stream copy: allowed
 
 
+def test_lineage_each_output_is_made_from_the_source_over_its_time_range(captured, monkeypatch):
+    import media_actions as ma
+    from media import turn_outputs
+
+    monkeypatch.setenv("INGESTION_CONFIG", json.dumps({"lineageEdges": True}))
+    monkeypatch.setattr(ma, "run_action", lambda act, **kw: {"ok": True, "outputs": [
+        {"name": "f.jpg", "url": "https://cdn/f.jpg", "kind": "image", "key": "artifacts/s/output/f.jpg",
+         "s3uri": "s3://b/artifacts/s/output/f.jpg", "range": {"start": 7.19, "end": 7.19}}]})
+    turn_outputs.open_turn()
+    try:
+        mq.extract_frames(source_url="https://cdn/v.mp4", times=[7.19])
+        (e,) = turn_outputs.lineage()
+        assert e["output"] == "s3://b/artifacts/s/output/f.jpg" and e["inputs"] == ["s3://b/k/v.mp4"]
+        assert e["tool"] == "extract_frames" and e["ranges"] == [
+            {"input": "s3://b/k/v.mp4", "start": 7.19, "end": 7.19, "unit": "s"}]
+        monkeypatch.delenv("INGESTION_CONFIG")
+        turn_outputs.open_turn()
+        mq.extract_frames(source_url="https://cdn/v.mp4", times=[7.19])
+        assert turn_outputs.lineage() == []  # flag off: exactly as before
+    finally:
+        turn_outputs.open_turn()
+
+
 def test_bad_inputs_are_explained_not_run(captured):
     assert "times" in json.loads(mq.extract_frames(source_url="https://cdn/v.mp4", times=[]))["error"]
     assert "ranges" in json.loads(mq.clip_video(source_url="https://cdn/v.mp4", ranges=[[5, 2]]))["error"]

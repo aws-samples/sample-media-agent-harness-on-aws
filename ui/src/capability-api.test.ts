@@ -270,7 +270,6 @@ describe('built-in agents must not reach the owner-asset lists', () => {
   const builtins = [
     builtinAgent('task-agent', 'Task Agent'),
     builtinAgent('planning-agent', 'Planning Agent'),
-    builtinAgent('design-agent', 'Design Agent'),
     builtinAgent('render-agent', 'Render Agent'),
   ];
 
@@ -292,11 +291,11 @@ describe('built-in agents must not reach the owner-asset lists', () => {
 
   it('would leak if a built-in version ever became a number', () => {
     // Documents the coupling explicitly. If `sources.py` starts emitting
-    // `"version": 1`, this flips and the four runtimes appear as owner-owned
+    // `"version": 1`, this flips and the built-in runtimes appear as owner-owned
     // published agents, each with a Delete button wired to purge.
     const asNumber = builtins.map((b) => ({ ...b, version: 1 }));
     const leaked = toPublishedSummaries({ category: 'specialty-agent', items: asNumber });
-    expect(leaked).toHaveLength(4);
+    expect(leaked).toHaveLength(builtins.length);
     // So the filter must be tightened to exclude `source === 'builtin'` before
     // that change can be made safely.
     const safe = asNumber.filter((i) => i.source !== 'builtin');

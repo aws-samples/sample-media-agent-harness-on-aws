@@ -64,6 +64,24 @@ export interface MediaActionOutput {
   url: string;
   key: string;
   s3uri: string;
+  /** The SOURCE time range (seconds) this output was cut from: a frame's instant, a clip's in/out. */
+  range?: { start: number; end: number };
+}
+
+/**
+ * One timeline output's lineage entry: made from the source, with the SOURCE time range it was cut from and the
+ * op's settings (a crop's box). The registrar records range and settings on the lineage edge only where
+ * `projects.lineageEdges` is on; elsewhere it reads the entry exactly as before (output, inputs, tool).
+ */
+export function timelineLineage(
+  o: MediaActionOutput, sourceUri: string, r: { op: string; box?: { x: number; y: number; w: number; h: number } },
+): Record<string, unknown> {
+  const range = o.range && Number.isFinite(o.range.start) && Number.isFinite(o.range.end) ? o.range : null;
+  return {
+    output: o.s3uri, inputs: [sourceUri], tool: `timeline_${r.op}`, via: "timeline",
+    ...(range ? { ranges: [{ input: sourceUri, start: range.start, end: range.end, unit: "s" }] } : {}),
+    settings: r.box ? { op: r.op, box: [r.box.x, r.box.y, r.box.w, r.box.h] } : { op: r.op },
+  };
 }
 
 /** The transcript form of an action line (`role: "action"`), and what the client renders. */
@@ -286,7 +304,7 @@ export async function handleMediaActions(req: any, res: any, deps: MediaActionsD
   if (ok && outputs.length && deps.notifyGeneratedMedia) {
     deps.notifyGeneratedMedia({
       sessionId: r.sessionId, turnId: actionId, projectId: pid, actorSub: actor, startedAt, endedAt, text: "", steps: [],
-      summary: { lineage: outputs.map((o) => ({ output: o.s3uri, inputs: [source.sourceUri], tool: `timeline_${r.op}` })) },
+      summary: { lineage: outputs.map((o) => timelineLineage(o, source.sourceUri, r)) },
     });
   }
   const record: ActionLineRecord = {

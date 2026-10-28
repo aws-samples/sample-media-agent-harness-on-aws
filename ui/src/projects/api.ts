@@ -189,6 +189,8 @@ export interface AssetDetail {
    * e.g. a music or sound-effect stem). Not a failure. Absent on a file stored only because indexing is off.
    */
   indexSkippedReason?: string;
+  /** A Personal sample (the demo tour's `0-demo.mp4`): the server lists it first, and the + menu keeps it first. */
+  pinned?: boolean;
   /**
    * The folder the asset sits in, as a `/`-separated path (`Footage/Day 1`, `Sessions/<session title> · <date>`,
    * legacy `Generated/<session title> · <date>`). Absent (or empty) means the top level.
@@ -1024,4 +1026,117 @@ export function getImportStatus(projectId: string): Promise<ProjectsResult<Impor
 /** `POST /projects/:pid/assets/rescan-import` — sweep the inbox now (it is also swept once a minute). */
 export function rescanImport(projectId: string): Promise<ProjectsResult<Record<string, number>>> {
   return call(`/projects/${enc(projectId)}/assets/rescan-import`, { method: 'POST', body: {} }, (b) => b as Record<string, number>);
+}
+
+// --------------------------------------------------------------------- asset lineage (projects.lineageEdges)
+// Served by the Asset_Service `lineage` command (agent/src/ingestion/lineage.py) over the lineage edge records.
+
+/** Whether lineage is on here (`/config.lineageEnabled`); false until `/config` has loaded. */
+export function peekLineageEnabled(): boolean {
+  return (peekRuntimeConfig() as { lineageEnabled?: unknown } | null)?.lineageEnabled === true;
+}
+
+/** Where an asset sits in its chain, from its edges alone (the stored `role` is by file type at registration). */
+export type LineageStage = 'source' | 'intermediate' | 'final' | 'standalone';
+
+export interface LineageNode {
+  id: string;
+  stage: LineageStage;
+  parents: number;
+  children: number;
+  kind: string | null;
+  displayName: string;
+  role?: string | null;
+  status?: string | null;
+  source?: string | null;
+  folder?: string;
+  registeredAt?: string | null;
+  sessionId?: string;
+  tool?: string;
+  jobId?: string;
+  turnId?: string;
+  visibility?: 'session';
+  /** Hops from the focus asset: negative = an ancestor. Present only on a focused graph. */
+  distance?: number;
+  removed?: boolean;
+  missing?: boolean;
+  /**
+   * Where the file's lineage begins: `upload` (uploaded by `addedByDisplay`), `import` (from `importedFrom`),
+   * `external` (made only from media downloaded from outside), `derived`, `scratch` (its step read no media) or
+   * `unrecorded` (generated, inputs not recorded — the one genuine gap), or `external_undecided` (downloaded from
+   * outside, but from which of `candidates` could not be decided: no parent is claimed).
+   */
+  origin?: 'upload' | 'import' | 'external' | 'derived' | 'scratch' | 'unrecorded' | 'external_undecided';
+  /** `external_undecided`: the URLs the download step named (credential-free). */
+  candidates?: string[];
+  addedByDisplay?: string;
+  importedFrom?: string;
+  /** An external source node (`ext:<hash>`): media that entered the Project from outside. */
+  external?: boolean;
+  url?: string;
+  host?: string;
+  license?: string;
+  firstSeenAt?: string;
+}
+
+/** The parent's time range a child was made from: seconds, or frames. */
+export interface LineageRange { start: number; end: number; unit: 's' | 'frame' }
+
+/** An edge from an INPUT (`from`) to the asset made from it (`to`). */
+export interface LineageEdge {
+  from: string;
+  to: string;
+  tool?: string;
+  jobId?: string;
+  turnId?: string;
+  sessionId?: string;
+  via?: string;
+  ranges?: LineageRange[];
+  settings?: Record<string, unknown>;
+  /** Inferred from a plan's dependencies / a turn's fetches, not observed. */
+  inferred?: boolean;
+  /** Stands for a path through files the viewer may not see (another member's "this chat only" file). */
+  contracted?: boolean;
+  /** A "group by chat" link: the chat that made the file (view-only, never stored). */
+  chat?: boolean;
+  /** `derivedFrom` when the edge is known only from the ASSET row (not yet backfilled). */
+  recorded?: 'edge' | 'derivedFrom';
+  createdAt?: string;
+}
+
+export interface LineageGap { child: string; ref: string; reason: string; tool?: string; jobId?: string; at?: string }
+
+export interface LineageGraph {
+  nodes: LineageNode[];
+  edges: LineageEdge[];
+  gaps: LineageGap[];
+  stats: {
+    nodes: number; edges: number; droppedEdges: number;
+    assets?: number; generated?: number;
+    /** Genuine gaps only: generated files whose inputs were not recorded. */
+    generatedWithoutLineage?: number;
+    origins?: { uploaded: number; imported: number; external: number; scratch: number; unrecorded: number;
+      externalUndecided?: number };
+    externalSources?: number;
+  };
+  /** Chat provenance (the proxy): the actor's own chats with their title and turn numbers. */
+  chats?: Record<string, { mine: boolean; title?: string; turns?: Record<string, number> }>;
+  truncated: boolean;
+  direction: string;
+  focus?: string;
+}
+
+export type LineageDirection = 'ancestors' | 'descendants' | 'both' | 'project';
+
+export interface LineageQuery {
+  assetId?: string;
+  direction?: LineageDirection;
+  depth?: number;
+  maxNodes?: number;
+  sessionId?: string;
+}
+
+/** `POST /projects/:pid/assets/lineage` — one asset's ancestors / descendants, or the whole Project. */
+export function getProjectLineage(projectId: string, q: LineageQuery = {}): Promise<ProjectsResult<LineageGraph>> {
+  return call(`/projects/${enc(projectId)}/assets/lineage`, { method: 'POST', body: q }, (b) => b as LineageGraph);
 }

@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import '@testing-library/jest-dom';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import HarnessTour, { popoverPosition } from './HarnessTour';
 import HelpButton from './HelpButton';
@@ -94,5 +94,83 @@ describe('HarnessTour', () => {
       expect(popoverPosition(null, 'right', card, 1100, 700).style.overflowY).toBeUndefined();
       expect(popoverPosition(null, 'right', { w: 340, h: 676 }, 1100, 700).style.overflowY).toBe('auto');
     });
+  });
+});
+
+/**
+ * "Do it for me" on "Bring a video": attach the demo video (`0-demo.mp4`, pinned in every Personal project) by
+ * name — switching an empty session to Personal first — never just whichever video happens to be first.
+ * A fake + menu stands in for PlusMenu: the button toggles it, a project radio swaps its rows.
+ */
+describe('attachDemoVideo', () => {
+  const clicked: string[] = [];
+  const row = (label: string) => `<button role="menuitem" data-testid="plus-menu-recent-asset" aria-label="${label}">${label}</button>`;
+  const ROWS: Record<string, string[]> = {
+    personal: ['0-demo.mp4, 7 MB', 'later-upload.mp4, 3 MB'],
+    other: ['campaign-cut.mp4, 9 MB', 'poster.png, 1 MB'],
+  };
+  let project = 'other';
+  const realRect = HTMLElement.prototype.getBoundingClientRect;
+  afterEach(() => { HTMLElement.prototype.getBoundingClientRect = realRect; });
+  function renderMenu() {
+    const menu = document.getElementById('menu')!;
+    menu.innerHTML = `<input data-testid="plus-menu-asset-search" />`
+      + `<button role="menuitemradio" aria-checked="${project === 'personal'}" aria-label="Personal, private, owner" data-p="personal">Personal</button>`
+      + `<button role="menuitemradio" aria-checked="${project === 'other'}" aria-label="Campaign, owner" data-p="other">Campaign</button>`
+      + ROWS[project].map(row).join('');
+    menu.querySelectorAll<HTMLElement>('[role="menuitemradio"]').forEach((b) => b.addEventListener('click', () => {
+      project = b.dataset.p!;
+      menu.innerHTML = ''; // picking a project closes the menu, as PlusMenu does
+    }));
+    menu.querySelectorAll<HTMLElement>('[data-testid="plus-menu-recent-asset"]').forEach((b) =>
+      b.addEventListener('click', () => clicked.push(b.getAttribute('aria-label')!)));
+  }
+  beforeEach(() => {
+    clicked.length = 0;
+    // The tour only clicks what is visible; jsdom lays nothing out, so give every element a box.
+    HTMLElement.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, left: 0, right: 10, bottom: 10,
+      width: 10, height: 10, toJSON: () => ({}) }) as DOMRect;
+    document.body.innerHTML = '<button aria-label="Attach and tools" id="plus"></button><div id="menu"></div>';
+    document.getElementById('plus')!.addEventListener('click', () => {
+      const menu = document.getElementById('menu')!;
+      if (menu.innerHTML) menu.innerHTML = ''; else renderMenu();
+    });
+  });
+
+  it('picks 0-demo.mp4 when the session is already in Personal', async () => {
+    const { attachDemoVideo } = await import('./HarnessTour');
+    project = 'personal';
+    vi.useFakeTimers();
+    const run = attachDemoVideo();
+    await vi.runAllTimersAsync();
+    await run;
+    vi.useRealTimers();
+    expect(clicked).toEqual(['0-demo.mp4, 7 MB']);
+  });
+
+  it('switches an empty session from another project to Personal, then picks 0-demo.mp4', async () => {
+    const { attachDemoVideo } = await import('./HarnessTour');
+    project = 'other';
+    vi.useFakeTimers();
+    const run = attachDemoVideo();
+    await vi.runAllTimersAsync();
+    await run;
+    vi.useRealTimers();
+    expect(project).toBe('personal');
+    expect(clicked).toEqual(['0-demo.mp4, 7 MB']);
+  });
+
+  it('falls back to the first video when Personal has no demo (a user deleted it)', async () => {
+    const { attachDemoVideo } = await import('./HarnessTour');
+    project = 'personal';
+    const saved = ROWS.personal;
+    ROWS.personal = ['later-upload.mp4, 3 MB'];
+    vi.useFakeTimers();
+    const run = attachDemoVideo();
+    await vi.runAllTimersAsync();
+    await run;
+    vi.useRealTimers();
+    ROWS.personal = saved;
+    expect(clicked).toEqual(['later-upload.mp4, 3 MB']);
   });
 });

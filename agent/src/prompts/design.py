@@ -157,8 +157,9 @@ lookup (get_model_schema), a choice, or another node's output, emit an ordinary 
 {map_guidance}"""
 
 
-# Runtime map/gather emission guidance, included only when dynamic fan-out is enabled (moved here
-# verbatim from design_agent.py so the fused planning call can build the same design rules).
+# Runtime map/gather emission guidance, included only when dynamic fan-out is enabled (the DAG
+# design rules now live here so the fused planning call can build them — the separate Design Agent
+# runtime was retired).
 DESIGN_MAP_GUIDANCE = """
 RUNTIME FAN-OUT (map + gather) — for collections discovered at RUNTIME:
 - Use this ONLY when a step repeats the SAME operation once per element of a collection whose \
@@ -195,7 +196,7 @@ s3://bucket/path/, filter .mp4, emit {"items":["s3://.../a.mp4",...]}) -> proces
 
 
 def design_system_prompt() -> str:
-    """The Design Agent's system prompt, exactly as design_agent.py has always assembled it."""
+    """The DAG design rules, assembled exactly as before (the fused planning call bundles this)."""
     import json
 
     from planning.dag_schema import DAG_JSON_SCHEMA, dynamic_fanout_enabled

@@ -14,8 +14,8 @@
  *   1. No AWS::BedrockAgentCore::Runtime transitively depends on another Runtime (following Ref,
  *      Fn::GetAtt, Fn::Sub `${X}`/`${X.Attr}`, and DependsOn).
  *   (and 4: no ECS task definition OR service reaches a runtime — the service via its task role's policy.)
- *   2. None of the five sub-runtime ARN env vars appears in any runtime's EnvironmentVariables.
- *   3. The four `/<project>-<env>/runtime-arns/<VAR>` SSM parameters exist, and the path is in
+ *   2. None of the sub-runtime ARN env vars appears in any runtime's EnvironmentVariables.
+ *   3. The `/<project>-<env>/runtime-arns/<VAR>` SSM parameters exist, and the path is in
  *      RuntimeConfigSecret.
  * Prints the runtime critical path (longest runtime → runtime chain; 1 = fully parallel).
  */
@@ -30,7 +30,6 @@ const RUNTIME_TYPE = "AWS::BedrockAgentCore::Runtime";
 const ARN_VARS = [
   "TASK_AGENT_RUNTIME_ARN",
   "PLANNING_AGENT_RUNTIME_ARN",
-  "DESIGN_AGENT_RUNTIME_ARN",
   "RENDER_AGENT_RUNTIME_ARN",
 ];
 
@@ -134,7 +133,7 @@ for (const env of ["staging", "sandbox", "prod"] as const) {
   const runtimes = new Set(
     Object.entries(resources).filter(([, r]) => r.Type === RUNTIME_TYPE).map(([id]) => id),
   );
-  assert.ok(runtimes.size >= 6, `${env}: expected >= 6 runtimes, found ${runtimes.size}`);
+  assert.ok(runtimes.size >= 5, `${env}: expected >= 5 runtimes, found ${runtimes.size}`);
 
   // 1. No runtime → runtime edge.
   const rtGraph = new Map<string, string[]>();

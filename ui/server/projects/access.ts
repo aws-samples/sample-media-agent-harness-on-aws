@@ -106,6 +106,20 @@ export function webSearchFeatureEnabled(env: NodeJS.ProcessEnv = process.env): b
   return (env.WEB_SEARCH_ENABLED ?? "").trim().toLowerCase() === "true";
 }
 
+/**
+ * Asset lineage edges are on here (env-config `projects.lineageEdges`): the proxy task's INGESTION_CONFIG carries
+ * `"lineageEdges": true` only where the flag is on. `/config.lineageEnabled` shows the Projects Lineage tab.
+ */
+export function lineageFeatureEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.INGESTION_CONFIG ?? "";
+  if (!raw.includes("lineageEdges")) return false;
+  try {
+    return (JSON.parse(raw) as { lineageEdges?: unknown })?.lineageEdges === true;
+  } catch {
+    return false;
+  }
+}
+
 /** The knowledge-graph feature flag (`GRAPH_ENABLED=true`, set by CDK only where the graph stack exists). */
 export function graphFeatureEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.GRAPH_ENABLED ?? "").trim().toLowerCase() === "true";

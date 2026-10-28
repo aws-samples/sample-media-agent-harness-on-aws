@@ -9,6 +9,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { theme } from '../../styles/tokens';
 import { request as requestAssetUrls } from '../../projects/assetUrlBatcher';
+import { resolveLocations } from '../../projects/api';
+import { projectSessionOutputPrefix } from '../../shared/sessionLayout';
 import { openAssetAt } from '../../projects/openCitation';
 import { AssetPreviewModal } from './AssetPreviewModal';
 import { ChatAssetCard } from './ChatAssetCard';
@@ -33,9 +35,52 @@ export function keepAssetUrls(url: string, fallback: (u: string) => string): str
 
 type Phase = { state: 'loading' } | { state: 'ready'; url: string } | { state: 'unavailable' };
 
+/** An asset id (`image:<uuid>`): a kind, a colon, an id with no path, scheme or extension. */
+const ASSET_ID_RE = /^[a-z]+:[0-9a-z-]+$/i;
+export function isAssetId(ref: string): boolean {
+  return ASSET_ID_RE.test(ref);
+}
+
+/**
+ * The locations an `asset:` reference that is NOT an id may name. A file the agent saved THIS turn has no asset id
+ * yet (it is registered after the turn), so the agent writes its file name (`asset:frame_2s.png`), its key or its
+ * URL instead (staging session a4a205a9). A name is looked up in this chat's output folder, under both session
+ * roots; a key, `s3://` uri or URL as it is.
+ */
+export function referenceLocations(ref: string, sessionId: string, projectId: string): string[] {
+  const r = ref.trim();
+  if (!r) return [];
+  if (/^(s3|https?):\/\//i.test(r) || r.startsWith('projects/') || r.startsWith('artifacts/')) return [r];
+  if (/[\/\\]/.test(r) || r.startsWith('.')) return [];
+  if (!sessionId) return [];
+  // A bare file name, as written: the chat's output folder under both roots.
+  return [`${projectSessionOutputPrefix(projectId, sessionId)}${r}`, `artifacts/${sessionId}/output/${r}`];
+}
+
+/** Registration of a just-made file lags the turn by seconds: ask again, a few times, before giving up. */
+export const RESOLVE_RETRY_MS = [1500, 3000, 6000, 12000];
+
+async function resolveReference(ref: string, sessionId: string, projectId: string,
+                                alive: () => boolean): Promise<string | null> {
+  if (isAssetId(ref)) return ref;
+  const locations = referenceLocations(ref, sessionId, projectId);
+  if (locations.length === 0) return null;
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await resolveLocations(projectId, locations);
+    if (!alive()) return null;
+    const hit = res.ok ? locations.map((l) => res.value[l]).find((v): v is string => typeof v === 'string' && !!v) : undefined;
+    if (hit) return hit;
+    if (attempt >= RESOLVE_RETRY_MS.length) return null;
+    await new Promise((r) => setTimeout(r, RESOLVE_RETRY_MS[attempt]));
+    if (!alive()) return null;
+  }
+}
+
 export function InlineAssetImage({ src, alt }: { src: string; alt?: string }) {
   const ctx = useContext(ChatAssetContext);
-  const assetId = src.slice(ASSET_SCHEME.length).trim();
+  const ref = src.slice(ASSET_SCHEME.length).trim();
+  // The id the reference resolves to: itself when it is one, else (a file name, key or URL) looked up.
+  const [assetId, setAssetId] = useState<string>(isAssetId(ref) ? ref : '');
   const caption = (alt || '').trim();
   const [phase, setPhase] = useState<Phase>({ state: 'loading' });
   const [openError, setOpenError] = useState<string | null>(null);
@@ -43,16 +88,22 @@ export function InlineAssetImage({ src, alt }: { src: string; alt?: string }) {
 
   useEffect(() => {
     let alive = true;
-    if (!ctx?.projectId || !assetId) { setPhase({ state: 'unavailable' }); return; }
+    const projectId = ctx?.projectId;
+    if (!projectId || !ref) { setPhase({ state: 'unavailable' }); return; }
     setPhase({ state: 'loading' });
-    requestAssetUrls(ctx.projectId, [assetId]).then((map) => {
-      if (!alive) return;
-      const out = map.get(assetId);
-      const url = out && out.ok ? (out.entry.rendition?.url ?? out.entry.source?.url) : undefined;
-      setPhase(url ? { state: 'ready', url } : { state: 'unavailable' });
+    resolveReference(ref, ctx?.sessionId || '', projectId, () => alive).then((id) => {
+      if (!alive) return null;
+      if (!id) { setPhase({ state: 'unavailable' }); return null; }
+      setAssetId(id);
+      return requestAssetUrls(projectId, [id]).then((map) => {
+        if (!alive) return;
+        const out = map.get(id);
+        const url = out && out.ok ? (out.entry.rendition?.url ?? out.entry.source?.url) : undefined;
+        setPhase(url ? { state: 'ready', url } : { state: 'unavailable' });
+      });
     }).catch(() => { if (alive) setPhase({ state: 'unavailable' }); });
     return () => { alive = false; };
-  }, [ctx?.projectId, assetId]);
+  }, [ctx?.projectId, ctx?.sessionId, ref]);
 
   // Edit: the side panel, where the asset can be worked on (what Expand used to do).
   const editInPanel = async () => {
@@ -72,7 +123,7 @@ export function InlineAssetImage({ src, alt }: { src: string; alt?: string }) {
   const url = phase.state === 'ready' ? phase.url : null;
   const download = url ? () => { void downloadFile(url, name); } : undefined;
   return (
-    <span data-testid="inline-asset" data-asset-id={assetId}>
+    <span data-testid="inline-asset" data-asset-id={assetId || undefined}>
       <ChatAssetCard kind="image" name={name} src={url}
         onPreview={() => setPreview(true)} onDownload={download} onOpenInPanel={() => { void editInPanel(); }}
         moveTarget={ctx?.projectId ? { projectId: ctx.projectId, assetId } : undefined} />

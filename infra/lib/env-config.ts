@@ -218,6 +218,25 @@ export interface IngestionConfig {
    * message and the job-registry stream consumer only when true.
    */
   generatedMedia?: boolean;
+  /**
+   * Phase 1 entity-metadata workflows (face-recognition → Person identities, program-structure-analysis →
+   * Program elements / Segments, cast-resolution → Characters). On: the VIDEO pipeline also submits these
+   * three toolkit workflows and FOLDS their outputs (person / character / actor names and Segment labels)
+   * into the scene documents' searchable `named_entities` by time overlap — NOT a side-channel asset blob —
+   * and registration requires their gateway tools. Default/absent: the current two-wave video pipeline, the
+   * new tools are neither required nor submitted, and the key is omitted so an off env's INGESTION_CONFIG
+   * — and every template embedding it — is byte-identical. Reaches the reducer as
+   * `INGESTION_CONFIG.entityMetadata` (read into `reducer.Config.entity_metadata`) and the Asset_Service
+   * catalog gate. Only enable where the deployed toolkit gateway exposes the three targets.
+   */
+  entityMetadata?: boolean;
+  /**
+   * Personal samples (`infra/lib/personal-samples.ts`): the deploy uploads `infra/assets/samples/` to the Ingest
+   * bucket under `samples/`, and each user's Personal project gets its own pinned copy (the demo tour's
+   * `0-demo.mp4`) when their project list loads. A Personal project does not index, so there is no per-user
+   * analysis. Default/absent: nothing is uploaded and the Asset_Service gets no `PERSONAL_SAMPLES`.
+   */
+  personalSamples?: boolean;
 }
 
 export interface ProjectsConfig {
@@ -238,6 +257,17 @@ export interface ProjectsConfig {
    */
   graph?: { enabled: boolean };
   /**
+   * Asset lineage EDGES (docs/proposals/asset-lineage-graph.md §2.2, decision 2026-10-22: DynamoDB is the source of
+   * truth). On: the runtimes record what every gateway (fal) / sub-agent / plan node / code_interpreter output was
+   * made from (with source time ranges and allowlisted producer settings), Generated_Media writes
+   * `UP#<child>#<parent>` / `DOWN#<parent>#<child>` edge items in the Project's partition and logs every dropped
+   * edge, the plan chainer records each node's handed inputs and outputs on its job row, and the Asset_Service
+   * answers `lineage` (`POST /projects/:pid/assets/lineage`). Reaches the consumers as `lineageEdges` in the
+   * INGESTION_CONFIG JSON (written only when on) and `LINEAGE_EDGES=true` on the plan chainer. Absent/false: the
+   * current behaviour, and a byte-identical template. Requires `ingestion.generatedMedia`.
+   */
+  lineageEdges?: boolean;
+  /**
    * Project_Token lifetime in seconds. Must be 60–3600; defaults to 3600 (Req 4.3). `resolveEnvConfig`
    * throws, naming the env and value, for anything outside the range.
    */
@@ -256,6 +286,23 @@ export interface ProjectsConfig {
   signingKeys: ProjectSigningKey[];
 }
 
+/**
+ * Deploy-time preload inputs (CDK context `ownerEmail` / `preloadPath`). See `EnvConfig.preload`.
+ */
+export interface PreloadConfig {
+  /** The one deploy input: owns the Cognito user, every seeded project, and every installed skill. */
+  ownerEmail?: string;
+  /** Where the package lives in the Ingest bucket. Default `preload/` (folder) or `preload.zip` (archive). */
+  preloadPath?: string;
+  /**
+   * An explicit re-run trigger for the `PreloadFn` custom resource (CDK context `-c preloadNonce=`). Set it
+   * (e.g. a timestamp) to force preload to re-run after uploading a new package to `preloadPath` on an
+   * EXISTING stack of the SAME commit — otherwise CloudFormation sees no property change and skips the
+   * handler. CI deploys change the app version each build, so they re-run without a nonce.
+   */
+  preloadNonce?: string;
+}
+
 export interface EnvConfig {
   env: EnvName;
   /** Target account. Undefined for dev → resolved from CDK_DEFAULT_ACCOUNT. */
@@ -272,6 +319,15 @@ export interface EnvConfig {
    * `staging`, and `prod`; absent elsewhere so no nested `ProjectsStack` is created.
    */
   projects?: ProjectsConfig;
+  /**
+   * Deploy-time preload (design docs/design-2026-10-27-admin-preload-and-preanalyzed-ingest.md). When a
+   * preload package is present in the Ingest bucket at `preloadPath`, the `PreloadFn` custom resource
+   * creates the owner, seeds the project(s), places the assets and installs the paired skill(s) at deploy
+   * time. Supplied via CDK context `-c ownerEmail=… -c preloadPath=…` (both optional; a package present
+   * without `ownerEmail` fails the deploy loudly, a package absent is a clean no-op). Requires
+   * `projects.ingestion.enabled` (the import sweep + pipeline do the actual ingestion).
+   */
+  preload?: PreloadConfig;
   /**
    * Demonstration-only Slack ingress. Absent or `enabled:false` = the Slack
    * construct is not created at all, so the synthesized stack is identical to
@@ -452,7 +508,7 @@ const CONFIGS: Record<EnvName, EnvConfig> = {
     projects: {
       enabled: true,
       signingKeys: [{ id: "projects-signing-1" }],
-      ingestion: { enabled: true, generatedMedia: true },
+      ingestion: { enabled: true, generatedMedia: true, personalSamples: true },
       graph: { enabled: false },
     },
   },
@@ -659,11 +715,19 @@ const CONFIGS: Record<EnvName, EnvConfig> = {
       ingestion: {
         enabled: true, generatedMedia: true,
         imageModelChain: ["anthropic.claude-sonnet-5-5"], imageThinking: "adaptive",
+        // Entity metadata → hybrid search: face-recognition (Person), cast-resolution (Character),
+        // program-structure-analysis (Segment/Program element) fold into searchable scene.named_entities.
+        // Best-effort — a workflow failure never fails the asset. cast-resolution has no prior live runs.
+        entityMetadata: true,
+        // The demo tour's 0-demo.mp4, pinned first in every user's Personal project (personal-samples.ts).
+        personalSamples: true,
       },
       // Per-Project knowledge graph (GraphStack) — parked 2026-10: it only ever held demo data, since nothing
       // extracts entities from the M2C outputs yet. Off removes the Graph tab, graph on new projects, the graph
       // Lambdas and the agent's graph tools; existing META.graph rows and S3 graph data are kept. Flip to re-enable.
       graph: { enabled: false },
+      // Asset lineage edges (capture + `lineage` read API). Staging first; prod/sandbox/customer stay off.
+      lineageEdges: true,
     },
   },
   sandbox: {
@@ -948,6 +1012,8 @@ const CONFIGS: Record<EnvName, EnvConfig> = {
       ingestion: {
         enabled: true, generatedMedia: true,
         imageModelChain: ["anthropic.claude-sonnet-5-5"], imageThinking: "adaptive",
+        // The demo tour's 0-demo.mp4, pinned first in every user's Personal project (personal-samples.ts).
+        personalSamples: true,
       },
       graph: { enabled: false },
     },
@@ -1003,6 +1069,24 @@ export function resolveEnvConfig(app: App): EnvConfig {
   }
   const vpcId: string | undefined = app.node.tryGetContext("vpcId");
   if (vpcId) resolved = { ...resolved, vpcId };
+  // Deploy-time preload inputs (design Task outline 9): the owner email and the package path.
+  const ownerEmail: string | undefined = app.node.tryGetContext("ownerEmail");
+  const preloadPath: string | undefined = app.node.tryGetContext("preloadPath");
+  // An explicit re-run nonce to force preload after uploading a package to an existing same-commit stack.
+  // A nonce ALONE does not arm preload (that still needs ownerEmail/preloadPath, or base-config preload);
+  // it only rides along when preload is otherwise configured.
+  const preloadNonce: string | undefined = app.node.tryGetContext("preloadNonce");
+  if (ownerEmail || preloadPath || (preloadNonce && resolved.preload)) {
+    resolved = {
+      ...resolved,
+      preload: {
+        ...resolved.preload,
+        ...(ownerEmail ? { ownerEmail } : {}),
+        ...(preloadPath ? { preloadPath } : {}),
+        ...(preloadNonce ? { preloadNonce } : {}),
+      },
+    };
+  }
   validateProjectsConfig(resolved);
   return resolved;
 }
@@ -1029,6 +1113,12 @@ export function validateProjectsConfig(cfg: EnvConfig): void {
           `${live.length})`,
       );
     }
+  }
+  if (projects.lineageEdges && !(projects.ingestion?.enabled && projects.ingestion.generatedMedia)) {
+    throw new Error(
+      `env '${cfg.env}': projects.lineageEdges requires projects.ingestion.enabled and ingestion.generatedMedia ` +
+        "(the Generated_Media registrar is the edge writer)",
+    );
   }
 }
 

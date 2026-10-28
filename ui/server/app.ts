@@ -144,7 +144,7 @@ import { createAgentTestHandler } from "./agentTestRoute";
 // Project_Registry routes (`/projects*`, Cognito-authed). See `projects/routes.ts`.
 import { createProjectsHandler } from "./projects/routes";
 import { createAssetServiceClient, type InvokeAssetService } from "./projects/assetServiceClient";
-import { checkAccess as checkProjectAccess, graphFeatureEnabled, projectsEnabled, webSearchFeatureEnabled } from "./projects/access";
+import { checkAccess as checkProjectAccess, graphFeatureEnabled, lineageFeatureEnabled, projectsEnabled, webSearchFeatureEnabled } from "./projects/access";
 import { readAssetSource } from "./projects/ingestionRoutes";
 // Authenticated session-artifact ref → short-lived presigned URL resolver (the "no broken links"
 // media backbone — the UI stores stable artifacts/<session>/… keys and re-mints URLs via this on
@@ -1335,6 +1335,9 @@ export function buildApp(): Express {
       // True where AgentCore Web Search is deployed (env-config `webSearch.enabled`): the + menu offers the
       // per-chat Web search toggle; elsewhere it is shown unavailable and every turn runs without it.
       webSearchAvailable: projectsEnabled() && webSearchFeatureEnabled(),
+      // True where asset lineage edges are on (env-config `projects.lineageEdges`): the Projects Lineage tab and the
+      // asset's Lineage action, both reading `POST /projects/:pid/assets/lineage`.
+      lineageEnabled: projectsEnabled() && lineageFeatureEnabled(),
       // True where the artifacts CDN is private (`artifactsCdnPrivate`): `/api/artifact` needs a
       // token, so login-free surfaces (the /render-view deep link) must sign in first.
       artifactsRequireAuth: process.env.ARTIFACTS_REQUIRE_AUTH === "true",

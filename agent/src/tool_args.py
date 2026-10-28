@@ -70,67 +70,6 @@ def normalize_endpoint_ids(arguments: Any, _depth: int = 0) -> Any:
     return out if changed else arguments
 
 
-# ``minimax/h3-max/*`` REQUIRES ``prompt_expansion_mode`` (the fal MCP server schema-validates
-# submits since 2026-10-07: ``field_errors: [{path: ["prompt_expansion_mode"], code: "required"}]``),
-# and its schema lists the values only as examples, so node agents guessed ``"off"`` / ``"auto"``
-# and 422'd at RESULT time (staging dcd11946: 7 of 8 animate nodes). A missing value becomes
-# ``"disabled"``: animating a keyframe must not have fal rewrite the prompt.
-_H3_MAX_FAMILY = "minimax/h3-max/"
-_PROMPT_EXPANSION_KEY = "prompt_expansion_mode"
-_PROMPT_EXPANSION_VALID = ("disabled", "fast", "balanced", "quality")
-_PROMPT_EXPANSION_DEFAULT = "disabled"
-_PROMPT_EXPANSION_ALIASES = {
-    **dict.fromkeys(("off", "none", "false", "no", "disable"), "disabled"),
-    **dict.fromkeys(("auto", "default", "true", "on", "expand"), "balanced"),
-}
-
-
-def _prompt_expansion_mode(value: Any) -> Any:
-    """A valid ``prompt_expansion_mode`` for ``value``; unrecognised values pass through."""
-    if value is None:
-        return _PROMPT_EXPANSION_DEFAULT
-    if isinstance(value, bool):
-        return "balanced" if value else "disabled"
-    if not isinstance(value, str):
-        return value
-    v = value.strip().lower()
-    if not v:
-        return _PROMPT_EXPANSION_DEFAULT
-    if v in _PROMPT_EXPANSION_VALID:
-        return v
-    return _PROMPT_EXPANSION_ALIASES.get(v, value)
-
-
-def normalize_minimax_h3_args(arguments: Any) -> Any:
-    """Return ``arguments`` with a valid ``prompt_expansion_mode`` when the call names a
-    ``minimax/h3-max/...`` endpoint at its top level (see :func:`submitted_endpoint`).
-
-    The fal tools nest model inputs under ``input`` (``{"endpoint_id": ..., "input": {...}}``), so
-    the field is ADDED only there: a call with no ``input`` dict (``check_job``,
-    ``get_job_result``, ``get_model_schema``) is a read and is left alone. A top-level
-    ``prompt_expansion_mode`` is normalized but never added (and, when present, nothing is added
-    under ``input`` beside it). Missing → ``"disabled"``;
-    ``off``/``none``/``false``/``no``/``disable`` → ``"disabled"``; ``auto``/``default``/``true``/
-    ``on``/``expand`` → ``"balanced"``; a valid value is lowercased. Pure and non-mutating;
-    returns the SAME object when there is nothing to change.
-    """
-    if not isinstance(arguments, dict) or not submitted_endpoint(arguments).startswith(_H3_MAX_FAMILY):
-        return arguments
-    out = arguments
-    top_level = _PROMPT_EXPANSION_KEY in arguments
-    if top_level:
-        fixed = _prompt_expansion_mode(arguments[_PROMPT_EXPANSION_KEY])
-        if fixed != arguments[_PROMPT_EXPANSION_KEY]:
-            out = {**out, _PROMPT_EXPANSION_KEY: fixed}
-    model_input = arguments.get("input")
-    if isinstance(model_input, dict) and (_PROMPT_EXPANSION_KEY in model_input or not top_level):
-        current = model_input.get(_PROMPT_EXPANSION_KEY)
-        fixed = _prompt_expansion_mode(current)
-        if _PROMPT_EXPANSION_KEY not in model_input or fixed != current:
-            out = {**out, "input": {**model_input, _PROMPT_EXPANSION_KEY: fixed}}
-    return out
-
-
 def _normalized_endpoint(value: str) -> str:
     s = value.strip().strip("/")
     if s.startswith(_WRONG_H3_MAX_PREFIX):

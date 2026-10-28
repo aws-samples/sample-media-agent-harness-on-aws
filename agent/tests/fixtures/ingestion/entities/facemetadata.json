@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "collection_id": "",
+  "duration_sec": 718.918919,
+  "people": [
+    {
+      "person_id": 0,
+      "name": "Kevin Kilner",
+      "named": true,
+      "name_source": "celebrity",
+      "confidence": 99.974,
+      "face_id": null,
+      "gender": "Male",
+      "age_range": [48, 56],
+      "total_screen_time_sec": 8.8,
+      "appearances": [
+        {"begin_ms": 30030, "end_ms": 30830, "representative_frame": 900},
+        {"begin_ms": 31031, "end_ms": 31831, "representative_frame": 930}
+      ],
+      "thumbnail_key": "micro-workflow/face-recognition/ffcf/debug/people/person_0000.jpg",
+      "num_tracks": 11
+    },
+    {
+      "person_id": 2,
+      "name": "Person_2",
+      "named": false,
+      "name_source": null,
+      "confidence": null,
+      "face_id": null,
+      "gender": "Male",
+      "age_range": [39, 47],
+      "total_screen_time_sec": 3.4,
+      "appearances": [
+        {"begin_ms": 49049, "end_ms": 50050, "representative_frame": 1500}
+      ],
+      "num_tracks": 4
+    }
+  ],
+  "stats": {"num_people": 2},
+  "usage": {"detect_faces_api": 4}
+}

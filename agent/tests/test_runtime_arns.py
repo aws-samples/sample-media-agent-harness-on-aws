@@ -1,6 +1,6 @@
 """runtime_arns: sub-agent runtime ARNs resolve at CALL time (env first, then SSM by path).
 
-The deploy no longer puts TASK_/PLANNING_/DESIGN_/RENDER_AGENT_RUNTIME_ARN in any runtime's env —
+The deploy no longer puts TASK_/PLANNING_/RENDER_AGENT_RUNTIME_ARN in any runtime's env —
 that made CloudFormation update the runtimes one after another. They are SSM parameters, and on a
 brand-new environment a runtime can start before they exist, so every use site must resolve them
 lazily when the import-time constant is empty. These tests pin that contract with a fake SSM
@@ -22,12 +22,10 @@ PATH = "/mediaworks-harness-test/runtime-arns"
 ARN_VARS = (
     "TASK_AGENT_RUNTIME_ARN",
     "PLANNING_AGENT_RUNTIME_ARN",
-    "DESIGN_AGENT_RUNTIME_ARN",
     "RENDER_AGENT_RUNTIME_ARN",
 )
 TASK = "arn:aws:bedrock-agentcore:us-west-2:1:runtime/mediaworks_harness_task_agent-AAA"
 PLANNING = "arn:aws:bedrock-agentcore:us-west-2:1:runtime/mediaworks_harness_planning_agent-BBB"
-DESIGN = "arn:aws:bedrock-agentcore:us-west-2:1:runtime/mediaworks_harness_design_agent-CCC"
 RENDER = "arn:aws:bedrock-agentcore:us-west-2:1:runtime/mediaworks_harness_render_agent-DDD"
 
 
@@ -86,8 +84,8 @@ def test_no_path_returns_empty_without_ssm(clean_env):
 def test_ssm_fallback_reads_path_once_and_populates_env(clean_env):
     fake = _install(clean_env, FakeSSM(
         {"TASK_AGENT_RUNTIME_ARN": TASK, "PLANNING_AGENT_RUNTIME_ARN": PLANNING,
-         "DESIGN_AGENT_RUNTIME_ARN": DESIGN, "RENDER_AGENT_RUNTIME_ARN": RENDER},
-        page=3,  # forces pagination
+         "RENDER_AGENT_RUNTIME_ARN": RENDER},
+        page=2,  # forces pagination (3 params over pages of 2)
     ))
     clean_env.setenv("RUNTIME_ARN_PARAM_PATH", PATH)
     assert runtime_arns.get("RENDER_AGENT_RUNTIME_ARN") == RENDER
@@ -95,7 +93,7 @@ def test_ssm_fallback_reads_path_once_and_populates_env(clean_env):
     # Every parameter under the path is now cached in os.environ — no further SSM calls.
     assert os.environ["TASK_AGENT_RUNTIME_ARN"] == TASK
     for name, want in (("TASK_AGENT_RUNTIME_ARN", TASK), ("PLANNING_AGENT_RUNTIME_ARN", PLANNING),
-                       ("DESIGN_AGENT_RUNTIME_ARN", DESIGN), ("RENDER_AGENT_RUNTIME_ARN", RENDER)):
+                       ("RENDER_AGENT_RUNTIME_ARN", RENDER)):
         assert runtime_arns.get(name) == want
     assert len(fake.calls) == 2
 
@@ -229,8 +227,8 @@ def test_render_artifacts_resolves_lazily(clean_env):
 def test_builtin_runtime_state_resolves_lazily(clean_env):
     from capability import sources
 
-    _install(clean_env, FakeSSM({"DESIGN_AGENT_RUNTIME_ARN": DESIGN}))
+    _install(clean_env, FakeSSM({"RENDER_AGENT_RUNTIME_ARN": RENDER}))
     clean_env.setenv("RUNTIME_ARN_PARAM_PATH", PATH)
     state = sources._builtin_runtime_state()
-    assert state["design-agent"] == (True, DESIGN.rsplit("/", 1)[-1])
+    assert state["render-agent"] == (True, RENDER.rsplit("/", 1)[-1])
     assert state["task-agent"] == (False, "")

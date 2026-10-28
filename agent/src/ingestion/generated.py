@@ -530,6 +530,9 @@ class JobNode:
     keys: tuple[str, ...]  # M2C-bucket keys of its output/analysis artifacts
     sources: tuple[str, ...]  # the media it ran on (role=source urls)
     output_prefix: Optional[str] = None
+    # (M2C key, url of the durable copy the job settle made of it) — the copy is not registered, but an input that
+    # names it must link to the M2C output's asset (``lineage_contract.ALIAS_SK_PREFIX``).
+    copies: tuple[tuple[str, str], ...] = ()
 
 
 _SUCCEEDED_NODE = frozenset({"completed", "succeeded"})
@@ -567,6 +570,7 @@ def job_outputs(body: str, sid: Optional[str], m2c_bucket: str,
             continue
         arts = [a for a in n.get("artifacts") or [] if isinstance(a, dict)]
         keys: list[str] = []
+        copies: list[tuple[str, str]] = []
         for a in arts:
             if a.get("role") == "source":
                 continue
@@ -575,6 +579,9 @@ def job_outputs(body: str, sid: Optional[str], m2c_bucket: str,
                 kept.append(a)
             elif str(n.get("status") or "").lower() in _SUCCEEDED_NODE:
                 keys.append(k)
+                url = a.get("url")
+                if isinstance(url, str) and url and not url.startswith(f"s3://{m2c_bucket}/"):
+                    copies.append((k, url.split("?", 1)[0]))
         if keys:
             handle = n.get("handle") if isinstance(n.get("handle"), dict) else {}
             prefix = handle.get("output_prefix") if isinstance(handle.get("output_prefix"), str) else None
@@ -584,6 +591,7 @@ def job_outputs(body: str, sid: Optional[str], m2c_bucket: str,
                 keys=tuple(dict.fromkeys(keys)),
                 sources=tuple(a["url"] for a in arts if a.get("role") == "source" and isinstance(a.get("url"), str)),
                 output_prefix=prefix or None,
+                copies=tuple(dict.fromkeys(copies)),
             ))
     rest = json.dumps({"schema": "plan-result/v1", "nodes": [{"artifacts": kept}]})
     return refs_in_result(rest, sid, pid), nodes

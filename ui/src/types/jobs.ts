@@ -140,6 +140,20 @@ export interface Job {
    * `/jobs` + SSE projections always supply `[]` when absent.
    */
   artifactUrls?: string[];
+
+  /**
+   * The media a COMPLETED plan node made (`node|…` rows): recorded by the plan chainer from the node's stored
+   * result on its transition to completed (`projects.lineageEdges`), for any node type — including work that ran
+   * inside the node's own turn and registered no job (an ffmpeg assemble). Absent until recorded.
+   */
+  outputs?: JobOutput[];
+}
+
+/** One file a plan node made: canonical `s3://` uri, its key, and the kind of media. */
+export interface JobOutput {
+  uri: string;
+  key: string;
+  kind: 'video' | 'image' | 'audio';
 }
 
 /**

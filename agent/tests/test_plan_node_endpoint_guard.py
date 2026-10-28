@@ -131,8 +131,9 @@ def test_planned_submit_and_sync_run_pass_through(monkeypatch):
         results, sent = _drive(_tool(name), {"endpoint_id": H3, "input": {}}, planned=["minimax/h3-max"],
                                monkeypatch=monkeypatch)
         assert results[0]["status"] == "success"
-        # Passes the guard; h3-max's REQUIRED prompt_expansion_mode is filled in on the way.
-        assert sent == [{"endpoint_id": H3, "input": {"prompt_expansion_mode": "disabled"}}]
+        # Passes the guard unchanged: no model-specific field is added on the way (the model's own schema is
+        # checked instead, and with no schema tool on this fake client that check fails open).
+        assert sent == [{"endpoint_id": H3, "input": {}}]
 
 
 def test_sync_run_model_is_also_held_to_the_plan(monkeypatch):

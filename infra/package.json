@@ -23,6 +23,7 @@
     "test:emit-search-policy": "node test/emit-search-policy.mjs",
     "test:env-config-projects": "ts-node test/env-config.projects.test.ts",
     "test:projects-stack-synth": "ts-node test/projects-stack.synth.test.ts",
+    "test:preload-synth": "ts-node test/preload.synth.test.ts",
     "test:runtime-parallel": "ts-node test/runtime-parallel.synth.test.ts",
     "test:ingestion-stack-synth": "ts-node test/ingestion-stack.synth.test.ts",
     "test:graph-stack-synth": "ts-node test/graph-stack.synth.test.ts",
@@ -38,7 +39,8 @@
     "test:changefeed-bridge": "ts-node test/changefeed-plan-node-match.test.ts",
     "test:job-latency-synth": "ts-node test/job-latency.synth.test.ts",
     "test:app-version-synth": "ts-node test/app-version.synth.test.ts",
-    "test:security-synth": "ts-node test/security-origin-lock.synth.test.ts"
+    "test:security-synth": "ts-node test/security-origin-lock.synth.test.ts",
+    "test:lineage-edges-synth": "ts-node test/lineage-edges.synth.test.ts"
   },
   "dependencies": {
     "@aws-cdk/aws-bedrock-agentcore-alpha": "^2.244.0-alpha.0",

@@ -204,12 +204,14 @@ export interface ProjectAssetsSectionProps extends ProjectTabProps {
    */
   browseOnly?: boolean;
   initialFilter?: AssetsInitialFilter;
+  /** An asset's ⋯ → Lineage (the Projects Lineage view focused on it). Absent where lineage is off. */
+  onShowLineage?(assetId: string): void;
 }
 
 const FILTER_KINDS: readonly string[] = ['video', 'image', 'audio', 'document', ANALYSIS_TYPE, DATA_TYPE];
 
 export default function ProjectAssetsSection(props: ProjectAssetsSectionProps) {
-  const { project, onNotFound, sessionId, indexing: knownIndexing, browseOnly = false, initialFilter } = props;
+  const { project, onNotFound, sessionId, indexing: knownIndexing, browseOnly = false, initialFilter, onShowLineage } = props;
   const Slot = browseOnly ? undefined : getProjectTab('assets');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -844,6 +846,7 @@ export default function ProjectAssetsSection(props: ProjectAssetsSectionProps) {
       onSelectedChange={browseOnly || bulkProgress ? undefined : setOneSelected}
       dragIds={showTree && !bulkProgress ? dragIds : undefined}
       onMove={browseOnly ? undefined : (one) => { moveFromCard.current = true; setSelected(new Set([one.assetId])); setMoveOpen(true); }}
+      onLineage={browseOnly || !onShowLineage ? undefined : (one) => onShowLineage(one.assetId)}
     />
   );
 

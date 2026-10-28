@@ -174,6 +174,12 @@ class Tick:
                 tech = self._technical(st, outs[W.FRAME_GROUP], rec)
                 if tech:
                     facts["technical"] = tech
+            elif step == W.FACE_RECOGNITION:
+                facts["people"] = A.person_identities(read_output(self.d.s3, outs["face-metadata"], step, "face-metadata"))
+            elif step == W.PROGRAM_STRUCTURE:
+                facts["program"] = A.program_structure(read_output(self.d.s3, outs["structure"], step, "structure"))
+            elif step == W.CAST_RESOLUTION:
+                facts["cast"] = A.cast_characters(read_output(self.d.s3, outs["persons"], step, "persons"))
         except OutputError as exc:
             return {**rec, "status": "FAILED", "error": f"output {exc.label!r} {exc.problem}"}
         return {**rec, "status": reducer.SUCCEEDED, "outputs": outs, "facts": facts,
@@ -339,6 +345,9 @@ class Tick:
         if plan.skip:
             self._skip(pid, row, plan.skip[0], plan.skip[1], {"steps": steps})
             return _out(event, True)
+        if plan.blocked and self._record_blocked(steps, plan.blocked, seq, now):
+            row = from_ddb(self.d.store.patch(pid, row, {"steps": steps}))
+            changed = False
         if plan.render:
             steps[W.IMAGE_RENDITION] = self._render(pid, row, now, seq)
             attrs: dict = {"steps": steps}
@@ -385,6 +394,23 @@ class Tick:
             raise OutputError(step, label, "is missing from the recorded result")
         return read_output(self.d.s3, uri, step, label)
 
+    def _record_blocked(self, steps: dict, blocked: tuple, seq: int, now: float) -> bool:
+        """Record each blocked entity-metadata step as a ``SKIPPED`` step record (status + the reason the
+        panel reads), idempotently: an existing SKIPPED record built from the same inputs is left alone, so
+        this writes at most once per blocking. Returns whether anything changed."""
+        speech = reducer.has_speech(steps)
+        changed = False
+        for step, reason in blocked:
+            want = list(reducer.inputs_for(step, steps, speech))
+            prev = steps.get(step) or {}
+            if prev.get("status") == reducer.SKIPPED and list(prev.get("inputs") or ()) == want:
+                continue
+            steps[step] = {"status": reducer.SKIPPED, "runSeq": seq, "inputs": want,
+                           "error": reason, "finishedAt": now}
+            log.info("asset entity-metadata step %s skipped: %s", step, reason)
+            changed = True
+        return changed
+
     def _build(self, event: Mapping, pid: str, row: dict, steps: Mapping, now: float) -> dict:
         aid, kind = str(row["assetId"]), str(row.get("kind"))
         try:
@@ -404,8 +430,16 @@ class Tick:
                 frames_uri = steps[W.FRAME_CAPTURE]["outputs"][W.FRAME_GROUP]
                 frame_for = A.pick_frames(shot_list.get("shots") or [], manifest, frames_uri)
                 dur = int((steps[W.SHOT_SEGMENTATION].get("facts") or {})["durationMs"])
+                people = cast = segments = ()
+                if self.d.cfg.entity_metadata:
+                    # Fold the three best-effort workflows' identities/characters/segments into the member
+                    # scenes' named_entities by time overlap (searchable), from the facts each step captured.
+                    # A step that failed or was skipped simply left no facts and contributes nothing.
+                    people = A.person_mentions((steps.get(W.FACE_RECOGNITION) or {}).get("facts", {}).get("people"))
+                    cast = A.cast_mentions((steps.get(W.CAST_RESOLUTION) or {}).get("facts", {}).get("cast"))
+                    segments = A.segment_mentions((steps.get(W.PROGRAM_STRUCTURE) or {}).get("facts", {}).get("program"))
                 res = D.build_video(aid, A.shots_input(shot_list, frame_for), A.enrich_input(shot_list, md),
-                                    turns, topics, dur)
+                                    turns, topics, dur, people=people, cast=cast, segments=segments)
             elif kind == "document":
                 chunks = self._read_extract(steps)
                 pages = []
@@ -563,7 +597,8 @@ def config_from_env() -> reducer.Config:
                                                width=int(raw.get("frameWidth") or 960),
                                                height=int(raw.get("frameHeight") or 540)),
                           image_model_chain=tuple(str(m) for m in raw.get("imageModelChain") or ()),
-                          image_thinking=str(raw.get("imageThinking") or ""))
+                          image_thinking=str(raw.get("imageThinking") or ""),
+                          entity_metadata=bool(raw.get("entityMetadata")))
 
 
 def from_env() -> Tick:

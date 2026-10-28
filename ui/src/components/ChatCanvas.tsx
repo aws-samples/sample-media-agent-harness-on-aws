@@ -1844,7 +1844,7 @@ function MessageBubble({
     // Every attached file previews inline; a turn persisted before multi-attach carries only `attachment`.
     const inputs = message.attachments?.length ? message.attachments : message.attachment ? [message.attachment] : [];
     return (
-      <div style={userMessageRowStyle}>
+      <div style={userMessageRowStyle} data-message-id={message.id}>
         <div style={userBubbleStyle}>
           <span style={userTextStyle}>{message.content}</span>
           {inputs.map((a, i) => (
@@ -1865,7 +1865,7 @@ function MessageBubble({
   const jobRefs = extractJobReferences(message);
 
   return (
-    <div style={assistantMessageRowStyle}>
+    <div style={assistantMessageRowStyle} data-message-id={message.id}>
       <div style={assistantBubbleStyle}>
         {/* Step progress indicators (collapsible) */}
         {message.steps && message.steps.length > 0 && (

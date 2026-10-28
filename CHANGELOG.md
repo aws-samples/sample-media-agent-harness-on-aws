@@ -7,6 +7,77 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [1.1.1] — chat images at a sensible size
+
+### Fixed
+- **Chat images fit by their longer side.** An image in chat is scaled down to fit the bubble's width and a
+  380 px height, whichever runs out first, and is never enlarged past its own size. A small portrait (a
+  204×271 face crop) used to be stretched to the full bubble width and stood about 840 px tall; it now shows
+  at its own size. Wide images still span the bubble, and the card shrinks to the picture.
+
+### Added
+- **A preload runbook** (`docs/preload-runbook.md`): how to build a package, where to upload it, the deploy
+  flags, what a rerun changes, verification and troubleshooting. Packages that contain video should be
+  uploaded as a folder rather than a `.zip`, because the deploy-time function reads a zip into memory.
+
+## [1.1.0] — asset lineage, entity search, frame-accurate clips
+
+### Added
+- **Asset lineage.** The harness records what produced each project asset (gateway tools, sub-agents, plan
+  nodes and code cells) and from which inputs, serves it through a lineage read API, and backfills it for
+  existing assets. The Projects **Lineage** view, marked Beta, draws the chain for a whole project or for one
+  asset (⋯ → Lineage), with external sources, the chat each output came from, and previews. Off by default;
+  turn it on with the `projects.lineageEdges` environment setting.
+- **People, characters and segments in search.** With `projects.ingestion.entityMetadata` on, video ingest
+  runs face recognition, cast resolution and program-structure analysis, and folds the people, characters
+  and segments they find into each scene's searchable entities, so a search can find the shots a person or
+  character appears in. Off by default; turn it on only where the toolkit gateway exposes those three
+  workflows. The workflows are best-effort: one that fails is reported and never fails the asset.
+- **Deploy-time preload.** A package in the Ingest bucket creates its owner, projects, assets and skills
+  during `cdk deploy`, before anyone signs in. The package holds one folder per project: a `manifest.json`
+  (`{"version": 2, "name": …, "indexing": …}`), an `assets/` folder whose files are all loaded by default
+  (subfolders become project folders; `assets` in the manifest takes `*` / `**` patterns and explicit
+  entries), and an optional `skills/SKILL.md` that becomes the project's skill. Upload it as a folder or a
+  `.zip`. Inactive unless the deploy passes `-c ownerEmail=`; `-c preloadPath=` names the package (default
+  `preload/`), and `-c preloadNonce=` forces a rerun after the package changes. Reruns do not duplicate
+  users, projects or assets; a changed skill is published as a new version of the same skill (including a
+  skill of that name the owner already published), and an unchanged one is left alone. An item that fails (a skill that does not validate, a missing file) is
+  skipped and logged by the `<projectName>-preload` function; the deploy still succeeds.
+- **A demo video in every Personal project.** Every user finds `0-demo.mp4`, a short screen recording of the
+  harness used by the in-app tour, pinned first in their Personal project. It ships in the repository
+  (`infra/assets/samples/`), the deploy uploads it once, and each user gets their own copy the first time
+  their project list loads. Personal projects don't index, so the copy is not analyzed. A user who deletes
+  it doesn't get it back. Turned on by `projects.ingestion.personalSamples`.
+
+### Changed
+- **Default models.** The orchestrator uses Claude Opus 5.5 (`global.anthropic.claude-opus-5-5`). The task,
+  planning and render sub-agents use Claude Sonnet 5.5.
+- **The Design agent is retired.** The planning agent designs and plans a DAG in one call and retries itself
+  on a validation error, so there is one fewer AgentCore runtime; a deploy removes the old one.
+- **Faster video ingest.** With entity metadata on, face recognition starts in the first wave, alongside
+  shot segmentation, diarization and frame capture.
+- **Frame-accurate clips and frames.** In and out points snap to the source's frame grid, and clips are
+  re-encoded by default so they start and end on the marked frames. `fast: true` keeps the faster stream
+  copy, which cuts at the keyframe before the in point.
+- **Images in chat keep their shape.** An image card shows the whole picture at its own aspect ratio, scaled
+  to the chat bubble's width, instead of cropping it to 16:9.
+
+### Fixed
+- **fal model calls follow each model's own schema.** The harness no longer adds `prompt_expansion_mode` to
+  every `minimax/h3-max/*` call; that made every `minimax/h3-max/recast` submit fail, because recast does not
+  accept the field. Instead, a submit (`submit_job`, `run_model`, and each request of `submit_jobs`) is
+  checked against the schema the model publishes through `get_model_schema`. An unknown field, a missing
+  required field or a value outside the allowed list is refused before anything is sent or billed, with the
+  fields the model accepts. If the schema cannot be read, the call goes through unchecked;
+  `MODEL_INPUT_CHECK=off` turns the check off.
+- An inline image in chat that is named by its file name now resolves instead of returning 404.
+- Lineage accuracy: a download that tried fallback URLs records only the URL that produced the file; frames
+  taken from a toolkit output link to that output; a toolkit job's outputs link to everything it was given;
+  plan nodes and code cells link to the inputs they were handed.
+
+### Security
+- pypdf 6.21.2 in the agent and the ingestion functions.
+
 ## [1.0.0] — first public release
 
 The first public release of Media Agent Harness: an operating layer for media agents on Amazon Bedrock

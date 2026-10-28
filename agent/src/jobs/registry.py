@@ -127,6 +127,8 @@ class JobRegistry:
             item["dependsOn"] = list(record.depends_on)
         if record.source_media:
             item["sourceMedia"] = list(record.source_media)
+        if record.lineage_inputs:
+            item["lineageInputs"] = list(record.lineage_inputs)
         if record.producing_project_id:
             item["producingProjectId"] = record.producing_project_id
         if record.plan_node_id:
@@ -167,6 +169,7 @@ class JobRegistry:
             delegation_grant=item.get("delegationGrant"),
             endpoint_id=item.get("endpointId"),
             source_media=list(item.get("sourceMedia", [])),
+            lineage_inputs=list(item.get("lineageInputs", [])),
             producing_project_id=item.get("producingProjectId"),
             plan_node_id=item.get("planNodeId"),
         )

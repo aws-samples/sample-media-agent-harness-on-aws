@@ -1,4 +1,4 @@
-"""Resolve sub-agent runtime ARNs (TASK_/PLANNING_/DESIGN_/RENDER_AGENT_RUNTIME_ARN) at call time.
+"""Resolve sub-agent runtime ARNs (TASK_/PLANNING_/RENDER_AGENT_RUNTIME_ARN) at call time.
 
 The deploy no longer puts these ARNs in any runtime's env: an env var holding another runtime's
 ``agentRuntimeArn`` made CloudFormation update the runtimes one after another. They are SSM

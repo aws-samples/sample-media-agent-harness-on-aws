@@ -106,7 +106,7 @@ OWNER_REDACT_SECRETS = os.environ.get("OWNER_REDACT_SECRETS", "")
 EXTERNAL_OUTPUT_REDACTION = os.environ.get(
     "EXTERNAL_OUTPUT_REDACTION", "off"
 ).strip().lower() in {"on", "true", "1"}
-DEFAULT_MODEL_ID = os.environ.get("DEFAULT_MODEL_ID", "global.anthropic.claude-sonnet-5")
+DEFAULT_MODEL_ID = os.environ.get("DEFAULT_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 # Output token ceiling for a plan-chained task node (_execute_plan_node).
 # Generic to any node type — not specific to translation or media — a
 # node whose task legitimately produces a lot of output (long summaries,
@@ -2193,11 +2193,19 @@ async def _execute_plan_node(payload: dict):
     # One tool per name: a node's list can name the same gateway tool twice (prefixed AND bare, e.g.
     # "usr-…___submit_job" + "submit_job"), and Strands refuses a duplicate registration.
     resolved_tools = _dedupe_tools_by_name(resolved_tools)
+    # Lineage (projects.lineageEdges): a node has no hook provider, so it gets the ledger callback alone and its
+    # ledger is persisted beside its output (media.lineage_ledger). [] with the flag off: the node runs as before.
+    from media import lineage_ledger as _lineage_ledger
+    _node_lineage_hooks = _lineage_ledger.node_hooks()
+    if _node_lineage_hooks:
+        from media import turn_outputs as _node_turn_outputs
+        _node_turn_outputs.open_turn()
     try:
         node_agent = Agent(
             model=node_model,
             tools=resolved_tools,
             plugins=node_plugins,
+            **({"hooks": _node_lineage_hooks} if _node_lineage_hooks else {}),
             system_prompt=_node_graph_prompt + (
                 "You are a focused task execution node in a pipeline. "
                 "Complete ONLY the specific task in the prompt. "
@@ -2262,6 +2270,12 @@ async def _execute_plan_node(payload: dict):
                                node_id, e)
                 _fast_result = None
             _fast_err = _tool_result_error(_fast_result) if _fast_result else "no result"
+            if _fast_result and not _fast_err and _node_lineage_hooks:
+                try:  # the fast path makes the call without a model turn, so no hook saw it
+                    _node_turn_outputs.note_tool_result(
+                        str(getattr(_fast_tool, "tool_name", "") or ""), _fast_args, _fast_result)
+                except Exception:  # noqa: BLE001
+                    logger.debug("fast-path lineage not recorded", exc_info=True)
             if _fast_result and not _fast_err:
                 output = plan_node_fast_path.fast_path_output(_fast_result)
                 fast_messages = [{"role": "user", "content": [{"toolResult": _fast_result}]}]
@@ -2331,6 +2345,10 @@ async def _execute_plan_node(payload: dict):
             except Exception as e:
                 logger.warning("Node %s S3 write attempt %d/%d failed: %s",
                                node_id, _attempt + 1, _S3_WRITE_ATTEMPTS, e)
+
+    if _node_lineage_hooks and s3_key:
+        _lineage_ledger.write_node_lineage(boto3.client("s3", region_name=REGION), s3_bucket, session_id,
+                                           plan_id, node_id)
 
     # Extract structured output value from the agent's response.
     # The agent is instructed to include a ```json block at the end.
@@ -3654,7 +3672,7 @@ async def invoke(payload, context):
             terminated=False,
         )
 
-        yield json.dumps({
+        _summary_frame = {
             "type": "execution_summary",
             "total_duration_ms": int(_exec_duration * 1000),
             "cycles": _cycle_count,
@@ -3662,7 +3680,19 @@ async def invoke(payload, context):
             "usage": usage,
             "model": model_id,
             "attribution": _attribution,
-        })
+        }
+        # Lineage (projects.lineageEdges): what this sub-agent wrote and what from, so the dispatching turn can
+        # register its outputs with their inputs (orchestration.dispatch_tool merges it into its own ledger).
+        try:
+            from projects import lineage_contract as _lc
+            if _lc.edges_enabled():
+                from media import turn_outputs as _to
+                _sub_lineage = [{**e, "via": e.get("via") or "task_agent"} for e in _to.lineage()]
+                if _sub_lineage:
+                    _summary_frame["lineage"] = _sub_lineage
+        except Exception:  # noqa: BLE001 - a summary is emitted with or without lineage
+            logger.debug("task_agent: lineage not attached", exc_info=True)
+        yield json.dumps(_summary_frame)
     except Exception as e:
         logger.exception("Task execution failed")
         yield json.dumps({"error": str(e)})

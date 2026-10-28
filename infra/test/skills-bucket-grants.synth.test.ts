@@ -14,7 +14,7 @@
  *    with `sts:TagSession` and required `project_id`/`session_id` tags; every resource resolves from
  *    `${aws:PrincipalTag/...}`; no DELETE; its ARN is in the RuntimeConfigSecret, not runtime env.
  *  - the aws-mcp proxy runtime: no skills-bucket access at all (it never touches S3).
- *  - the Planning and Design runtimes (no tools, one output each): bucket-wide read, PUT `plans/*`.
+ *  - the Planning runtime (no tools, one output): bucket-wide read, PUT `plans/*`.
  *  - the Main and Task Agent runtimes: still bucket-wide read+write, DELIBERATELY — they host the
  *    Lab service and write every prefix. Asserted so a narrowing there is a conscious edit.
  */
@@ -159,8 +159,8 @@ for (const env of ["staging", "prod", "sandbox"] as EnvName[]) {
     assert.deepEqual(ss, [], `${env}: the aws-mcp proxy runtime has no skills-bucket grant`);
   }
 
-  // ---- planning + design: read anywhere, put only plans/* --------------------------------------
-  for (const role of ["PlanningAgentRuntimeExecutionRole", "DesignAgentRuntimeExecutionRole"]) {
+  // ---- planning: read anywhere, put only plans/* ----------------------------------------------
+  for (const role of ["PlanningAgentRuntimeExecutionRole"]) {
     const ss = skillsBucketStatements(statementsFor(t, role));
     const writes = ss.filter((s) => actions(s).some(isWrite));
     assert.ok(writes.length > 0, `${env}: ${role} can write its plan output`);
@@ -187,7 +187,7 @@ for (const env of ["staging", "prod", "sandbox"] as EnvName[]) {
     );
   }
 
-  console.log(`${env}: skills-bucket grants — sandbox (ffmpeg only)/aws-mcp/planning/design narrowed, orchestrators intact`);
+  console.log(`${env}: skills-bucket grants — sandbox (ffmpeg only)/aws-mcp/planning narrowed, orchestrators intact`);
 
   // ---- M2C media-gateway credentials: the chainer and the poller call its shared get_job_status ---
   // (declared outputs of SFN-polled M2C jobs whose execution output names no file). The secret

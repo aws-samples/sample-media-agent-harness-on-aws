@@ -128,6 +128,10 @@ class JobRecord:
     # analysis (face boxes, shot markers, speaker lanes) on the media it describes.
     # Uniform across every media analysis; empty for non-media / coordinator rows.
     source_media: list[str] = field(default_factory=list)
+    # projects.lineageEdges: EVERY location / external URL the start tool was given (credential-free), not only the
+    # playable media `source_media` keeps for the render overlay (an `.mxf`, an image, a JSON), so the job's outputs
+    # register made from what the job actually read. Empty with the flag off.
+    lineage_inputs: list[str] = field(default_factory=list)
     # The Producing_Turn's Active_Project (ingestion Req 9.3): media this job writes is registered into
     # THIS Project when the job completes, even if the session's Active_Project changed meanwhile. Stamped at
     # registration from the turn context; ``None`` outside a Projects turn (nothing is registered then).

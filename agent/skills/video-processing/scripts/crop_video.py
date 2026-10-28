@@ -373,6 +373,52 @@ def probe_video_bitrate(ffprobe: str, source: str) -> Optional[int]:
     return None
 
 
+def _parse_rational_fps(value: Optional[str]) -> Optional[float]:
+    """Parse an ffprobe rational frame rate (``"num/den"``, e.g. ``"30000/1001"``, or a bare number)
+    to a positive float, else None. ``"0/0"`` or a zero denominator means 'unknown'."""
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        if "/" in text:
+            num, den = text.split("/", 1)
+            den_f = float(den)
+            if den_f == 0:
+                return None
+            fps = float(num) / den_f
+        else:
+            fps = float(text)
+    except (TypeError, ValueError):
+        return None
+    return fps if fps > 0 else None
+
+
+def probe_fps(ffprobe: str, source: str) -> Optional[float]:
+    """The first video stream's frame rate in frames/second, or None if it can't be determined.
+
+    Parses ``avg_frame_rate`` (the true average over the stream, e.g. ``"30000/1001"`` -> 29.97),
+    falling back to ``r_frame_rate`` (the base rate). Both are ffprobe rationals ``"num/den"``.
+    Best-effort: any ffprobe/parse failure returns None so the caller falls back to unsnapped times
+    rather than failing."""
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate,r_frame_rate", "-of", "json", source],
+            capture_output=True, text=True, timeout=60,
+        )
+        streams = json.loads(result.stdout or "{}").get("streams") or []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not streams:
+        return None
+    s = streams[0]
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        fps = _parse_rational_fps(s.get(key))
+        if fps is not None:
+            return fps
+    return None
+
+
 def probe_has_audio(ffprobe: str, source: str) -> bool:
     """True if the source has at least one audio stream."""
     result = subprocess.run(

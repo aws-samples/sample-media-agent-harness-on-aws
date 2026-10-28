@@ -9,7 +9,7 @@ workflows behind an AgentCore Gateway. Start with [README.md](README.md).
 
 | Path | What |
 |---|---|
-| `agent/src/` | Python. Agent entrypoints (`main.py` orchestrator, `task_agent.py`, `planning_agent.py`, `design_agent.py`, `render_agent.py`), the Lab service (`lab/`), the Capability API (`capability_api/`), tools (`tools/`), hooks, jobs, ingestion and search. |
+| `agent/src/` | Python. Agent entrypoints (`main.py` orchestrator, `task_agent.py`, `planning_agent.py`, `render_agent.py`), the Lab service (`lab/`), the Capability API (`capability_api/`), tools (`tools/`), hooks, jobs, ingestion and search. |
 | `agent/skills/` | Built-in skills, one directory per skill with a `SKILL.md` (plus optional `references/`). |
 | `agent/tests/` | The agent test suite. |
 | `ui/src/` | The React workspace (Vite). |

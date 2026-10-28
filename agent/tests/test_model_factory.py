@@ -21,7 +21,7 @@ from model.factory import (DEFAULT_MAX_TOKENS, build_model,  # noqa: E402
                            reasoning_effort, reasoning_request_fields,
                            supports_reasoning_effort)
 
-AGENT_MODULES = ["main.py", "design_agent.py", "planning_agent.py",
+AGENT_MODULES = ["main.py", "planning_agent.py",
                  "render_agent.py", "task_agent.py"]
 
 
