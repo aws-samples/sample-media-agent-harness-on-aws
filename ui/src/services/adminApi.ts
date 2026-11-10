@@ -89,10 +89,7 @@ export interface GuardrailRef { id: string; version: string; name: string }
 export interface GuardrailOption { id: string; name: string; description: string; versions: string[] }
 export interface GuardrailSettingsView {
   guardrails: GuardrailOption[];
-  /** The admin's pick, `none`, or null (never chosen: the default applies). */
-  selected: GuardrailRef | 'none' | null;
-  default: GuardrailRef | null;
-  /** What every agent turn runs with. */
+  /** What every agent turn runs with: the admin's pick, or null (none, the default). */
   effective: GuardrailRef | null;
 }
 
@@ -103,18 +100,16 @@ export async function getGuardrails(): Promise<GuardrailSettingsView> {
   const b = await res.json();
   return {
     guardrails: Array.isArray(b?.guardrails) ? b.guardrails : [],
-    selected: b?.selected ?? null,
-    default: b?.default ?? null,
     effective: b?.effective ?? null,
   };
 }
 
-/** PUT /admin/guardrails — a pinned version, `'default'` (follow the platform default), or `null` (off). */
-export async function setGuardrail(pick: { id: string; version: string } | 'default' | null): Promise<GuardrailRef | null> {
+/** PUT /admin/guardrails — a guardrail version, or `null` (none). */
+export async function setGuardrail(pick: { id: string; version: string } | null): Promise<GuardrailRef | null> {
   const res = await authFetch('/admin/guardrails', {
     method: 'PUT',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify(pick === 'default' ? { useDefault: true } : pick ?? { none: true }),
+    body: JSON.stringify(pick ?? { none: true }),
   });
   if (!res.ok) {
     let message: string | undefined;

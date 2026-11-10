@@ -40,25 +40,21 @@ def use(monkeypatch, ssm):
 
 
 def test_parse_setting():
-    assert G.parse_setting(None) == (False, None)
-    assert G.parse_setting("default") == (False, None)  # follow the deploy's default
-    assert G.parse_setting("none") == (True, None)
-    assert G.parse_setting(json.dumps(REF)) == (True, REF)
-    assert G.parse_setting("{not json") == (False, None)
-    assert G.parse_setting(json.dumps({"id": "arn:aws:bedrock:x", "version": "1"})) == (False, None)  # ids, not ARNs
-    assert G.parse_setting(json.dumps({"id": "abc", "version": "DRAFT"})) == (False, None)  # published versions only
+    assert G.parse_setting(None) is None
+    assert G.parse_setting("none") is None
+    assert G.parse_setting("default") is None  # the retired "follow the default" value means none now
+    assert G.parse_setting(json.dumps(REF)) == REF
+    assert G.parse_setting("{not json") is None
+    assert G.parse_setting(json.dumps({"id": "arn:aws:bedrock:x", "version": "1"})) is None  # ids, not ARNs
+    assert G.parse_setting(json.dumps({"id": "abc", "version": "DRAFT"})) is None  # published versions only
 
 
-def test_the_admin_pick_wins_none_turns_it_off_and_absent_falls_back_to_the_default(monkeypatch):
-    default = {"id": "dflt1", "version": "1", "name": "default"}
-    use(monkeypatch, FakeSSM({"GUARDRAIL_SELECTED": json.dumps(REF), "GUARDRAIL_DEFAULT": json.dumps(default)}))
+def test_none_until_an_admin_picks_one(monkeypatch):
+    use(monkeypatch, FakeSSM({"GUARDRAIL_SELECTED": json.dumps(REF)}))
     assert G.platform_guardrail() == REF
-    G._reset_for_tests(); use(monkeypatch, FakeSSM({"GUARDRAIL_SELECTED": "none", "GUARDRAIL_DEFAULT": json.dumps(default)}))
-    assert G.platform_guardrail() is None
-    G._reset_for_tests(); use(monkeypatch, FakeSSM({"GUARDRAIL_DEFAULT": json.dumps(default)}))
-    assert G.platform_guardrail() == default
-    G._reset_for_tests(); use(monkeypatch, FakeSSM({}))
-    assert G.platform_guardrail() is None
+    for value in ({"GUARDRAIL_SELECTED": "none"}, {}, {"GUARDRAIL_DEFAULT": json.dumps(REF)}):
+        G._reset_for_tests(); use(monkeypatch, FakeSSM(value))
+        assert G.platform_guardrail() is None
 
 
 def test_read_at_most_once_a_minute_and_a_failure_keeps_the_last_value(monkeypatch):

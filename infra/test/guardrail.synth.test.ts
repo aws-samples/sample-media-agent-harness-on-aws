@@ -2,10 +2,10 @@
  * Synth assertions for the platform's Bedrock guardrail (docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md).
  * Run: `npm run test:guardrail-synth` (node:assert, no framework).
  *
- * Where `defaultGuardrail` (staging, prod): one AWS::Bedrock::Guardrail, light (PROMPT_ATTACK HIGH on input, the
- * other content categories LOW), a published AWS::Bedrock::GuardrailVersion of it, and the GUARDRAIL_DEFAULT
- * parameter under the runtime-ARN path. Nowhere: a CloudFormation-managed GUARDRAIL_SELECTED (the admin's pick must
- * survive deploys). Everywhere: the main and task runtime roles may bedrock:ApplyGuardrail in this account, the
+ * Where `harnessGuardrail` (staging, prod): one AWS::Bedrock::Guardrail, light (every filter at LOW strength: only
+ * HIGH-confidence prompt attacks and clearly harmful content), and a retained AWS::Bedrock::GuardrailVersion. Nowhere:
+ * a guardrail setting the deploy manages (no GUARDRAIL_DEFAULT: none applies until an admin picks one; no
+ * CloudFormation-managed GUARDRAIL_SELECTED: the admin's pick must survive deploys). Everywhere: the main and task runtime roles may bedrock:ApplyGuardrail in this account, the
  * planning and render roles may not, and the proxy may list guardrails and write only GUARDRAIL_SELECTED.
  */
 import * as assert from "node:assert/strict";
@@ -64,19 +64,21 @@ for (const env of ["staging", "prod", "sandbox"] as const) {
     const path = `/${PROJECT}-${env}/runtime-arns`;
     if (env === "sandbox") {
       assert.equal(guardrails.length, 0, "sandbox creates no guardrail");
-      assert.ok(!params.some((p) => p.Name === `${path}/GUARDRAIL_DEFAULT`), "sandbox has no default");
     } else {
       assert.equal(guardrails.length, 1, `${env}: one default guardrail`);
       const filters = guardrails[0].Properties.ContentPolicyConfig.FiltersConfig as any[];
       const byType = Object.fromEntries(filters.map((f) => [f.Type, f]));
-      assert.deepEqual(byType.PROMPT_ATTACK, { Type: "PROMPT_ATTACK", InputStrength: "HIGH", OutputStrength: "NONE" });
+      assert.deepEqual(byType.PROMPT_ATTACK, { Type: "PROMPT_ATTACK", InputStrength: "LOW", OutputStrength: "NONE" },
+        `${env}: only HIGH-confidence prompt attacks are blocked`);
+      const ver = Object.values(t.findResources("AWS::Bedrock::GuardrailVersion"))[0] as any;
+      assert.equal(ver.DeletionPolicy, "Retain", `${env}: superseded guardrail versions are kept`);
       for (const type of ["SEXUAL", "VIOLENCE", "HATE", "INSULTS", "MISCONDUCT"]) {
         assert.deepEqual(byType[type], { Type: type, InputStrength: "LOW", OutputStrength: "LOW" }, `${env}: ${type} is light`);
       }
       assert.equal(versions.length, 1, `${env}: one published version`);
-      assert.ok(params.some((p) => p.Name === `${path}/GUARDRAIL_DEFAULT`), `${env}: GUARDRAIL_DEFAULT parameter`);
     }
     assert.ok(!params.some((p) => p.Name === `${path}/GUARDRAIL_SELECTED`), `${env}: the admin's pick is never CFN-managed`);
+    assert.ok(!params.some((p) => p.Name === `${path}/GUARDRAIL_DEFAULT`), `${env}: no default guardrail is ever applied`);
 
     const roles = statementsByRole(t);
     const applies = (role: string) => (roles.get(role) ?? []).some((s) => actionsOf(s).includes("bedrock:ApplyGuardrail"));

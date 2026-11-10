@@ -1,21 +1,20 @@
 // SafetySettings — the platform's Bedrock guardrail (admin-only; docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md).
 //
-// ONE guardrail for the whole platform: every agent reply, sub-agent, plan node and external custom-agent call runs with
-// it. Guardrails are made in Amazon Bedrock; this only chooses which published version applies. A change reaches the
-// agents within about a minute.
+// ONE guardrail for the whole platform, NONE until an admin picks one: the chat agent's replies and external
+// custom-agent calls run with it. Guardrails are made in Amazon Bedrock (the deploy creates the harness's own light
+// one); this only chooses which published version applies, if any. A change reaches the agents within about a minute.
 import React, { useEffect, useState } from 'react';
 import { theme } from '../../styles/tokens';
 import { getGuardrails, setGuardrail } from '../../services/adminApi';
 import type { GuardrailSettingsView } from '../../services/adminApi';
 
 const NONE = '__none__';
-const DEFAULT = '__default__';
 
 const keyOf = (id: string, version: string) => `${id}:${version}`;
 
 export default function SafetySettings() {
   const [view, setView] = useState<GuardrailSettingsView | null>(null);
-  const [choice, setChoice] = useState<string>(DEFAULT);
+  const [choice, setChoice] = useState<string>(NONE);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -26,10 +25,7 @@ export default function SafetySettings() {
       .then((v) => {
         if (cancelled) return;
         setView(v);
-        // A pin of the default's own version shows as the default entry (the same guardrail today).
-        const pinsDefault = v.selected && v.selected !== 'none' && v.default
-          && v.selected.id === v.default.id && v.selected.version === v.default.version;
-        setChoice(v.selected === 'none' ? NONE : v.selected && !pinsDefault ? keyOf(v.selected.id, v.selected.version) : DEFAULT);
+        setChoice(v.effective ? keyOf(v.effective.id, v.effective.version) : NONE);
       })
       .catch(() => { if (!cancelled) setError("Couldn't load guardrails."); });
     return () => { cancelled = true; };
@@ -39,12 +35,10 @@ export default function SafetySettings() {
     if (!view) return;
     setSaving(true); setError(null); setSaved(false);
     try {
-      let pick: { id: string; version: string } | 'default' | null;
-      if (choice === NONE) pick = null;
-      else if (choice === DEFAULT) pick = 'default';
-      else { const [id, version] = choice.split(':'); pick = { id, version }; }
+      let pick: { id: string; version: string } | null = null;
+      if (choice !== NONE) { const [id, version] = choice.split(':'); pick = { id, version }; }
       const effective = await setGuardrail(pick);
-      setView({ ...view, effective, selected: pick === 'default' ? null : effective ?? 'none' });
+      setView({ ...view, effective });
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error && e.message ? e.message : "Couldn't save.");
@@ -57,8 +51,9 @@ export default function SafetySettings() {
     <div>
       <h2 style={titleStyle}>Safety</h2>
       <p style={leadStyle}>
-        The content guardrail every agent reply runs with, for everyone on this platform. Guardrails are created in
-        Amazon Bedrock; choose which one applies. It covers the agents' text, not prompts sent to media-generation tools.
+        An optional content guardrail for everyone on this platform. Off by default. Guardrails are created in Amazon
+        Bedrock; choose one to apply it to chat messages and replies. It does not cover prompts sent to media-generation
+        tools.
       </p>
       {!view && !error && <div style={metaStyle}>Loading…</div>}
       {view && (
@@ -69,20 +64,10 @@ export default function SafetySettings() {
           <label style={labelStyle} htmlFor="guardrail-select">Content guardrail</label>
           <select id="guardrail-select" aria-label="Content guardrail" value={choice}
             onChange={(e) => { setChoice(e.target.value); setSaved(false); }} style={selectStyle}>
-            {/* One entry per published version. The default's entry FOLLOWS the default (a policy change CI publishes
-                applies on its own); any other entry pins that version. */}
-            {view.default && !view.guardrails.some((g) => g.id === view.default!.id && g.versions.includes(view.default!.version)) && (
-              <option value={DEFAULT}>{view.default.name || view.default.id} (v{view.default.version}) · platform default</option>
-            )}
-            {view.guardrails.flatMap((g) => [...g.versions].reverse().map((v) => {
-              const isDefault = !!view.default && view.default.id === g.id && view.default.version === v;
-              return (
-                <option key={keyOf(g.id, v)} value={isDefault ? DEFAULT : keyOf(g.id, v)}>
-                  {g.name} (v{v}){isDefault ? ' · platform default' : ''}
-                </option>
-              );
-            }))}
             <option value={NONE}>None (no guardrail)</option>
+            {view.guardrails.flatMap((g) => [...g.versions].reverse().map((v) => (
+              <option key={keyOf(g.id, v)} value={keyOf(g.id, v)}>{g.name} (v{v})</option>
+            )))}
           </select>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
             <button type="button" onClick={() => void save()} disabled={saving} style={saveStyle}>

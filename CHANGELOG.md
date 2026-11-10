@@ -7,6 +7,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [1.2.2] — no guardrail by default; the harness guardrail blocks only clear attacks
+
+### Changed
+- **No guardrail by default.** The platform runs without a guardrail until an admin picks one in Settings → Safety.
+  Staging and prod deploys still create the harness's light guardrail so there is one to pick. The 1.2.0 default was
+  removed because it blocked ordinary work.
+
+### Fixed
+- **Ordinary requests were blocked as prompt attacks.** The harness guardrail blocked anything its prompt-attack
+  filter suspected even slightly: editing requests such as "just don't add new text", and the app's own notification
+  prompts ("Summarize the … results"). It now blocks only high-confidence attacks ("ignore all previous
+  instructions…"). The deploy publishes this as a new version, and superseded versions are kept.
+
 ## [1.2.1] — the guardrail checks only what you wrote
 
 ### Fixed

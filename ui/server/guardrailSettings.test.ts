@@ -3,7 +3,6 @@ import { listOptions, parseRef, readSettings, saveSelection } from "./guardrailS
 import type { ListGuardrails } from "./guardrailSettings";
 
 const PATH = "/p-staging/runtime-arns";
-const DEFAULT = { id: "dflt1", version: "1", name: "harness-default" };
 
 // Two guardrails: one with published versions 1 and 2, one with only a DRAFT (never offered).
 const list: ListGuardrails = async (input) => {
@@ -33,7 +32,7 @@ function fakeSsm(values: Record<string, string> = {}) {
 
 describe("the platform guardrail setting", () => {
   it("parses ids and published versions only", () => {
-    expect(parseRef(JSON.stringify(DEFAULT))).toEqual(DEFAULT);
+    expect(parseRef(JSON.stringify({ id: "dflt1", version: "1", name: "d" }))).toEqual({ id: "dflt1", version: "1", name: "d" });
     expect(parseRef({ id: "arn:aws:bedrock:us-west-2:1:guardrail/x", version: "1" })).toBeNull();
     expect(parseRef({ id: "abc", version: "DRAFT" })).toBeNull();
     expect(parseRef("{bad")).toBeNull();
@@ -43,14 +42,12 @@ describe("the platform guardrail setting", () => {
     expect(await listOptions(list)).toEqual([{ id: "abc123", name: "Strict", description: "brand safety", versions: ["1", "2"] }]);
   });
 
-  it("the admin's pick wins over the default; none turns it off; never chosen falls back to the default", async () => {
+  it("applies the admin's pick, and none until there is one", async () => {
     const pick = { id: "abc123", version: "2", name: "Strict" };
-    expect(await readSettings(fakeSsm({ GUARDRAIL_DEFAULT: JSON.stringify(DEFAULT) }).call, PATH))
-      .toEqual({ selected: null, default: DEFAULT, effective: DEFAULT });
-    expect(await readSettings(fakeSsm({ GUARDRAIL_DEFAULT: JSON.stringify(DEFAULT), GUARDRAIL_SELECTED: JSON.stringify(pick) }).call, PATH))
-      .toMatchObject({ selected: pick, effective: pick });
-    expect(await readSettings(fakeSsm({ GUARDRAIL_DEFAULT: JSON.stringify(DEFAULT), GUARDRAIL_SELECTED: "none" }).call, PATH))
-      .toMatchObject({ selected: "none", effective: null });
+    expect(await readSettings(fakeSsm({}).call, PATH)).toEqual({ effective: null });
+    expect(await readSettings(fakeSsm({ GUARDRAIL_SELECTED: JSON.stringify(pick) }).call, PATH)).toEqual({ effective: pick });
+    expect(await readSettings(fakeSsm({ GUARDRAIL_SELECTED: "none" }).call, PATH)).toEqual({ effective: null });
+    expect(await readSettings(fakeSsm({ GUARDRAIL_SELECTED: "default" }).call, PATH)).toEqual({ effective: null });
   });
 
   it("saves a published version with its name, or none, and refuses anything else", async () => {
@@ -66,12 +63,5 @@ describe("the platform guardrail setting", () => {
     expect(await saveSelection(ssm.call, list, PATH, { id: "arn:x", version: "1" })).toMatchObject({ ok: false, status: 400 });
     expect(await saveSelection(ssm.call, list, PATH, {})).toMatchObject({ ok: false, status: 400 });
     expect(ssm.puts).toHaveLength(2);
-  });
-
-  it("useDefault follows the deploy's default (a later CI version applies on its own)", async () => {
-    const ssm = fakeSsm({ GUARDRAIL_DEFAULT: JSON.stringify(DEFAULT), GUARDRAIL_SELECTED: "none" });
-    expect(await saveSelection(ssm.call, list, PATH, { useDefault: true })).toEqual({ ok: true, effective: DEFAULT });
-    expect(ssm.puts[0].Value).toBe("default");
-    expect(await readSettings(ssm.call, PATH)).toEqual({ selected: null, default: DEFAULT, effective: DEFAULT });
   });
 });

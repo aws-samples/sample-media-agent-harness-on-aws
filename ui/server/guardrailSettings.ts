@@ -1,15 +1,14 @@
 // The platform's Bedrock guardrail, chosen by an admin (Settings -> Safety).
 //
-// ONE guardrail for the whole platform (docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md). The deploy
-// creates a default and writes `<RUNTIME_ARN_PARAM_PATH>/GUARDRAIL_DEFAULT`; an admin's pick is
-// `<path>/GUARDRAIL_SELECTED`, which the deploy never manages, so it survives every deploy. Both hold JSON
-// `{id, version, name}`, or SELECTED holds `none` (the admin turned guardrails off). The Main and Task agents read
-// them at most once a minute (agent/src/model/guardrail.py), so a change applies within about a minute.
+// ONE guardrail for the whole platform (docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md), and NONE until
+// an admin picks one: the deploy creates the harness's light guardrail so there is one to pick, but never applies it.
+// The pick is `<RUNTIME_ARN_PARAM_PATH>/GUARDRAIL_SELECTED` (JSON `{id, version, name}`, or `none`), which the deploy
+// never manages, so it survives every deploy. The Main and Task agents read it at most once a minute
+// (agent/src/model/guardrail.py), so a change applies within about a minute.
 //
 // Served under `/admin/guardrails` (admin-only; `requireAdmin` runs first in app.ts):
-//   GET  -> { guardrails: [{id, name, description, versions}], selected, default, effective }
-//   PUT  {id, version} | {useDefault: true} | {none: true} -> { effective }
-// `useDefault` follows the deploy's default (a policy change CI publishes applies on its own); {id, version} pins.
+//   GET  -> { guardrails: [{id, name, description, versions}], effective }
+//   PUT  {id, version} | {none: true} -> { effective }
 // A pick must be a PUBLISHED version (never DRAFT) of a guardrail in this account: ids, never ARNs.
 
 import type { SsmCall } from "./runtimeArns";
@@ -22,10 +21,7 @@ export type ListGuardrails = (input: { guardrailIdentifier?: string; nextToken?:
   Promise<{ guardrails?: { id?: string; name?: string; description?: string; version?: string }[]; nextToken?: string }>;
 
 export const SELECTED = "GUARDRAIL_SELECTED";
-export const DEFAULT = "GUARDRAIL_DEFAULT";
 export const NONE = "none";
-/** GUARDRAIL_SELECTED value meaning "follow GUARDRAIL_DEFAULT" (same as never chosen). */
-export const FOLLOW_DEFAULT = "default";
 
 const ID = /^[a-z0-9]{1,64}$/;
 const VERSION = /^[0-9]{1,8}$/;
@@ -66,23 +62,14 @@ export async function listOptions(list: ListGuardrails, max = 50): Promise<Guard
 }
 
 export interface GuardrailSettings {
-  /** GUARDRAIL_SELECTED: a ref, `none`, or null (never chosen). */
-  selected: GuardrailRef | "none" | null;
-  default: GuardrailRef | null;
-  /** What the agents apply: the admin's pick, else the default. */
+  /** What the agents apply: the admin's pick, or null (none). */
   effective: GuardrailRef | null;
 }
 
 export async function readSettings(ssm: SsmCall, path: string): Promise<GuardrailSettings> {
-  const resp = await ssm("GetParameters", { Names: [`${path}/${SELECTED}`, `${path}/${DEFAULT}`] });
-  const values: Record<string, string> = {};
-  for (const p of resp?.Parameters ?? []) {
-    if (typeof p?.Name === "string" && typeof p.Value === "string") values[p.Name.split("/").pop()!] = p.Value;
-  }
-  const raw = values[SELECTED];
-  const selected = raw === undefined || raw.trim() === FOLLOW_DEFAULT ? null : raw.trim() === NONE ? "none" : parseRef(raw);
-  const dflt = parseRef(values[DEFAULT]);
-  return { selected, default: dflt, effective: selected === "none" ? null : selected ?? dflt };
+  const resp = await ssm("GetParameters", { Names: [`${path}/${SELECTED}`] });
+  const raw = (resp?.Parameters ?? []).find((p: any) => typeof p?.Value === "string")?.Value as string | undefined;
+  return { effective: raw === undefined ? null : parseRef(raw) };
 }
 
 export type SaveResult =
@@ -98,12 +85,8 @@ export async function saveSelection(
     await ssm("PutParameter", { Name: `${path}/${SELECTED}`, Value: NONE, Type: "String", Overwrite: true });
     return { ok: true, effective: null };
   }
-  if (b.useDefault === true) {
-    await ssm("PutParameter", { Name: `${path}/${SELECTED}`, Value: FOLLOW_DEFAULT, Type: "String", Overwrite: true });
-    return { ok: true, effective: (await readSettings(ssm, path)).default };
-  }
   const ref = parseRef({ id: b.id, version: b.version });
-  if (!ref) return { ok: false, status: 400, code: "invalid_guardrail", message: "Send {id, version}, {useDefault: true} or {none: true}" };
+  if (!ref) return { ok: false, status: 400, code: "invalid_guardrail", message: "Send {id, version} or {none: true}" };
   const options = await listOptions(list);
   const match = options.find((g) => g.id === ref.id);
   if (!match || !match.versions.includes(ref.version)) {

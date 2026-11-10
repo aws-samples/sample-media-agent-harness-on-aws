@@ -1,8 +1,9 @@
 """The platform's Bedrock guardrail, applied by ``model.factory.build_model`` to every model built for a request.
 
 ONE guardrail for the whole platform, chosen by an admin in Settings -> Safety (the proxy writes
-``<RUNTIME_ARN_PARAM_PATH>/GUARDRAIL_SELECTED``), else the environment's default that the deploy creates
-(``GUARDRAIL_DEFAULT``). The Main and Task agents :func:`bind` it at the start of each request; the planning and render
+``<RUNTIME_ARN_PARAM_PATH>/GUARDRAIL_SELECTED``). NONE until an admin picks one: the deploy creates the harness's
+light guardrail so there is one to pick, but never applies it by itself (1.2.2: a default that blocks ordinary work
+is worse than none). The Main and Task agents :func:`bind` it at the start of each request; the planning and render
 runtimes never do (their output is internal JSON, not prose). So dispatched work, plan nodes and external custom-agent
 calls are covered without anything forwarding it. Design: docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md.
 
@@ -27,9 +28,6 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 SELECTED_NAME = "GUARDRAIL_SELECTED"
-DEFAULT_NAME = "GUARDRAIL_DEFAULT"
-NONE_VALUE = "none"
-FOLLOW_DEFAULT = "default"  # GUARDRAIL_SELECTED: follow GUARDRAIL_DEFAULT (same as never chosen)
 _TTL_SECONDS = 60.0
 
 # A guardrail id (never an ARN: an ARN could name another account's guardrail) and a PUBLISHED version (never DRAFT).
@@ -56,18 +54,14 @@ def normalize(value: Any) -> Optional[dict]:
     return {"id": gid, "version": ver, "name": str(value.get("name") or "")[:100]}
 
 
-def parse_setting(raw: Optional[str]) -> tuple[bool, Optional[dict]]:
-    """``(decided, guardrail)`` for a parameter value: ``"none"`` decides "no guardrail"; a JSON reference decides it;
-    absent or malformed decides nothing (fall through to the default)."""
-    if raw is None or raw.strip() == FOLLOW_DEFAULT:
-        return False, None
-    if raw.strip() == NONE_VALUE:
-        return True, None
+def parse_setting(raw: Optional[str]) -> Optional[dict]:
+    """The guardrail a ``GUARDRAIL_SELECTED`` value names, or ``None`` (absent, ``none``, or anything malformed)."""
+    if not raw:
+        return None
     try:
-        g = normalize(json.loads(raw))
+        return normalize(json.loads(raw))
     except (ValueError, TypeError):
-        g = None
-    return (True, g) if g else (False, None)
+        return None
 
 
 def _ssm():
@@ -83,12 +77,8 @@ def _read() -> Optional[dict]:
     path = os.environ.get("RUNTIME_ARN_PARAM_PATH", "").strip().rstrip("/")
     if not path:
         return None
-    names = [f"{path}/{SELECTED_NAME}", f"{path}/{DEFAULT_NAME}"]
-    found = {p["Name"].rsplit("/", 1)[-1]: p.get("Value") for p in _ssm().get_parameters(Names=names).get("Parameters", [])}
-    decided, g = parse_setting(found.get(SELECTED_NAME))
-    if decided:
-        return g
-    return parse_setting(found.get(DEFAULT_NAME))[1]
+    found = _ssm().get_parameters(Names=[f"{path}/{SELECTED_NAME}"]).get("Parameters", [])
+    return parse_setting(found[0].get("Value") if found else None)
 
 
 def platform_guardrail() -> Optional[dict]:
