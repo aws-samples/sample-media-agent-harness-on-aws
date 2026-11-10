@@ -1,7 +1,7 @@
 """Stage skill-bundled scripts into the code-interpreter sandbox the moment a cell references one.
 
 Skills ship deterministic helpers -- ``agent-olive/scripts/assemble_reel.py``, ``media-references/scripts/
-estimate_cost.py``, ``video-processing/scripts/trim_plan.py``, ``content_moderation/scripts/build_report.py`` --
+estimate_cost.py``, ``video-processing/scripts/trim_plan.py``, ``content-moderation/scripts/build_report.py`` --
 and their instructions say "run ``python scripts/<x>.py``". But a code-interpreter sandbox starts EMPTY: nothing
 copied the files there, the sandbox role has no ``skills/*`` grant, and only ``crop_video`` embedded its own
 script. So every such instruction either failed or made the model re-type the script (the reason three sg5

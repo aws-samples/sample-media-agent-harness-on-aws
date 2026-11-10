@@ -36,7 +36,7 @@ class TestCapabilityExists:
         src = (SRC / "main.py").read_text()
         # the tool that makes reading a result file possible at all
         assert '"http_request": http_request' in src
-        assert '"file_read": file_read' in src
+        assert '"read_result_files": read_result_files' in src
 
 
 class TestInstructionPresent:

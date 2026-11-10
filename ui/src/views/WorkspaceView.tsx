@@ -7,8 +7,8 @@ import { useLabContext } from '../LabContext';
 import { listSessions, deleteSession as deleteSessionApi, updateSessionRenderHistory, deleteSessionRender, createSessionRender, createSession, updateSessionActivity, setSessionLock, editAsset, discardChanges, getSessionRenders, deleteSpecialtyAgentDraft, publishAsset, logPersistFailure } from '../lab-api';
 import type { PublishedAssetSummary } from '../lab-api';
 import ResizeDivider from '../components/ResizeDivider';
-import { getSessionProject, persistSessionForAction, seedSessionProject } from '../projects/sessionProjectStore';
-import { onNewChatInProjectRequest } from '../projects/newChatInProject';
+import { getSessionProject, persistSessionForAction, seedSessionProject, setSessionNotice } from '../projects/sessionProjectStore';
+import { onNewChatInProjectRequest, setPendingOpen } from '../projects/newChatInProject';
 import { projectsEnabled as isProjectsEnabled, peekProjectsEnabled } from '../projects/api';
 import ProjectsSurface from '../components/projects/ProjectsSurface';
 import { OPEN_PROJECT_GRAPH_EVENT } from '../components/projects/graph/graphResult';
@@ -779,7 +779,7 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
 
   // `project` seeds the new session's Active_Project (the Projects surface's `New chat`); without it the
   // session starts with none and the first turn falls back to Personal as before.
-  const startNewSession = useCallback((project?: { id: string; name: string }) => {
+  const startNewSession = useCallback((project?: { id: string; name: string }): string => {
     const newId = crypto.randomUUID?.() || `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const newRow: WorkspaceSession = { id: newId, title: 'New Session', timestamp: Date.now() };
     // Replace the prior active row when it was also ephemeral. Persisted rows
@@ -798,15 +798,24 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
     setRenderIndex(0);
     setCenterMode('chat');
     switchSession(newId);
+    return newId;
   }, [activeSession, switchSession]);
-  const handleNewSession = useCallback(() => startNewSession(), [startNewSession]);
+  const handleNewSession = useCallback(() => { startNewSession(); }, [startNewSession]);
   const handleNewChatInProject = useCallback(
-    (projectId: string, projectName: string) => startNewSession({ id: projectId, name: projectName }),
+    (projectId: string, projectName: string, prompt?: string, draft?: string, notice?: string) => {
+      const newId = startNewSession({ id: projectId, name: projectName });
+      // The agent's switch_project / create_project send `prompt` as the new chat's first message; a chat whose
+      // project was deleted puts the unsent message back as a `draft`.
+      setPendingOpen(newId, { prompt, draft });
+      if (notice) setSessionNotice(newId, notice);
+    },
     [startNewSession],
   );
-  // The Plus_Menu's "Start a new chat in <project>" on a session whose project a turn fixed (asset-lineage D1).
+  // The Plus_Menu's "Start a new chat in <project>" on a session whose project a turn fixed (asset-lineage D1),
+  // and the agent's switch_project / create_project (a turn's execution_summary.open_project).
   useEffect(
-    () => onNewChatInProjectRequest(({ projectId, projectName }) => handleNewChatInProject(projectId, projectName)),
+    () => onNewChatInProjectRequest(({ projectId, projectName, prompt, draft, notice }) =>
+      handleNewChatInProject(projectId, projectName, prompt, draft, notice)),
     [handleNewChatInProject],
   );
 

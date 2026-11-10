@@ -95,6 +95,18 @@ describe('ProjectBrowser', () => {
     expect(screen.getByTestId('project-assets')).toHaveAttribute('data-browse-only', 'true');
   });
 
+  it('a deleted project says so once and stops reading (no polling a 404 forever)', async () => {
+    mocks.listAssets.mockResolvedValue({ ok: false, kind: 'not_found' });
+    show({});
+    await flush();
+    expect(screen.getByTestId('project-browser-gone')).toHaveTextContent('"Storyboards" no longer exists');
+    expect(screen.queryByTestId('project-assets')).toBeNull();
+    const calls = mocks.listAssets.mock.calls.length;
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    await flush();
+    expect(mocks.listAssets.mock.calls.length).toBe(calls);
+  });
+
   it('a registered assets slot does not replace the browse grid', async () => {
     registerProjectTab('assets', () => <div data-testid="slot-grid" />);
     show({});

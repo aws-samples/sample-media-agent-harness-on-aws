@@ -108,6 +108,6 @@ def test_a_single_trim_keeps_the_source_resolution():
 
 
 def test_content_moderation_knows_conversation_analysis_has_spoken_evidence():
-    text = _flat((SKILLS / "content_moderation" / "SKILL.md").read_text(encoding="utf-8"))
+    text = _flat((SKILLS / "content-moderation" / "SKILL.md").read_text(encoding="utf-8"))
     assert "`conversation_analysis.json` has NO moderation vocabulary" not in text
     assert "discourse_facts" in text

@@ -194,6 +194,12 @@ class HarnessBedrockModel(BedrockModel):
             drop_prior_turn_reasoning(super()._format_bedrock_messages(*args, **kwargs))
         )
 
+    def format_request(self, *args: Any, **kwargs: Any) -> Any:
+        # The platform guardrail checks only what a person wrote (model/guardrail.py).
+        from model import guardrail as _guardrail  # noqa: PLC0415
+
+        return _guardrail.guard_only_human_text(super().format_request(*args, **kwargs))
+
 
 class StablePrefixBedrockModel(HarnessBedrockModel):
     """Puts the tools cache point after the BUILTIN tools, not after every tool.
@@ -565,6 +571,15 @@ def build_model(
     arf.update(reasoning_request_fields(model_id, effort))
     if arf:
         extra["additional_request_fields"] = arf
+
+    # The request's Bedrock guardrail (model/guardrail.py), unless the caller set one itself. Into `extra` for the same
+    # reason as effort: the TypeError fallback below carries `extra`, so a guardrail is never silently dropped.
+    if "guardrail_id" not in extra:
+        from model import guardrail as _guardrail  # noqa: PLC0415
+
+        bound = _guardrail.current()
+        if bound:
+            extra.update(_guardrail.strands_config(bound))
 
     use_cache = caching_enabled() if cache is None else bool(cache)
     # A model that cannot cache must not be sent cache options: the tools cache point

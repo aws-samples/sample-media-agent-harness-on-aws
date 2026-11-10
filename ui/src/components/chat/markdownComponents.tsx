@@ -4,7 +4,7 @@ import { ASSET_SCHEME, InlineAssetImage } from './InlineAssetImage';
 import { classifyUrl } from './artifactUrl';
 import { renderWithIdChips } from './compactIds';
 import { CitationRef } from './CitationRef';
-import { CreateProjectCard, PROJECT_LINK_PREFIX } from './CreateProjectCard';
+import { isProjectCardLink, ProjectLinkCard } from './CreateProjectCard';
 
 /**
  * Shared markdown component overrides for the chat surface. Routes every link and image the agent
@@ -28,9 +28,10 @@ function loneText(children: React.ReactNode): string | null {
 }
 
 export const markdownComponents: Components = {
-  // `[Create project “X”](project:new?name=X)` — a project the agent proposed: a card the user clicks.
-  a: ({ href, children }) => typeof href === 'string' && href.startsWith(PROJECT_LINK_PREFIX) ? (
-    <CreateProjectCard href={href} />
+  // `[Create project “X”](project:new?name=X)` (older chats) and `[Delete project “X”](project:delete?id=…&name=X)`:
+  // cards the user acts on.
+  a: ({ href, children }) => typeof href === 'string' && isProjectCardLink(href) ? (
+    <ProjectLinkCard href={href} />
   ) : (
     <ArtifactLink href={typeof href === 'string' ? href : undefined}>{children}</ArtifactLink>
   ),

@@ -52,6 +52,10 @@ export const markdownBodyStyle: React.CSSProperties = {
   overflow: 'hidden',
 };
 
+/** A reply the platform's content guardrail blocked: a quiet note under it, not an error. */
+export const guardrailNoteStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 'var(--fs-xs)', color: theme.colors.textSecondary,
+};
 export const errorIndicatorStyle: React.CSSProperties = {
   fontSize: 'var(--fs-sm)',
   color: theme.colors.error,

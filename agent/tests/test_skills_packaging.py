@@ -76,3 +76,22 @@ def test_declarations_survive_the_move():
     assert by["render-shot-segmentation"]["declaration"]["markers"].startswith("shots[]")
     assert "units=ms" in by["render-face-people"]["declaration"]["lanes"]
     assert by["render-speaker-diarization"]["declaration"]["segments"].startswith("sentences[]")
+
+
+def test_every_builtin_skill_dir_matches_its_frontmatter_name():
+    """The catalog row is keyed by the DIRECTORY name, the runtime by the frontmatter ``name``.
+
+    ``content_moderation/`` declared ``name: content-moderation``, so the built-in Skills panel
+    listed it twice (the catalog row, plus the runtime's row tagged "Other"). agentskills.io
+    also requires the two to match.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "skills"
+    mismatched = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and (p / "SKILL.md").exists()):
+        m = re.search(r"^name:\s*\"?([^\"\n]+)\"?\s*$", (d / "SKILL.md").read_text(encoding="utf-8"), re.M)
+        if not m or m.group(1).strip() != d.name:
+            mismatched.append((d.name, m.group(1).strip() if m else None))
+    assert not mismatched, mismatched

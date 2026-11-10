@@ -1,5 +1,4 @@
 strands-agents==1.55.1
-strands-agents-tools==0.8.7
 # NOTE: This file is the CI *pytest* requirements (`.gitlab-ci.yml` runs
 # `pip install -r agent/requirements.txt`). It is NOT what the runtime deploy uses —
 # the CDK zip-packager pip-downloads **agent/src/requirements.txt** into the deployment
@@ -16,13 +15,18 @@ PyYAML==6.0.2
 # deployed extraction runs in the IngestTick Lambda, which installs pypdf via infra
 # `ingestionRequirements`; this pin lets the CI pytest env import ingestion/pdf.py so
 # the document-indexing tests run instead of ModuleNotFoundError-degrading to no_text_layer.
-pypdf==6.21.2
+pypdf==6.21.4
 # Security floors (pip-audit, 2026-10; mirrored in pyproject.toml [tool.uv]
 # constraint-dependencies). The runtimes serve HTTP through bedrock-agentcore's Starlette app.
 starlette>=1.3.1
 python-multipart>=0.0.31
 urllib3>=2.8.0
 requests>=2.33.0
-aiohttp>=3.14.4
 cryptography>=50.0.0
 PyJWT>=2.15.0
+# Direct dependencies that strands-agents-tools (dropped 2026-11, see pyproject.toml) used to bring in
+# transitively. Pillow: the runtime decodes images (model/factory.py, reference_image_check.py, cut/);
+# 13.0.0 is the first release free of the 12.x advisories, and nothing holds it below 13 any more.
+# markdownify: http_request's convert_to_markdown (tools/http_request.py).
+pillow==13.0.0
+markdownify==1.2.2

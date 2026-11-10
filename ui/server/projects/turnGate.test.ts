@@ -349,6 +349,37 @@ describe("session ↔ project binding (D1, R2)", () => {
     expect(ddbTable.get("sess-1")).toEqual(before);
   });
 
+  it("ends a chat whose own project was deleted: 409 session_project_gone, whatever project the turn names, no write", async () => {
+    const personal = await ensurePersonalProject(ACTOR);
+    const bound = await ownedProject(ACTOR, "Alpha");
+    seedSession("sess-1", { activeProjectId: bound, transcript: TURN });
+    expect((await projectRegistry().delete(ACTOR, bound, "Alpha")).ok).toBe(true);
+    const before = structuredClone(ddbTable.get("sess-1"));
+    const gone = {
+      kind: "reject",
+      status: 409,
+      body: { error: expect.objectContaining({
+        code: "session_project_gone", projectId: bound, personalProject: { id: personal.projectId, name: "Personal" },
+      }) },
+    };
+    // The chat's composer moved to Personal (the SPA's reconcile), or still names the deleted project, or names none.
+    expect(await gate(personal.projectId)).toEqual(gone);
+    expect(await gate(bound, vi.fn(async (): Promise<IssueResult> => ({ status: "not_found" })))).toEqual(gone);
+    expect(await gate(undefined, vi.fn(async (): Promise<IssueResult> => ({ status: "not_found" })))).toEqual(gone);
+    expect(ddbTable.get("sess-1")).toEqual(before); // never re-pointed to Personal
+  });
+
+  it("a chat with no turn yet whose project was deleted still moves to Personal", async () => {
+    const personal = await ensurePersonalProject(ACTOR);
+    const pid = await ownedProject(ACTOR, "Alpha");
+    seedSession("sess-1", { activeProjectId: pid });
+    await projectRegistry().delete(ACTOR, pid, "Alpha");
+    expect(await gate(pid, vi.fn(async (): Promise<IssueResult> => ({ status: "not_found" })))).toMatchObject({
+      status: 409, body: { error: { code: "project_access_lost" } },
+    });
+    expect(ddbTable.get("sess-1")!.activeProjectId).toBe(personal.projectId);
+  });
+
   it("lets a turn in the bound project (named or implied) proceed", async () => {
     const bound = await ownedProject(ACTOR, "Alpha");
     seedSession("sess-1", { activeProjectId: bound, transcript: TURN });

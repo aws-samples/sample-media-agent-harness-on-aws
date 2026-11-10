@@ -7,6 +7,55 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [1.2.1] — the guardrail checks only what you wrote
+
+### Fixed
+- **The platform guardrail blocked ordinary messages.** When long-term memory added past context to a message, the
+  guardrail checked that harness-added text too, read its instructions as a prompt attack, and replaced the reply
+  with "This request was blocked by the platform's content guardrail." It now checks only the words a person wrote
+  (the chat message, or an external caller's prompt). The orchestrator's instructions to sub-agents and plan nodes
+  are no longer checked either: the person's words behind them already were. Real prompt-injection attempts are
+  still blocked.
+
+## [1.2.0] — the agent manages projects, one platform guardrail, host-exec tools removed
+
+### Security
+- **No host-exec tools on any agent.** The Main and Task agents no longer bind `shell`, `file_read` or
+  `load_tool` (from `strands-agents-tools`, which is removed). With tool consent bypassed, any prompt or
+  injected text could run commands with the runtime's role. `http_request` is rebuilt on the harness's URL
+  guard: every redirect hop is vetted, and it never signs a request with the runtime's credentials. The code
+  interpreter tool is vendored with the same tool spec. A test fails if a host-exec tool is ever bound again.
+- **Dependency updates:** Pillow 13.0.0 and pypdf 6.21.4 (seven denial-of-service advisories), in the runtime,
+  CI and the ingestion Lambdas.
+
+### Added
+- **The agent manages your projects.** `list_projects`, `switch_project`, `create_project` and `delete_project`.
+  Switching or creating opens a NEW chat in that project and sends it your request, so a skill can say "switch
+  to workshop-lab01 and continue". Nothing in the current chat moves. Deleting only shows a card: you type the
+  project's exact name to confirm, and only the owner can delete. The agent calls the same `/projects` API as
+  the browser, with your sign-in, so it has exactly your rights.
+- **One Bedrock guardrail for the whole platform.** Admins (`gateway-admins`) choose it in **Settings → Safety**:
+  the platform default, a pinned version of any guardrail in the account, or none. Every reply of the Main and
+  Task agents runs with it, including sub-agents, plan nodes and external custom-agent calls. A blocked reply
+  says so in the chat. Staging and prod deploys create a light default (prompt attacks blocked on input; other
+  content categories only when clearly harmful, so film analysis and moderation reports pass). Prompts sent to
+  media-generation tools are not covered.
+- **Built-in video-ad-creator skill:** a generic, spec-driven ad engine.
+
+### Changed
+- **One file sets every default model:** `agent/src/model/models.json`. The orchestrator defaults to Claude
+  Opus 5.5 (reasoning effort low); task, planning, render, lab chat and the Improve judge use Claude Sonnet 5.5.
+  The task agent used to run Opus 5 because of a deploy-time override, and lab chat and the judge were still on
+  Sonnet 5.
+  **Removed deploy parameters:** `-c defaultModelId` and `-c reasoningEffort` no longer exist. Set the models and
+  `reasoning_effort` in `agent/src/model/models.json` instead.
+
+### Fixed
+- **A chat whose project was deleted** used to be stuck ("This chat already belongs to another project"). It now
+  ends: your next message opens a new Personal chat with the message in its box and a line saying why.
+- **A Browse tab for a deleted project** says the project no longer exists, and stops polling it.
+- The `content_moderation` skill folder is renamed `content-moderation` to match its name.
+
 ## [1.1.1] — chat images at a sensible size
 
 ### Fixed

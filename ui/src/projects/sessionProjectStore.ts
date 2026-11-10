@@ -324,8 +324,31 @@ export async function reconcileWithProjectList(
     if (active.name !== prev.activeProjectName) put(sessionId, { ...prev, activeProjectName: active.name });
     return 'ok';
   }
+  // A chat that already has a row has had a turn, so its project is fixed: it ends with its project rather than
+  // moving to Personal (the next message opens a new chat; the proxy answers `session_project_gone`).
+  if (!unpersisted.has(sessionId)) {
+    put(sessionId, { ...prev, notice: projectGoneMessage(prev.activeProjectName) });
+    return 'lost';
+  }
   await resetToPersonal(sessionId, { personalProject: personalRef });
   return 'lost';
+}
+
+/** The chat's own project is gone: what the old chat says, and what the new chat it opens says. */
+export function projectGoneMessage(projectName?: string | null): string {
+  const what = projectName ? `"${projectName}"` : 'This chat\'s project';
+  return `${what} was deleted, so this chat can't continue. Your next message starts a new chat in Personal.`;
+}
+
+export function projectGoneNewChatMessage(projectName?: string | null): string {
+  const what = projectName ? `"${projectName}"` : 'The previous chat\'s project';
+  return `${what} was deleted, so this is a new chat in Personal.`;
+}
+
+/** Show `notice` on the session's composer (e.g. a chat opened because its project was deleted). */
+export function setSessionNotice(sessionId: string, notice: string): void {
+  const prev = entries.get(sessionId);
+  if (prev) put(sessionId, { ...prev, notice });
 }
 
 /** Clear the lost-access notice once shown. */

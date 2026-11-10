@@ -77,6 +77,24 @@ export function sessionProjectFixedBody(projectId: string) {
   };
 }
 
+export const SESSION_PROJECT_GONE_CODE = "session_project_gone";
+
+/**
+ * The 409 body for a turn in a chat whose OWN project is gone (deleted, or the Actor was removed from it). The chat is
+ * fixed to that project, so it cannot continue anywhere: the SPA opens a new chat in `personalProject` instead. The
+ * row is never re-pointed (that mixed two projects in one chat).
+ */
+export function sessionProjectGoneBody(projectId: string, personal: { projectId: string; name: string }) {
+  return {
+    error: {
+      code: SESSION_PROJECT_GONE_CODE,
+      message: "This chat's project no longer exists. Continue in a new chat.",
+      projectId,
+      personalProject: { id: personal.projectId, name: personal.name },
+    },
+  };
+}
+
 /**
  * A session's project is fixed by its first turn (D1): once the row records a turn AND a project, a request for
  * a different project is refused. A row with no turns yet (or a pre-Projects row with no project) may still
@@ -413,8 +431,18 @@ export async function runTurnGate(input: TurnGateInput, deps: TurnGateDeps = {})
   const requested = body.active_project_id;
   // D1: a session's project is fixed by its first turn. A turn naming a different project starts nothing; the
   // SPA offers a new chat in that project instead (R2.1). Checked before the issuer, so a refusal costs no token.
+  // A chat whose fixed project is gone cannot continue at all, whatever project this turn names (session_project_gone).
+  const goneOutcome = (): TurnGateOutcome | null => {
+    if (!personal) return null;
+    return { kind: "reject", status: SESSION_PROJECT_FIXED_STATUS, body: sessionProjectGoneBody(row!.activeProjectId!, personal) };
+  };
   if (typeof requested === "string" && projectChangeRefused(row, requested)) {
-    return { kind: "reject", status: SESSION_PROJECT_FIXED_STATUS, body: sessionProjectFixedBody(row!.activeProjectId!) };
+    const bound = row!.activeProjectId!;
+    if (personal && bound !== personal.projectId) {
+      const still = await checkAccess(actorSub, bound).catch(() => null);
+      if (still !== null && !still.ok) return goneOutcome()!;
+    }
+    return { kind: "reject", status: SESSION_PROJECT_FIXED_STATUS, body: sessionProjectFixedBody(bound) };
   }
   // A provided but non-string id is not a Project the Actor can use: it maps to not_found below.
   const pid: string =
@@ -463,6 +491,8 @@ export async function runTurnGate(input: TurnGateInput, deps: TurnGateDeps = {})
         : { code: "registry_busy", message: "Project registry unavailable", retryable: true };
       return { kind: "reject", status, body: { error } };
     }
+    // A chat with turns is fixed to its project: it ends rather than moving to Personal.
+    if (row?.hasTurns === true && row.activeProjectId === pid) return goneOutcome()!;
     await persist({ activeProjectId: personal.projectId, activeProjectSetAt: now() });
     return {
       kind: "reject",

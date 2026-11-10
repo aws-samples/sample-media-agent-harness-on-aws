@@ -216,7 +216,7 @@ def test_main_uses_the_framed_manager():
 # --- (F3c) skill gates are non-waivable ----------------------------------------------------------
 
 @pytest.mark.parametrize("skill", [
-    "content_moderation", "media-references", "agent-olive", "capability-editor",
+    "content-moderation", "media-references", "agent-olive", "capability-editor",
 ])
 def test_gate_is_not_waived_by_remembered_preferences(skill):
     body = (SKILLS / skill / "SKILL.md").read_text()

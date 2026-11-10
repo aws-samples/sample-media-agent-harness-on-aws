@@ -8,7 +8,7 @@
   model-visible tool input and the tool result never carry them — and re-injects only when the
   fingerprint changes;
 - FAIL CLOSED (B2): with the role configured, ANY failure (no session, STS refused, sandbox call error,
-  no confirmation, a strands_tools shape change) answers with an error result and the model's code
+  no confirmation, an interpreter shape change) answers with an error result and the model's code
   never runs — the sandbox's own role has no artifact/project S3 access to fall back to;
 - ``crop_video`` and the timeline media actions inject into their own sandboxes, and refuse the same way.
 """
@@ -355,9 +355,9 @@ def test_media_actions_refuse_without_scoped_credentials(sts):
     assert ok.invokes and SECRET in ok.invokes[0][1]["code"]
 
 
-def test_strands_tools_still_has_the_internals_injection_relies_on():
-    """Fails loudly if strands_tools drops the private attributes the injection reaches into."""
-    from strands_tools.code_interpreter import AgentCoreCodeInterpreter
+def test_the_interpreter_still_has_the_internals_injection_relies_on():
+    """Fails loudly if the vendored interpreter drops the private attributes the injection reaches into."""
+    from agentcore_code_interpreter import AgentCoreCodeInterpreter
 
     ci = AgentCoreCodeInterpreter(region="us-west-2")
     assert callable(getattr(ci, "_ensure_session", None))

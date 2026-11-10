@@ -67,8 +67,12 @@ def test_default_is_a_single_source_of_truth():
     # once", not "declared as Sonnet 5". Hard-coding the model id here meant changing
     # the platform default failed this test for the wrong reason — the assertion
     # tracked the value instead of the property.
+    # Since 2026-11 the one declaration is agent/src/model/models.json (tests/test_model_defaults.py).
+    from model.defaults import model_for
+
     src = (Path(__file__).resolve().parents[1] / "src" / "main.py").read_text()
-    assert src.count(f'"{main.DEFAULT_ORCHESTRATOR_MODEL_ID}"') == 1
+    assert main.DEFAULT_ORCHESTRATOR_MODEL_ID == model_for("orchestrator")
+    assert f'"{main.DEFAULT_ORCHESTRATOR_MODEL_ID}"' not in src
 
 
 class _Captured:

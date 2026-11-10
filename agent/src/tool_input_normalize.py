@@ -3,7 +3,7 @@ schema requires — specifically for ``code_interpreter``.
 
 Why this exists
 ---------------
-The ``strands_tools`` ``code_interpreter`` tool declares ``code_interpreter_input``
+The ``code_interpreter`` tool (``agentcore_code_interpreter``, vendored from strands-agents-tools) declares ``code_interpreter_input``
 as a nested Pydantic model (``CodeInterpreterInput`` — ``{"action": {...}}``).
 Strands validates the model's tool-call arguments against that schema before the
 tool body runs. Some Bedrock models (observed with Claude Opus 4.8) intermittently
@@ -260,8 +260,9 @@ class NormalizedCodeInterpreterTool(_DelegatingTool):
     def _interpreter(self) -> Any:
         """The ``AgentCoreCodeInterpreter`` instance behind the decorated tool, else ``None``.
 
-        Relies on strands_tools internals (a bound ``_tool_func`` whose instance has
-        ``_ensure_session`` and ``_sessions``); a shape change is logged once and injection is skipped.
+        Relies on the interpreter's internals (a bound ``_tool_func`` whose instance has
+        ``_ensure_session`` and ``_sessions``; ``agentcore_code_interpreter`` keeps them on purpose);
+        a shape change is logged once and injection is skipped.
         """
         ci = getattr(getattr(self._inner, "_tool_func", None), "__self__", None)
         if ci is None or not callable(getattr(ci, "_ensure_session", None)) or not isinstance(
@@ -354,7 +355,7 @@ class NormalizedCodeInterpreterTool(_DelegatingTool):
                 return False
             ci._sessions.pop(name, None)
             try:
-                from strands_tools.code_interpreter import agent_core_code_interpreter as _aci  # noqa: PLC0415
+                import agentcore_code_interpreter as _aci  # noqa: PLC0415
                 _aci._session_mapping.pop(name, None)
             except Exception:  # noqa: BLE001 - the module cache is an optimisation
                 pass
@@ -489,43 +490,11 @@ def presign_artifact_url_in_http_request(tool_use: ToolUse) -> ToolUse:
         return tool_use
 
 
-def install_http_request_url_guard() -> bool:
-    """Mount the shared SSRF guard (:mod:`security.url_guard`) on every session the builtin
-    ``http_request`` tool creates, so EVERY request it sends — and every redirect hop — is
-    vetted (public addresses only) and pinned to the vetted IP. Plain http stays allowed for
-    this general-purpose tool; the address rules are identical. Idempotent. Returns whether
-    the guard is in place."""
-    try:
-        import strands_tools.http_request as hr  # noqa: PLC0415
-        from security import url_guard  # noqa: PLC0415
-
-        if getattr(hr.create_session, "_url_guarded", False):
-            return True
-        original = hr.create_session
-
-        def guarded_create_session(config):
-            session = original(config)
-            prev = session.adapters.get("https://")
-            kwargs: dict = {}
-            if getattr(prev, "max_retries", None) is not None:
-                kwargs["max_retries"] = prev.max_retries
-            if config.get("keep_alive", True):
-                kwargs["pool_connections"] = kwargs["pool_maxsize"] = config.get("pool_size", 10)
-            return url_guard.mount(session, allow_http=True, **kwargs)
-
-        guarded_create_session._url_guarded = True  # type: ignore[attr-defined]
-        hr.create_session = guarded_create_session
-        hr.SESSION_CACHE.clear()  # drop any session built before the guard
-        return True
-    except Exception as e:  # noqa: BLE001
-        logger.error("http_request URL guard could not be installed: %s", e)
-        return False
-
-
 def _http_request_refusal(tool_use: ToolUse) -> str | None:
-    """Why ``http_request`` must not run this ``tool_use`` (guard missing, or URL blocked), else None."""
-    if not install_http_request_url_guard():
-        return "http_request is unavailable: its URL guard could not be installed"
+    """Why ``http_request`` must not run this ``tool_use`` (URL blocked), else None.
+
+    A pre-check only: the tool itself sends through ``security.url_guard.fetch``, which vets and pins
+    every hop again, so a URL that passes here but rebinds or redirects somewhere private still fails."""
     args = tool_use.get("input") if isinstance(tool_use, dict) else None
     url = args.get("url") if isinstance(args, dict) else None
     if not isinstance(url, str):
@@ -564,11 +533,9 @@ class PresignedHttpRequestTool(_DelegatingTool):
 
 
 def wrap_http_request(tool: Any) -> Any:
-    """Wrap the builtin ``http_request`` tool (a ``strands_tools`` MODULE or an AgentTool) with
-    :class:`PresignedHttpRequestTool`, and install the SSRF guard on the module's sessions
-    (which also covers an unwrapped fallback). Idempotent and never fatal — on any wrapping
-    error the original is returned so registration always proceeds."""
-    install_http_request_url_guard()
+    """Wrap the builtin ``http_request`` tool (``tools.http_request.http_request``, an AgentTool; a
+    module-style tool is loaded first) with :class:`PresignedHttpRequestTool`. Idempotent and never
+    fatal -- on any wrapping error the original is returned so registration always proceeds."""
     try:
         if tool is None or isinstance(tool, PresignedHttpRequestTool):
             return tool
@@ -755,5 +722,4 @@ __all__ = [
     "presign_artifact_urls_in_code",
     "wrap_code_interpreter",
     "wrap_http_request",
-    "install_http_request_url_guard",
 ]

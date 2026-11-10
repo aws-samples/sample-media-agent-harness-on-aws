@@ -62,7 +62,7 @@ the agent needs to do its job.
 **Ask:**
 
 1. "Which tools does this skill use? Pick from built-in
-   (`code_interpreter`, `artifact`, `file_read`, `http_request`,
+   (`code_interpreter`, `artifact`, `read_result_files`, `http_request`,
    etc.) or name a gateway tool. Don't list tools you're not
    sure exist."
 2. "What does the skill produce as output? A file, a JSON

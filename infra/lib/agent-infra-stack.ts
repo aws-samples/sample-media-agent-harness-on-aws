@@ -27,6 +27,7 @@ import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as path from "path";
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
+import * as bedrock from "aws-cdk-lib/aws-bedrock";
 import { Construct } from "constructs";
 import {
   assertSkillItemsFit,
@@ -238,14 +239,18 @@ export class AgentInfraStack extends cdk.Stack {
     const appVersion = props.appVersion || "dev";
     new cdk.CfnOutput(this, "AppVersion", { value: appVersion, description: "The release this stack runs" });
 
-    // The orchestrator model. Set HERE rather than left to each consumer's own
-    // fallback literal, because two consumers now need to agree on it: the agent
-    // runtimes (`DEFAULT_MODEL_ID` in task_agent.py) and the UI proxy, which
-    // reports it via `GET /models` so the SPA never invents a default from list
-    // position. It used to take `models[0]`, and `ListInferenceProfiles` returns
-    // Claude 3 Haiku first — a 4096-output model against a 16384 request, so every
-    // chat turn failed with a ValidationException naming no cause.
-    const defaultModelId = this.node.tryGetContext("defaultModelId") || "global.anthropic.claude-opus-5";
+    // Default models and reasoning effort: agent/src/model/models.json is THE one place they are set. The agents
+    // read it from their own bundle (model/defaults.py); the deploy reads it here for the two values outside the
+    // agents: the UI proxy's `GET /models` default (so the SPA never invents one from list position — it once took
+    // `models[0]`, Claude 3 Haiku, and every turn failed) and BEDROCK_REASONING_EFFORT. No context override: a
+    // second place to set a model is how the task agent once ran Opus 5 while its code said Sonnet 5.5.
+    const modelDefaults = JSON.parse(
+      require("fs").readFileSync(path.join(__dirname, "../../agent/src/model/models.json"), "utf-8"),
+    ) as { reasoning_effort: string; agents: Record<string, string> };
+    const defaultModelId = modelDefaults.agents.orchestrator;
+    if (!defaultModelId || !modelDefaults.reasoning_effort) {
+      throw new Error("agent/src/model/models.json needs agents.orchestrator and reasoning_effort");
+    }
 
     // ---- Container images + SPA: pushed by CI, or built here in CodeBuild ----
     //
@@ -2829,9 +2834,10 @@ export class AgentInfraStack extends cdk.Stack {
       // (pypdf has no native build), so the arm64/py3.13 packager cannot fail on them. The token-issuer
       // modules are stdlib-only (kms:Sign/Verify + jwslite).
       // These Lambdas decode USER uploads, so they take the advisory-free releases (pip-audit 2026-10):
-      // pillow 13.0.0 (the runtime zip stays on 12.x only because strands-agents-tools requires
-      // pillow < 13) and pypdf 6.21.2 (also the dev-extra pin in agent/pyproject.toml).
-      const ingestionRequirements: string[] = ["pillow==13.0.0", "pypdf==6.21.2"];
+      // pillow 13.0.0 (the runtime zip pins the same release in agent/src/requirements.txt since
+      // strands-agents-tools, which held it below 13, was dropped) and pypdf 6.21.4 (also the dev-extra
+      // pin in agent/pyproject.toml).
+      const ingestionRequirements: string[] = ["pillow==13.0.0", "pypdf==6.21.4"];
       const ingestionHash = crypto
         .createHash("sha256")
         .update(JSON.stringify({ ingestionRequirements, ingestionCode, v: "ingestion-p0-v2" }))
@@ -3029,20 +3035,18 @@ export class AgentInfraStack extends cdk.Stack {
       CODE_INTERPRETER_ID: codeInterpreter.codeInterpreterId,
       MEMORY_ID: conversationMemory.attrMemoryId,
       PROJECT_NAME: projectName,
-      DEFAULT_MODEL_ID: defaultModelId,
       // Reasoning-effort cap for the Opus orchestrator + Opus plan nodes (agent/src/model
       // /factory.py honors this; Sonnet/Haiku agents are gated out). Lower effort scales
       // the model's thinking — and latency — down on every call. `low` is the shipped
       // default: on Opus 5 it cut think-before-first-token (TTFT) from ~8.4s at medium to
       // ~2.7s (vs ~21s with no field), the dominant perceived-latency cost of the Opus 5
       // switch — opus-4-8's TTFT is ~0.8s, so low gets Opus 5 much closer. `medium`/`high`
-      // trade speed for deeper multi-step reasoning; switch WITHOUT a code change by editing
-      // this value (or `-c reasoningEffort=`). In the RuntimeConfigSecret (hydrated into
+      // trade speed for deeper multi-step reasoning; set in agent/src/model/models.json
+      // (`reasoning_effort`). In the RuntimeConfigSecret (hydrated into
       // os.environ by runtime_config_bootstrap), not inline runtime env — respects the V2
       // 1536-byte env budget. factory.py sends ONLY output_config.effort (no thinking field):
       // an explicit thinking:{adaptive} front-loaded reasoning and spiked TTFT to 8-18s.
-      BEDROCK_REASONING_EFFORT:
-        this.node.tryGetContext("reasoningEffort") || "low",
+      BEDROCK_REASONING_EFFORT: modelDefaults.reasoning_effort,
       DYNAMIC_FANOUT_ENABLED: dynamicFanoutFlag,
       MEDIA_PROXY_BUCKET: props.envConfig?.media?.proxyBucket ?? "",
       HARNESS_GATEWAY_ID: gateway.attrGatewayIdentifier,
@@ -5996,6 +6000,80 @@ export class AgentInfraStack extends cdk.Stack {
       value: uiDistribution.distributionDomainName,
       description: "CloudFront domain serving the hosted Lab UI",
     });
+
+    // The Main Agent's project tools (list/switch/create) call the proxy's own `/projects` API with the
+    // turn's forwarded user token, through CloudFront because the ALB is origin-locked
+    // (agent/src/project_search/registry_client.py). An SSM parameter under the runtime-ARN path, read
+    // lazily (runtime_arns.get), rather than runtime env or RuntimeConfigSecret, so this value adds no
+    // deploy-ordering edge to any runtime.
+    new ssm.StringParameter(this, "UiPublicOriginParam", {
+      parameterName: `${runtimeArnParamPath}/UI_PUBLIC_ORIGIN`,
+      stringValue: `https://${uiDistribution.distributionDomainName}`,
+      description: "Public https origin of the hosted UI, read by the agent as UI_PUBLIC_ORIGIN",
+    });
+
+    // ---- The platform's Bedrock guardrail (docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md) ----
+    // ONE guardrail for the whole platform. An admin picks it in Settings -> Safety (the proxy writes
+    // GUARDRAIL_SELECTED, which this stack never manages, so a deploy never overwrites the choice); until then the
+    // default below applies. The Main and Task agents read both at most once a minute (agent/src/model/guardrail.py).
+    const guardrailSelectedParam = `${runtimeArnParamPath}/GUARDRAIL_SELECTED`;
+    const guardrailDefaultParam = `${runtimeArnParamPath}/GUARDRAIL_DEFAULT`;
+    if (props.envConfig?.defaultGuardrail) {
+      // Light, for a media harness whose film analysis and moderation reports describe violent or adult scenes:
+      // prompt attacks blocked at HIGH on input; other categories only at LOW (clearly harmful). No topic/PII filters.
+      const contentFilters = ["SEXUAL", "VIOLENCE", "HATE", "INSULTS", "MISCONDUCT"].map((type) => ({
+        type, inputStrength: "LOW", outputStrength: "LOW",
+      }));
+      const contentPolicyConfig = {
+        filtersConfig: [...contentFilters, { type: "PROMPT_ATTACK", inputStrength: "HIGH", outputStrength: "NONE" }],
+      };
+      const guardrail = new bedrock.CfnGuardrail(this, "DefaultGuardrail", {
+        name: `${projectName}-${envName}-default`,
+        description: "Media Agent Harness default guardrail: blocks prompt attacks and clearly harmful content",
+        blockedInputMessaging: "This request was blocked by the platform's content guardrail.",
+        blockedOutputsMessaging: "This response was blocked by the platform's content guardrail.",
+        contentPolicyConfig,
+      });
+      // A version is immutable, so a policy change publishes a NEW version: the logical id follows the policy.
+      const policyHash = require("crypto").createHash("sha256")
+        .update(JSON.stringify(contentPolicyConfig)).digest("hex").slice(0, 8);
+      const guardrailVersion = new bedrock.CfnGuardrailVersion(this, `DefaultGuardrailVersion${policyHash}`, {
+        guardrailIdentifier: guardrail.attrGuardrailId,
+        description: `policy ${policyHash}`,
+      });
+      new ssm.StringParameter(this, "GuardrailDefaultParam", {
+        parameterName: guardrailDefaultParam,
+        stringValue: cdk.Stack.of(this).toJsonString({
+          id: guardrail.attrGuardrailId,
+          version: guardrailVersion.attrVersion,
+          name: `${projectName}-${envName}-default`,
+        }),
+        description: "The platform's default Bedrock guardrail (JSON {id, version, name}), read as GUARDRAIL_DEFAULT",
+      });
+    }
+    // Applying a guardrail to Converse needs bedrock:ApplyGuardrail. Any guardrail in this account (an admin may pick
+    // one made in the console), on the two runtimes that bind it. Reading the setting is the runtime-ARN path grant.
+    for (const rt of [agentRuntime, taskAgentRuntime]) {
+      rt.addToRolePolicy(new iam.PolicyStatement({
+        sid: "ApplyPlatformGuardrail",
+        actions: ["bedrock:ApplyGuardrail"],
+        resources: [`arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`],
+      }));
+    }
+    // The proxy lists the account's guardrails for the admin dropdown and writes the admin's pick.
+    uiProxyTaskRole.addToPolicy(new iam.PolicyStatement({
+      sid: "ListGuardrails",
+      actions: ["bedrock:ListGuardrails", "bedrock:GetGuardrail"],
+      resources: ["*"],
+    }));
+    uiProxyTaskRole.addToPolicy(new iam.PolicyStatement({
+      sid: "GuardrailSetting",
+      actions: ["ssm:GetParameters", "ssm:GetParameter", "ssm:PutParameter"],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${guardrailSelectedParam}`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${guardrailDefaultParam}`,
+      ],
+    }));
 
     new cdk.CfnOutput(this, "UiBucketName", {
       value: uiBucket.bucketName,

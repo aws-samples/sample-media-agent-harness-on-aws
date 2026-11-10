@@ -179,6 +179,11 @@ _SKILL_TOOL_RELEVANCE: dict[str, tuple[str, ...]] = {
         "synthesize_speech", "speech", "register_voice", "list_voice",
         "get_download_url", "process_media", "mark_in_out", "lipsync", "sync",
     ),
+    "video-ad-creator": (
+        "submit_job", "check_job", "get_job_result", "get_model_schema", "run_model",
+        "search_models", "get_pricing", "code_interpreter", "show_media_gallery",
+        "lipsync", "lip-sync", "elevenlabs", "tts", "voice", "music", "assemble",
+    ),
     "pdf": ("pdf", "extract_text", "read_pdf"),
     "aws-research": ("search_documentation", "read_documentation", "aws___", "aws_mcp"),
     "graph-assistant": ("graph", "cypher", "neptune"),

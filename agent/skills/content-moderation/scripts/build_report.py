@@ -280,7 +280,7 @@ def build(findings_in: dict, *, generated_at: Optional[str] = None) -> dict:
     return {
         "schema": SCHEMA_OUT,
         "generated_at": generated_at or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "builder": "content_moderation/scripts/build_report.py",
+        "builder": "content-moderation/scripts/build_report.py",
         "asset": d["asset"],
         "suggested_rating": rating,
         "rating_scale": list(RATINGS),

@@ -898,7 +898,8 @@ class LabChatAgent:
             from botocore.config import Config as BotoConfig
 
             boto_cfg = BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 4, "mode": "standard"})
-            model_id = os.environ.get("CHAT_MODEL_ID", "global.anthropic.claude-sonnet-5")
+            from model.defaults import model_for
+            model_id = model_for("lab_chat")
             model = BedrockModel(model_id=model_id, boto_client_config=boto_cfg)
 
             # Build Strands tools from CRUD definitions

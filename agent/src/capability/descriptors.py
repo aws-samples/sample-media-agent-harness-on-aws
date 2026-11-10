@@ -95,7 +95,10 @@ MAX_DESCRIPTOR_DATA_BYTES: int = 102_400
 #: Internal execution primitives. Present in every agent process; not shared,
 #: reusable, external capabilities, so they are neither Registry records nor
 #: Tools cards. There is no separately named ``file_write``: write behaviour
-#: goes through ``artifact`` / ``shell`` / asset CRUD, all excluded here.
+#: goes through ``artifact`` / asset CRUD, all excluded here. ``file_read``,
+#: ``load_tool`` and ``shell`` are no longer bound anywhere (host-exec tools,
+#: tests/test_no_host_exec_tools.py); they stay on this deny list so a gateway
+#: tool of that name can never be projected as a capability either.
 _EXECUTION_PRIMITIVES: frozenset[str] = frozenset(
     {
         "file_read",

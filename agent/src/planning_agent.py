@@ -2,7 +2,7 @@
 
 Receives a user goal + tool/skill/model catalog, performs deep reasoning,
 and produces a HighLevelPlan JSON with execution_mode, sub_goals, suggested_tools,
-and reasoning. Uses `think` as primary tool for cognitive analysis.
+and reasoning. It binds no tools: the plan is one structured answer.
 """
 
 import json, logging, os, time
@@ -23,7 +23,7 @@ from strands import Agent
 from strands.models import BedrockModel
 import runtime_config_bootstrap  # noqa: F401,E402  — hydrate env before first-party imports (V2 1536B cap)
 from model.factory import build_model
-from strands_tools import think  # noqa: F401 — kept for potential future use
+from model.defaults import model_for
 from botocore.config import Config as BotoConfig
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
@@ -41,7 +41,7 @@ DDB_TABLE = os.environ.get("PLAN_STATE_TABLE", "")
 _boto_cfg = BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 4, "mode": "standard"})
 
 # Default to a reasoning-capable model
-DEFAULT_MODEL_ID = os.environ.get("PLANNING_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
+DEFAULT_MODEL_ID = model_for("planning")  # agent/src/model/models.json; no env override
 
 PLANNING_SYSTEM_PROMPT = PLANNING_SYSTEM_PROMPT_TEMPLATE.format(schema=json.dumps(HIGH_LEVEL_PLAN_JSON_SCHEMA, indent=2), fanout_guidance="""
 RUNTIME FAN-OUT — collections discovered mid-plan:
@@ -128,7 +128,6 @@ async def invoke(payload, context):
         )
 
     # No tools — the Planning Agent produces JSON output directly
-    # The think tool adds unnecessary latency for structured output tasks
     tools = []
 
     model = build_model(model_id=model_id, boto_client_config=_boto_cfg)

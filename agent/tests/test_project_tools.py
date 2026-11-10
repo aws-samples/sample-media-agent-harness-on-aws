@@ -474,18 +474,6 @@ def test_organize_creates_an_empty_folder_tree_in_one_call():
     assert nested.events[0]["args"] == {"folder": "Show/GFX/LOGO"}
 
 
-def test_create_project_returns_a_link_the_user_clicks_never_creating_it_itself():
-    fake = FakeLambda({})
-    out = run(tools(fake)["create_project"](name="  project-index-test-v7 ", description="Meridian tests"))
-    assert out["status"] == "awaiting_user_click"
-    assert out["markdown"] == "[Create project “project-index-test-v7”](project:new?name=project-index-test-v7&description=Meridian%20tests)"
-    assert fake.events == []                                   # nothing was created server-side
-    assert "indexing=0" in run(tools(fake)["create_project"](name="raw", indexing=False))["markdown"]
-    assert run(tools(fake)["create_project"](name="  "))["error"] == "invalid_name"
-    from project_search import turn as T
-    assert "create_project" in T._ORGANIZE_LINE
-
-
 def test_organize_project_is_in_the_turn_prompt_and_its_docstring_names_each_mode():
     from project_search import turn as T
     assert "organize_project" in T._ORGANIZE_LINE

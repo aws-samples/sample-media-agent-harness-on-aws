@@ -26,7 +26,19 @@ dependencies = [
     # resolution — prod silently drifted (2026-09-08: mcp < 1.8.0 import crash) and local
     # tests no longer reflected prod. Pin all three files to the same versions.
     "strands-agents == 1.55.1",
-    "strands-agents-tools == 0.8.7",
+    # strands-agents-tools is NOT a dependency (dropped 2026-11): its 0.9.0 is the deprecation
+    # release (every tool import raises) and it held pillow < 13. What we used from it lives in
+    # agent/src now: agentcore_code_interpreter.py (code_interpreter), tools/http_request.py and
+    # tools/current_time.py. The host-exec tools (shell, file_read, load_tool, ...) are gone on
+    # purpose: tests/test_no_host_exec_tools.py fails if one is ever bound again.
+    # Direct dependencies it used to bring in transitively. Pillow: model/factory.py,
+    # reference_image_check.py and cut/ decode images in the runtime; 13.0.0 is the first release
+    # free of the 12.x advisories. requests: security/url_guard.py and every guarded fetch.
+    # markdownify: http_request's convert_to_markdown. (pillow 13 needs Python >= 3.11; every
+    # runtime, CI job and image runs 3.12/3.13, so the 3.10 split simply has no pillow floor.)
+    "pillow >= 13.0.0; python_version >= '3.11'",
+    "requests >= 2.33.0",
+    "markdownify >= 1.2.2",
     # mcp is imported at module scope (mcp_manager.py) and MUST expose
     # streamablehttp_client (introduced in mcp 1.8.0). It was previously an
     # UNPINNED transitive dependency, so the deploy zip-packager resolved
@@ -76,7 +88,7 @@ dev = [
     "PyJWT[crypto] >= 2.15",
     # The IngestTick PDF text extractor (ingestion/pdf.py, Requirement 16) and its tests. Pinned to the
     # version the deploy bundles (agent-infra-stack.ts `ingestionRequirements`).
-    "pypdf == 6.21.2",
+    "pypdf == 6.21.4",
     # The HeroFrame Lambda's video decoder (ingestion/hero_frame.py) and its round-trip test. Pinned to the
     # version the deploy bundles (agent-infra-stack.ts `heroFrameRequirements`).
     "av == 19.0.1; python_version >= '3.12'",
@@ -87,9 +99,8 @@ dev = [
 # deploy zip-packager and the CI pip install resolve transitives to the newest compatible release
 # anyway, so these keep local tests on the versions that ship. Two advisories are held back by an
 # upstream bound, not by choice: strands-agents (every release through 1.62) requires mcp < 2.2
-# (mcp 2.2.0 fixes a Streamable-HTTP *server* session leak; we only use the mcp client), and
-# strands-agents-tools (through 0.8.10) requires pillow < 13 (the ingestion Lambdas, which decode
-# user uploads, bundle their own pillow pin in agent-infra-stack.ts).
+# (mcp 2.2.0 fixes a Streamable-HTTP *server* session leak; we only use the mcp client). Pillow is
+# no longer held back: the bound that kept it < 13 was strands-agents-tools', which is gone.
 constraint-dependencies = [
     "aiohttp >= 3.14.4",
     "anyio >= 4.14.2",
@@ -97,7 +108,7 @@ constraint-dependencies = [
     "cryptography >= 50.0.0",
     "multidict >= 6.9.1, < 7",
     "opentelemetry-api >= 1.45.1",
-    "pillow >= 12.3.0",
+    "pillow >= 13.0.0; python_version >= '3.11'",
     "pygments >= 2.20.0",
     "pyjwt >= 2.15.0",
     "python-multipart >= 0.0.31",

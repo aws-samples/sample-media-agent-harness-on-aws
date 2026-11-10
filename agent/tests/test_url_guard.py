@@ -540,7 +540,7 @@ def test_user_mcp_probe_uses_the_pinned_session_without_redirects(dns, transport
                                  "http://2130706433/", "http://localhost:8080/"])
 def test_http_request_tool_refuses_without_a_socket(hostile, url):
     import tool_input_normalize as tin
-    from strands_tools import http_request
+    from tools.http_request import http_request
     wrapped = tin.wrap_http_request(http_request)
     use = {"toolUseId": "t1", "name": "http_request", "input": {"method": "GET", "url": url}}
 
@@ -553,17 +553,10 @@ def test_http_request_tool_refuses_without_a_socket(hostile, url):
     assert hostile == []
 
 
-def test_http_request_sessions_carry_the_guard_even_when_called_unwrapped(hostile):
-    """A redirect inside the real tool (or an unwrapped fallback) still hits the adapter."""
-    import tool_input_normalize as tin
-    import strands_tools.http_request as hr
-    assert tin.install_http_request_url_guard() is True
-    assert getattr(hr.create_session, "_url_guarded", False)
-    s = hr.create_session({})
-    assert isinstance(s.get_adapter("https://x.example.com/"), url_guard.GuardedAdapter)
-    assert isinstance(s.get_adapter("http://x.example.com/"), url_guard.GuardedAdapter)
-    assert s.get_adapter("https://x.example.com/").max_retries.total == 3  # tool's retry kept
-    out = hr.http_request({"toolUseId": "t", "input": {"method": "GET", "url": REBIND}})
+def test_http_request_tool_is_guarded_even_when_called_unwrapped(hostile):
+    """The tool itself sends through url_guard.fetch, so an unwrapped call is refused too."""
+    from tools import http_request as hr
+    out = hr.send({"method": "GET", "url": REBIND})
     assert out["status"] == "error"
     assert "publicly reachable" in out["content"][0]["text"]  # refused by the adapter itself
     assert hostile == []
@@ -572,6 +565,7 @@ def test_http_request_sessions_carry_the_guard_even_when_called_unwrapped(hostil
 GUARDED_MODULES = [
     "tools/result_files.py", "tools/view_images.py", "tools/media_probe.py",
     "tools/caption_parser.py", "tools/peak_extractor.py", "artifact_import.py",
+    "tools/http_request.py",
 ]
 
 

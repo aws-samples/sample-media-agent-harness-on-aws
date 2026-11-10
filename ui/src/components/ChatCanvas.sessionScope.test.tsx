@@ -338,3 +338,125 @@ describe('ChatCanvas — upload size guard', () => {
   });
 });
 
+
+// The agent's switch_project / create_project: a turn's execution_summary.open_project opens a NEW chat in that
+// project (live stream only), and that chat sends the carried-over prompt as its first message.
+describe('ChatCanvas — open_project from a live turn', () => {
+  const summary = (extra: Record<string, unknown>) => ({
+    type: 'execution_summary', summary: { type: 'execution_summary', total_duration_ms: 1, cycles: 1, tools: {}, usage: {}, ...extra },
+  });
+
+  it('asks the host for a new chat in that project, with the prompt', async () => {
+    const { onNewChatInProjectRequest } = await import('../projects/newChatInProject');
+    const seen = vi.fn();
+    const off = onNewChatInProjectRequest(seen);
+    mocks.invokeAgentStreaming.mockImplementation(async (_req: unknown, cb: (e: unknown) => void) => {
+      cb({ type: 'text', text: 'Opening workshop-lab01.' });
+      cb(summary({ open_project: { projectId: 'plab', projectName: 'workshop-lab01', prompt: 'start lab01' } }));
+    });
+    setSession('FROM');
+    render(<ChatCanvas />);
+    typeAndSubmit('start lab01');
+    await flush();
+    await flush();
+    expect(seen).toHaveBeenCalledWith({ projectId: 'plab', projectName: 'workshop-lab01', prompt: 'start lab01' });
+    off();
+  });
+
+  it('opens nothing when the user left that chat before the turn ended', async () => {
+    const { onNewChatInProjectRequest } = await import('../projects/newChatInProject');
+    const seen = vi.fn();
+    const off = onNewChatInProjectRequest(seen);
+    const d = deferred();
+    let emit: ((e: unknown) => void) | null = null;
+    mocks.invokeAgentStreaming.mockImplementationOnce((_req: unknown, cb: (e: unknown) => void) => { emit = cb; return d.promise; });
+    setSession('LEFT');
+    const { rerender } = render(<ChatCanvas />);
+    typeAndSubmit('go to the lab');
+    await flush();
+    setSession('ELSEWHERE');
+    rerender(<ChatCanvas />);
+    await flush();
+    emit!(summary({ open_project: { projectId: 'plab', projectName: 'workshop-lab01' } }));
+    await act(async () => { d.resolve(); });
+    await flush();
+    expect(seen).not.toHaveBeenCalled();
+    off();
+  });
+
+  it('a chat opened for the agent sends the carried-over prompt once, in that chat', async () => {
+    const { setPendingOpen } = await import('../projects/newChatInProject');
+    setPendingOpen('NEWCHAT', { prompt: 'start lab01' });
+    setSession('NEWCHAT');
+    const { rerender } = render(<ChatCanvas />);
+    await flush();
+    await flush();
+    expect(dispatchedSessionIds()).toEqual(['NEWCHAT']);
+    expect(dispatchedPrompts()).toEqual(['start lab01']);
+    rerender(<ChatCanvas />);
+    await flush();
+    expect(dispatchedPrompts()).toEqual(['start lab01']);
+  });
+
+  it('a chat opened with a draft puts it in the composer and sends nothing', async () => {
+    const { setPendingOpen } = await import('../projects/newChatInProject');
+    setPendingOpen('DRAFTCHAT', { draft: 'what files do I have?' });
+    setSession('DRAFTCHAT');
+    render(<ChatCanvas />);
+    await flush();
+    expect(screen.getByLabelText('Chat message input')).toHaveValue('what files do I have?');
+    expect(mocks.invokeAgentStreaming).not.toHaveBeenCalled();
+  });
+
+  it("a turn refused because the chat's project is gone opens a new Personal chat with the message as a draft", async () => {
+    const { onNewChatInProjectRequest } = await import('../projects/newChatInProject');
+    const seen = vi.fn();
+    const off = onNewChatInProjectRequest(seen);
+    mocks.invokeAgentStreaming.mockRejectedValueOnce(Object.assign(new Error('409'), {
+      status: 409,
+      body: { error: { code: 'session_project_gone', projectId: 'pgone', personalProject: { id: 'ppers', name: 'Personal' } } },
+    }));
+    setSession('GONE');
+    render(<ChatCanvas />);
+    typeAndSubmit('what files do I have in this project');
+    await flush();
+    await flush();
+    expect(seen).toHaveBeenCalledTimes(1);
+    const d = seen.mock.calls[0][0];
+    expect(d).toMatchObject({ projectId: 'ppers', projectName: 'Personal', draft: 'what files do I have in this project' });
+    expect(d.notice).toMatch(/was deleted, so this is a new chat in Personal/);
+    expect(d.prompt).toBeUndefined();
+    expect(screen.queryByText('what files do I have in this project')).toBeNull();
+    off();
+  });
+});
+
+describe('ChatCanvas — the platform guardrail', () => {
+  it('notes a reply the guardrail blocked, and says nothing otherwise', async () => {
+    mocks.invokeAgentStreaming.mockImplementationOnce(async (_req: unknown, cb: (e: unknown) => void) => {
+      cb({ type: 'text', text: 'This response was blocked by the platform’s content guardrail.' });
+      cb({ type: 'execution_summary', summary: { type: 'execution_summary', total_duration_ms: 1, cycles: 1, tools: {}, usage: {},
+        guardrail: { name: 'harness-default', version: '1', intervened: true } } });
+    });
+    setSession('GR');
+    render(<ChatCanvas />);
+    typeAndSubmit('something');
+    await flush();
+    await flush();
+    expect(screen.getByTestId('guardrail-note')).toHaveTextContent("Blocked by the platform's content guardrail (harness-default).");
+  });
+
+  it('a turn the guardrail let through shows no note', async () => {
+    mocks.invokeAgentStreaming.mockImplementationOnce(async (_req: unknown, cb: (e: unknown) => void) => {
+      cb({ type: 'text', text: 'fine' });
+      cb({ type: 'execution_summary', summary: { type: 'execution_summary', total_duration_ms: 1, cycles: 1, tools: {}, usage: {},
+        guardrail: { name: 'harness-default', version: '1', intervened: false } } });
+    });
+    setSession('GR2');
+    render(<ChatCanvas />);
+    typeAndSubmit('something');
+    await flush();
+    await flush();
+    expect(screen.queryByTestId('guardrail-note')).toBeNull();
+  });
+});

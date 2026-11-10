@@ -27,6 +27,7 @@ from strands import Agent, AgentSkills, Skill, tool
 from strands.models import BedrockModel
 import runtime_config_bootstrap  # noqa: F401,E402  — hydrate env before first-party imports (V2 1536B cap)
 from model.factory import build_model
+from model.defaults import model_for
 from botocore.config import Config as BotoConfig
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
@@ -64,7 +65,7 @@ S3_PREFIX = os.environ.get("ARTIFACTS_PREFIX", "artifacts/")
 # deterministic — build_render_manifest does the projection; the LLM only selects URLs and
 # a skill — so it does not need the reasoning tier, and it runs on every artifact. Overridable
 # via RENDER_MODEL_ID but never takes the caller's orchestrator model pick.
-RENDER_MODEL_ID = os.environ.get("RENDER_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
+RENDER_MODEL_ID = model_for("render")  # agent/src/model/models.json; no env override
 ARTIFACTS_DOMAIN = os.environ.get("ARTIFACTS_DOMAIN", "")
 _boto_cfg = BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 4, "mode": "standard"})
 

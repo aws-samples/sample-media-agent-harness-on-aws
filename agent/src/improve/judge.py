@@ -29,7 +29,9 @@ try:
 except ImportError:
     from improve.contract import EvaluatorResult, Outcome, Run, tool_name_sequence  # type: ignore
 
-DEFAULT_MODEL = "global.anthropic.claude-sonnet-5"
+from model.defaults import model_for as _model_for
+
+DEFAULT_MODEL = _model_for("improve_judge")  # agent/src/model/models.json
 DEFAULT_INPUT_SET = ("goal", "response", "trajectory", "plan")
 DEFAULT_GOAL_SOURCE = "full_conversation"
 # Graded LLM scores land ~0.7-0.9 for "substantially correct"; 1.0 is reserved

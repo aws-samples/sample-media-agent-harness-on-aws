@@ -397,6 +397,13 @@ export interface EnvConfig {
    */
   sandboxScopedCredentials?: boolean;
   /**
+   * Create the platform's DEFAULT Bedrock guardrail here (CfnGuardrail + a published version) and offer it as the
+   * platform default: every Main/Task agent model call runs with it unless an admin picks another (or none) in
+   * Settings -> Safety (agent/src/model/guardrail.py; docs/superpowers/specs/2026-11-09-bedrock-guardrails-design.md).
+   * Light on purpose for a media harness: prompt attacks HIGH on input, other content categories LOW.
+   */
+  defaultGuardrail?: boolean;
+  /**
    * AgentCore Web Search on the shared Platform Gateway (agent-harness-help-web-search R6-R8,
    * media-harness-web-search-toggle). `enabled` creates the `web-search` connector target on the Platform
    * Gateway, grants its role `bedrock-agentcore:InvokeWebSearch`, and adds a Cedar permit for exactly the
@@ -551,6 +558,8 @@ const CONFIGS: Record<EnvName, EnvConfig> = {
     // they are the sandbox's ONLY S3 path (the credentials file wins boto3's chain); the execution
     // role's own grants only serve a call where injection failed.
     sandboxScopedCredentials: true,
+    // The platform's default Bedrock guardrail (light), created by this deploy.
+    defaultGuardrail: true,
     // AgentCore Web Search on the Platform Gateway (verified in us-west-2 2026-10-20, connector 1.3.0).
     // On in staging and prod (prod approved for 0.13.0); sandbox stays off.
     webSearch: { enabled: true },
@@ -883,6 +892,8 @@ const CONFIGS: Record<EnvName, EnvConfig> = {
     env: "prod",
     account: "100000000003",
     region: "us-west-2",
+    // The platform's default Bedrock guardrail (light), created by this deploy.
+    defaultGuardrail: true,
     // AgentCore Web Search on the shared Platform Gateway, switched per chat from the + menu (on by default).
     // Approved for prod in 0.13.0 (2026-10-21) after the staging test matrix; us-west-2 verified 2026-10-20.
     webSearch: { enabled: true },

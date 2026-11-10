@@ -19,6 +19,8 @@ import { InputAttachment } from './chat/InputAttachment';
 import type { ChatMessage, StepEvent, ExecutionSummary, StreamEvent } from '../lab-api';
 import { createSession, updateSessionActivity, getConfig, getSessionTranscript } from '../lab-api';
 import { setSessionCache } from '../utils/safeStorage';
+import { parseOpenProject, requestNewChatInProject, takePendingOpen } from '../projects/newChatInProject';
+import { refreshProjectsList } from '../projects/useProjectsList';
 import { invokeAgentStreaming, selectedOrchestratorModelId, selectedReasoningEffort } from '../api';
 import type { StreamCallback } from '../api';
 import { shouldRenderManifest, isRenderPendingStep, shouldEnterRenderPending } from '../services/renderOrchestration';
@@ -47,7 +49,7 @@ import {
   type ReadyAttachment,
 } from '../projects/upload/chatAttachments';
 import { isInProgress } from '../projects/upload/uploadQueue';
-import { listAssets, listProjects, parseProjectAccessLost, parseSessionProjectFixed, peekProjectsEnabled, projectsEnabled, searchAssets } from '../projects/api';
+import { listAssets, listProjects, parseProjectAccessLost, parseSessionProjectFixed, parseSessionProjectGone, peekProjectsEnabled, projectsEnabled, searchAssets } from '../projects/api';
 import { findDuplicates, type Duplicate } from '../projects/upload/duplicates';
 import { dragHasFiles, readDroppedFiles } from '../projects/upload/folders';
 import DuplicatesDialog from './projects/DuplicatesDialog';
@@ -56,7 +58,7 @@ import type { FindSimilarPayload } from '../projects/findSimilar';
 import { setSessionTurnInProgress } from '../projects/turnState';
 import { ActionLine } from './chat/ActionLine';
 import {
-  userMessageRowStyle, userBubbleStyle, userTextStyle, assistantMessageRowStyle, assistantBubbleStyle, markdownBodyStyle, errorIndicatorStyle, streamingDotsContainerStyle, dotStyle, workingIndicatorStyle, workingLabelStyle, summaryContainerStyle, summaryItemStyle, dotKeyframes,
+  userMessageRowStyle, userBubbleStyle, userTextStyle, assistantMessageRowStyle, assistantBubbleStyle, markdownBodyStyle, errorIndicatorStyle, guardrailNoteStyle, streamingDotsContainerStyle, dotStyle, workingIndicatorStyle, workingLabelStyle, summaryContainerStyle, summaryItemStyle, dotKeyframes,
 } from './chat/messageStyles';
 
 import { CHAT_ACTION_EVENT, withActionContext, type ActionLineRecord, type ChatActionDetail } from '../projects/mediaActions';
@@ -64,6 +66,7 @@ import {
   dismissNotice,
   markSessionPersisted,
   markSessionProjectFixed,
+  projectGoneNewChatMessage,
   reconcileWithProjectList,
   resetToPersonal,
   selectActiveProject,
@@ -1288,6 +1291,14 @@ export default function ChatCanvas({
       if (persistedForTurn) {
         updateSessionActivity(capturedSessionId).catch(() => {});
       }
+      // The agent's switch_project / create_project: open a NEW chat in that project and send it the prompt.
+      // Only from this live stream (a reloaded transcript never comes through here), and only while the user is
+      // still on the chat that asked, so a turn finishing in the background never pulls them somewhere else.
+      const openProject = parseOpenProject((receivedSummary as ExecutionSummary | null)?.open_project);
+      if (openProject && currentSessionRef.current === capturedSessionId) {
+        void refreshProjectsList(); // a project create_project just made is listed at once
+        requestNewChatInProject(openProject.projectId, openProject.projectName, openProject.prompt);
+      }
     } catch (err) {
       onRenderPending?.(false, capturedSessionId);
       abortControllersRef.current.delete(capturedSessionId);
@@ -1310,6 +1321,20 @@ export default function ChatCanvas({
             setInput(prev => (prev ? `${message}\n${prev}` : message));
             if (turnAttachments.length > 0) restoreReady(capturedSessionId, turnAttachments);
           }
+        }
+        return;
+      }
+      // `409 session_project_gone`: this chat's own project was deleted (or the user was removed from it). A chat is
+      // fixed to its project, so it cannot continue: open a NEW chat in Personal with the message in its composer
+      // (not sent: it was written for the old project) and a line saying why. The old chat stays as history.
+      const goneTo = typeof httpErr?.status === 'number' ? parseSessionProjectGone(httpErr.status, httpErr.body) : null;
+      if (goneTo) {
+        if (currentSessionRef.current === capturedSessionId) {
+          setMessages(prev => prev.filter(m => m.id !== userMsgId));
+          requestNewChatInProject(goneTo.id, goneTo.name, undefined, {
+            ...(displayText === undefined ? { draft: message } : {}),
+            notice: projectGoneNewChatMessage(turnProject?.activeProjectName),
+          });
         }
         return;
       }
@@ -1451,6 +1476,15 @@ export default function ChatCanvas({
     window.addEventListener('chat:send', handler as EventListener);
     return () => window.removeEventListener('chat:send', handler as EventListener);
   }, [isStreaming, processMessage, sessionId, locked]);
+
+  // A chat opened by the agent's switch_project / create_project sends the carried-over request as its first message;
+  // one opened because the old chat's project was deleted gets the unsent message back in its composer.
+  useEffect(() => {
+    if (!sessionId || locked || isStreaming) return;
+    const open = takePendingOpen(sessionId);
+    if (open?.prompt) processMessage(open.prompt, null);
+    else if (open?.draft) setInput(open.draft);
+  }, [sessionId, locked, isStreaming, processMessage]);
 
   // Action lines (direct timeline actions): upserted by id into the on-screen chat, never a turn. The proxy
   // records the finished line in the transcript, so another session's line arrives with its transcript.
@@ -1916,6 +1950,12 @@ function MessageBubble({
         {message.error && (
           <div style={errorIndicatorStyle}>
             <WarningIcon /> {message.error}
+          </div>
+        )}
+        {/* The platform's content guardrail blocked part of this turn: say so, so a replaced reply is not a mystery. */}
+        {message.summary?.guardrail?.intervened && (
+          <div style={guardrailNoteStyle} data-testid="guardrail-note">
+            <WarningIcon /> Blocked by the platform's content guardrail{message.summary.guardrail.name ? ` (${message.summary.guardrail.name})` : ''}.
           </div>
         )}
         {/* Execution summary */}

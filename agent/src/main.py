@@ -68,8 +68,13 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.agent.conversation_manager import SummarizingConversationManager
 from model.factory import build_model
-from strands_tools import file_read, http_request, current_time, load_tool, shell
-from strands_tools.code_interpreter import AgentCoreCodeInterpreter
+from model.defaults import model_for
+from model import guardrail as _model_guardrail
+# Host-exec tools (shell, file_read, load_tool, ...) are NEVER bound: they ran with the runtime role
+# (tests/test_no_host_exec_tools.py). The three builtins kept are our own, on no third-party tool package.
+from tools.current_time import current_time
+from tools.http_request import http_request
+from agentcore_code_interpreter import AgentCoreCodeInterpreter
 from tool_input_normalize import wrap_code_interpreter, wrap_http_request
 from bedrock_agentcore.memory import MemoryClient
 from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
@@ -104,7 +109,7 @@ import custom_agent_tool
 # `model_id` (see _resolve_request_model) — the Agent is constructed fresh for
 # every request, so the model belongs in that construction alongside the
 # per-actor skills/tools/hooks rather than being mutated on a shared object.
-DEFAULT_ORCHESTRATOR_MODEL_ID = "global.anthropic.claude-opus-5-5"
+DEFAULT_ORCHESTRATOR_MODEL_ID = model_for("orchestrator")  # agent/src/model/models.json
 
 
 def _resolve_request_model(payload: dict, fallback):
@@ -1032,9 +1037,8 @@ def _construct_static_subsystems() -> None:
 
 def _register_builtin_tools() -> None:
     _all_builtin_tools.update({
-        "file_read": file_read, "http_request": http_request,
-        "current_time": current_time, "load_tool": load_tool,
-        "shell": shell, "artifact": artifact, "dispatch_tool": dispatch_tool,
+        "http_request": http_request, "current_time": current_time,
+        "artifact": artifact, "dispatch_tool": dispatch_tool,
         "plan_and_execute_tool": plan_and_execute_tool,
         "invoke_custom_agent": custom_agent_tool.invoke_custom_agent,
         "get_job": get_job,
@@ -1077,7 +1081,6 @@ def _register_builtin_tools() -> None:
 
     _added_builtins.update({
         "dispatch_tool", "plan_and_execute_tool", "invoke_custom_agent",
-        "file_read", "shell",
         "http_request", "current_time",
         "artifact", "code_interpreter",
         "get_job", "list_my_jobs", "read_result_files", "get_plan_results",
@@ -1245,6 +1248,17 @@ def _init_agent_subsystems(*, wait_for_skills: bool = True):
                     _AGENT_SUBSYSTEMS_READY = True
     if wait_for_skills:
         _ensure_skills_ready()
+
+
+def _take_open_project(session_id: str):
+    """The turn's ``open_project`` request (removed), or ``None``. Never raises."""
+    try:
+        from project_search.turn_actions import take_open_project
+
+        return take_open_project(session_id)
+    except Exception:  # noqa: BLE001 - a summary must still be emitted without it
+        logger.exception("reading the turn's open_project request failed")
+        return None
 
 
 def _attach_turn_lineage(summary: dict) -> None:
@@ -2556,6 +2570,9 @@ async def invoke(payload, context):
         except Exception:
             logger.debug("per-request user-hook load failed; using defaults", exc_info=True)
     request_skills_plugin = skills_manager.create_request_plugin(request_owned_skills)
+    # The platform's Bedrock guardrail (an admin's pick, else the env default), bound BEFORE the request model is built:
+    # build_model applies it. Dispatched work binds it again in the task runtime, so nothing forwards it.
+    _bound_guardrail = _model_guardrail.bind(await asyncio.to_thread(_model_guardrail.platform_guardrail))
     request_model, resolved_model_id = _resolve_request_model(payload, model)
     # Bind the turn's model so dispatch_tool/plan_and_execute_tool can inherit it
     # instead of relying on the LLM to name the right one (it picked
@@ -2650,12 +2667,16 @@ async def invoke(payload, context):
         )
     import time as _time
     _exec_start = _time.time()
+    # A switch_project / create_project request left by a turn that never reached its summary must not
+    # open a chat at the end of THIS one (project_search.turn_actions).
+    _take_open_project(session_id)
     # Time-to-first-answer-token for search telemetry (Component 9, Req 4.1): monotonic from here to
     # the first answer-text yield to the proxy. Stays None when the turn yields no answer text.
     _ttft_mono_start = _time.monotonic()
     _ttft_ms = None
     _tool_timings: dict[str, list[float]] = {}
     _cycle_count = 0
+    _guardrail_intervened = False
     # Active tool tracking is keyed by toolUseId, NOT tool name. The model
     # often calls the same tool repeatedly within a single turn (e.g.
     # poll-loop on get_diarization_status); keying by name caused later
@@ -2711,6 +2732,11 @@ async def invoke(payload, context):
     async def _strands_producer():
         """Forward Strands stream events into the merge queue."""
         try:
+            # The guardrail checks only these words on input, never the injected context (model/guardrail.py).
+            if isinstance(prompt, list):
+                _model_guardrail.bind_human_text(*[b.get("text") for b in prompt if isinstance(b, dict)])
+            else:
+                _model_guardrail.bind_human_text(prompt)
             stream = request_agent.stream_async(prompt)
             async for event in stream:
                 # Buffer the whole answer for citation verification: each str `data` event is one
@@ -2867,6 +2893,8 @@ async def invoke(payload, context):
             # (AfterInvocation hooks, memory flush, citation checks) -- a short answer used to
             # wait for all of that. Same text, same lead-in handling as _prose.end().
             _stop_reason = _message_stop_reason(event)
+            if _stop_reason == "guardrail_intervened":
+                _guardrail_intervened = True
             if _stop_reason and _stop_reason != "tool_use":
                 for _out in _prose_out(_prose.finish_answer()):
                     yield _out
@@ -2956,6 +2984,16 @@ async def invoke(payload, context):
 
     # Lineage of the files this turn wrote (asset-lineage design §3/§4). Never raises.
     _attach_turn_lineage(_summary)
+
+    # switch_project / create_project: the chat opens a new chat in that project when it reads this LIVE
+    # (never from a reloaded transcript), and sends it the prompt (project_search.turn_actions).
+    _open_project = _take_open_project(session_id)
+    if _open_project:
+        _summary["open_project"] = _open_project
+    # The Bedrock guardrail this turn ran with, and whether it blocked something (the chat shows a note).
+    if _bound_guardrail:
+        _summary["guardrail"] = {"name": _bound_guardrail.get("name") or "", "version": _bound_guardrail["version"],
+                                 "intervened": _guardrail_intervened}
 
     # Search telemetry (design Component 9, Req 4.1, 4.2, 4.3). Built only on a Projects turn, from
     # this turn's per-call samples and the TurnOutcome's citation counts — never from answer text, a

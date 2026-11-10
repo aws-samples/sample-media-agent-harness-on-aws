@@ -23,7 +23,7 @@
       "trajectory",
       "plan"
     ],
-    "model": "global.anthropic.claude-sonnet-5",
+    "model": "global.anthropic.claude-sonnet-5-5",
     "pass_threshold": 0.7,
     "runs": 3
   },

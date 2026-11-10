@@ -21,16 +21,19 @@ export const RUNTIME_ARN_NAMES = ["AGENT_RUNTIME_ARN", "TASK_AGENT_RUNTIME_ARN",
 /** `{last path segment: value}` for every parameter directly under `path`. */
 export type FetchByPath = (path: string) => Promise<Record<string, string>>;
 
-export function ssmFetchByPath(region: string): FetchByPath {
+/** One signed SSM JSON-protocol call (`target` = `GetParametersByPath`, `GetParameters`, `PutParameter`, ...). */
+export type SsmCall = (target: string, body: Record<string, unknown>) => Promise<any>;
+
+export function ssmCall(region: string): SsmCall {
   const signer = new SignatureV4({ service: "ssm", region, credentials: defaultProvider(), sha256: Sha256 });
   const hostname = `ssm.${region}.amazonaws.com`;
-  const call = async (body: Record<string, unknown>): Promise<any> => {
+  return async (target, body) => {
     const request = new HttpRequest({
       method: "POST", protocol: "https:", hostname, path: "/",
       headers: {
         host: hostname,
         "content-type": "application/x-amz-json-1.1",
-        "x-amz-target": "AmazonSSM.GetParametersByPath",
+        "x-amz-target": `AmazonSSM.${target}`,
       },
       body: JSON.stringify(body),
     });
@@ -42,7 +45,7 @@ export function ssmFetchByPath(region: string): FetchByPath {
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if ((res.statusCode ?? 500) >= 300) {
-            reject(new Error(`SSM GetParametersByPath ${res.statusCode}: ${text.slice(0, 200)}`));
+            reject(new Error(`SSM ${target} ${res.statusCode}: ${text.slice(0, 200)}`));
             return;
           }
           try { resolve(JSON.parse(text)); } catch (e) { reject(e); }
@@ -52,11 +55,15 @@ export function ssmFetchByPath(region: string): FetchByPath {
       req.end(signed.body);
     });
   };
+}
+
+export function ssmFetchByPath(region: string): FetchByPath {
+  const call = ssmCall(region);
   return async (path) => {
     const out: Record<string, string> = {};
     let token: string | undefined;
     do {
-      const resp = await call({ Path: path.replace(/\/+$/, ""), Recursive: false, ...(token ? { NextToken: token } : {}) });
+      const resp = await call("GetParametersByPath", { Path: path.replace(/\/+$/, ""), Recursive: false, ...(token ? { NextToken: token } : {}) });
       for (const p of resp?.Parameters ?? []) {
         const name = typeof p?.Name === "string" ? p.Name : "";
         if (name && typeof p.Value === "string" && p.Value) out[name.split("/").pop()!] = p.Value;

@@ -93,8 +93,10 @@ _ORGANIZE_LINE = ("- When the user asks to organize the project (create folders 
                   "group shots by board, save the moments a search found), call `organize_project`: `folders` creates "
                   "empty folders (a whole tree in one call), `asset_ids` moves whole files, `moments` saves ranges as "
                   "bookmarks, `rename_from` renames a folder. Nothing is copied or re-indexed.\n"
-                  "- When the user asks for a NEW project, call `create_project` and put the link it returns in your "
-                  "reply: the user creates the project by clicking it. Never say a project you proposed exists.")
+                  "- Projects: `list_projects` lists the user's projects. To go to another project, call `switch_project` "
+                  "(a NEW project: `create_project`) with the user's request as `prompt`; a new chat opens there when your "
+                  "reply ends and carries on with it, so say so in one sentence and stop. To delete one, call "
+                  "`delete_project` and put the card it returns in your reply: only the user's confirmation there deletes.")
 
 
 # Search cost (2026-10-16): every search is a ~6-8 s M2C workflow run. What costs time is searching, READING and
@@ -112,7 +114,7 @@ _ONE_SEARCH_LINE = ("- Search in ONE step: issue every search the question needs
 _NO_URL_LINE = ("- In the reply, refer to a project file by its citation (`[name @ mm:ss–mm:ss]`, `[name p.N]`) or "
                 "its name, never by a URL: do not copy CloudFront, presigned or s3:// links into the answer (the "
                 "citations and the Moments tab already open and play them). Give a file URL only when the user asks for "
-                "a link, and then once per file. (The `create_project` link is not a file URL: include it as told.)")
+                "a link, and then once per file. (The `delete_project` card link is not a file URL: include it as told.)")
 
 
 # A web-research answer re-cited a moment found turns earlier ("that also explains the moments you found earlier

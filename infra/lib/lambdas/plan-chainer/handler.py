@@ -2216,7 +2216,7 @@ def _dependency_injection_text(node_def, dep_outputs, node_states, session_id, p
                 f'\n\n--- Output from step "{dep_id}" ---\n'
                 f'FULL OUTPUT (authoritative — read this for the COMPLETE content): '
                 f's3://{SKILLS_S3_BUCKET}/{recorded_key}\n'
-                f'Read it with file_read / read_result_files (or boto3). The preview below may be a '
+                f'Read it with read_result_files (or boto3). The preview below may be a '
                 f'summary, a placeholder, or truncated — never treat it as the full content, and never '
                 f'guess or reconstruct content from it.\nPREVIEW:\n{preview}'
             )

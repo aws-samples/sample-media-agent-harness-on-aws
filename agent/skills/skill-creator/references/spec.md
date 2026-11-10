@@ -180,8 +180,9 @@ Executable code the agent can run. Scripts should:
 
 Supported languages depend on the agent runtime; Python, Bash, and
 JavaScript are common. In this codebase the orchestrator's
-`code_interpreter` tool runs Python; bash runs via the `shell`
-built-in.
+`code_interpreter` tool runs Python, and bash runs in the same
+sandbox through its `executeCommand` action (there is no host
+`shell` tool).
 
 ### `references/`
 

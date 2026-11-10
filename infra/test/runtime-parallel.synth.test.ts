@@ -17,6 +17,7 @@
  *   2. None of the sub-runtime ARN env vars appears in any runtime's EnvironmentVariables.
  *   3. The `/<project>-<env>/runtime-arns/<VAR>` SSM parameters exist, and the path is in
  *      RuntimeConfigSecret.
+ *   5. `UI_PUBLIC_ORIGIN` (the agent's project tools) exists there as an https origin.
  * Prints the runtime critical path (longest runtime → runtime chain; 1 = fully parallel).
  */
 import * as assert from "node:assert/strict";
@@ -191,6 +192,11 @@ for (const env of ["staging", "sandbox", "prod"] as const) {
     assert.equal(reach.length, 0, `${env}: ${r.Type} ${id} waits on a runtime: ${
       reach.map((x) => x.path.join(" -> ")).join("; ")}`);
   }
+  // 5. The agent's project tools reach the proxy through CloudFront (agent/src/project_search/registry_client.py):
+  //    the https origin is an SSM parameter under the same path, read lazily, never runtime env.
+  const originParam = params.find((pp) => pp.Name === `${path}/UI_PUBLIC_ORIGIN`);
+  assert.ok(originParam, `${env}: missing SSM parameter ${path}/UI_PUBLIC_ORIGIN (read by the agent's project tools)`);
+  assert.ok(JSON.stringify(originParam!.Value).includes("https://"), `${env}: UI_PUBLIC_ORIGIN must be an https origin`);
   const ingestionStacks = new Set(Object.entries(resources)
     .filter(([id, r]) => r.Type === "AWS::CloudFormation::Stack" && id.startsWith("IngestionStack")).map(([id]) => id));
   for (const rt of runtimes) {

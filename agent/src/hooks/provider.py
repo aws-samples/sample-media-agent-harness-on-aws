@@ -1166,7 +1166,10 @@ NON_ARTIFACT_TOOLS = frozenset({
     "use_asset",  # returns the file's reference for another tool, not media to render
     "browse_project",
     "organize_project",  # files are moved / bookmarked, nothing new is produced to render
-    "create_project",    # returns a link the user clicks; nothing to render
+    "list_projects",     # names the user's projects; nothing to render
+    "switch_project",    # opens a new chat in another project; nothing to render
+    "create_project",    # creates a project and opens a chat in it; nothing to render
+    "delete_project",    # returns a confirmation card; nothing to render
     # The knowledge-graph tools (project_search.graph_tools). Read-only: their results name nodes and
     # files but never produce media; what they touched renders once, as the turn's "↳ Graph" tab
     # (render-graph), so a harvested URL in a node's props must not open a second tab.

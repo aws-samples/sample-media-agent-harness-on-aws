@@ -7,14 +7,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 
-const m = vi.hoisted(() => ({ createProject: vi.fn(), requestNewChatInProject: vi.fn(), refresh: vi.fn() }));
-vi.mock('../../projects/api', async (o) => ({ ...(await o<typeof import('../../projects/api')>()), createProject: m.createProject }));
+const m = vi.hoisted(() => ({ createProject: vi.fn(), deleteProject: vi.fn(), requestNewChatInProject: vi.fn(), refresh: vi.fn() }));
+vi.mock('../../projects/api', async (o) => ({ ...(await o<typeof import('../../projects/api')>()), createProject: m.createProject, deleteProject: m.deleteProject }));
 vi.mock('../../projects/newChatInProject', () => ({ requestNewChatInProject: m.requestNewChatInProject }));
 vi.mock('../../projects/useProjectsList', () => ({ refreshProjectsList: m.refresh }));
 
 import { markdownComponents } from './markdownComponents';
 import { keepAssetUrls } from './InlineAssetImage';
-import { parseProjectLink } from './CreateProjectCard';
+import { parseDeleteProjectLink, parseProjectLink } from './CreateProjectCard';
 
 const md = 'Here you go:\n\n[Create project “project-index-test-v7”](project:new?name=project-index-test-v7&description=Meridian%20tests)';
 const renderMd = (text: string) => render(
@@ -51,5 +51,47 @@ describe('a project the agent proposed', () => {
     await flush();
     expect(screen.getByRole('alert')).toHaveTextContent('already exists');
     expect(screen.getByTestId('create-project-button')).not.toBeDisabled();
+  });
+});
+
+describe('a project the agent offered to delete', () => {
+  const del = 'Sure:\n\n[Delete project “Old cuts”](project:delete?id=pmine&name=Old%20cuts)';
+
+  it('reads the link', () => {
+    expect(parseDeleteProjectLink('project:delete?id=p1&name=A%20B')).toEqual({ id: 'p1', name: 'A B' });
+    expect(parseDeleteProjectLink('project:delete?id=&name=A')).toBeNull();
+    expect(parseDeleteProjectLink('project:delete?id=p1')).toBeNull();
+  });
+
+  it('deletes only after the user types the exact name', async () => {
+    m.deleteProject.mockResolvedValue({ ok: true, value: { projectId: 'pmine', name: 'Old cuts', personal: false } });
+    renderMd(del);
+    expect(screen.getByTestId('delete-project-card')).toHaveTextContent('Old cuts');
+    fireEvent.click(screen.getByTestId('delete-project-button'));
+    const confirm = screen.getByRole('button', { name: 'Delete project' });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'old cuts' } });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Old cuts' } });
+    expect(m.deleteProject).not.toHaveBeenCalled();
+    fireEvent.click(confirm);
+    await flush();
+    expect(m.deleteProject).toHaveBeenCalledWith('pmine', 'Old cuts');
+    expect(m.refresh).toHaveBeenCalled();
+    expect(screen.getByTestId('delete-project-card')).toHaveTextContent('Project deleted');
+    expect(screen.queryByTestId('delete-project-button')).toBeNull();
+  });
+
+  it('cancel deletes nothing, and a refusal is shown', async () => {
+    m.deleteProject.mockResolvedValue({ ok: false, kind: 'error', status: 403, code: 'forbidden', message: 'Only the owner can delete it' });
+    renderMd(del);
+    fireEvent.click(screen.getByTestId('delete-project-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(m.deleteProject).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('delete-project-button'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Old cuts' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Delete project' }));
+    await flush();
+    expect(screen.getByRole('alert')).toHaveTextContent('Only the owner');
   });
 });

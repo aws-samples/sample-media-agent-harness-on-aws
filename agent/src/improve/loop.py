@@ -18,14 +18,14 @@ from typing import Optional
 try:
     from .contract import Outcome, Overall, Scenario, Verdict
     from .evaluate import evaluate
-    from .judge import GoalSuccessJudge, JudgeConfig
+    from .judge import DEFAULT_MODEL as DEFAULT_JUDGE_MODEL, GoalSuccessJudge, JudgeConfig
     from .observe.build_run import HarvestedPlanSource, build_run
     from .observe.memory_reader import DEFAULT_MEMORY_ID, MemoryReader
     from .observe.span_trajectory import HarvestedSpanSource
 except ImportError:  # pragma: no cover
     from improve.contract import Outcome, Overall, Scenario, Verdict  # type: ignore
     from improve.evaluate import evaluate  # type: ignore
-    from improve.judge import GoalSuccessJudge, JudgeConfig  # type: ignore
+    from improve.judge import DEFAULT_MODEL as DEFAULT_JUDGE_MODEL, GoalSuccessJudge, JudgeConfig  # type: ignore
     from improve.observe.build_run import HarvestedPlanSource, build_run  # type: ignore
     from improve.observe.memory_reader import DEFAULT_MEMORY_ID, MemoryReader  # type: ignore
     from improve.observe.span_trajectory import HarvestedSpanSource  # type: ignore
@@ -89,7 +89,7 @@ def _make_judge(cfg: dict, profile: Optional[str]) -> GoalSuccessJudge:
     jc = cfg.get("judge", {})
     return GoalSuccessJudge(
         JudgeConfig(
-            model=jc.get("model", "global.anthropic.claude-sonnet-5"),
+            model=jc.get("model", DEFAULT_JUDGE_MODEL),
             goal_source=jc.get("goal_source", "full_conversation"),
             input_set=tuple(jc.get("input_set", ("goal", "response", "trajectory", "plan"))),
             pass_threshold=jc.get("pass_threshold", 0.7),

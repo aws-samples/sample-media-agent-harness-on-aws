@@ -52,7 +52,7 @@ idempotent — re-submitting an already-run asset absorbs into the existing run.
   CANNOT raw-read the M2C proxy bucket, and the inline job-result **preview is
   TRUNCATED**. So the reader node MUST carry `media-outputs___get_download_url`
   (plus `http_request`), PRESIGN the exact output `s3://` key, and read the FULL
-  file — never extract values from the preview, never `file_read` the raw key. A
+  file — never extract values from the preview, never try to read the raw key. A
   node given only a job's START tool (`diarize_speech`, `segment_shots`,
   `enrich_shot_metadata`, `analyze_conversation`) is misconfigured — those launch
   a NEW job, they do not read results (session 62fa161a: a reader node with only

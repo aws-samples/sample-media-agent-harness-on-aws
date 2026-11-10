@@ -22,6 +22,7 @@ import {
   forgetSessionProject,
   getSessionProject,
   lostAccessMessage,
+  projectGoneMessage,
   markSessionPersisted,
   markSessionProjectFixed,
   persistSessionForAction,
@@ -151,13 +152,20 @@ describe('sessionProjectStore', () => {
     expect(await reconcileWithProjectList('fresh', LIST)).toBe('ok');
     expect(getSessionProject('fresh')).toMatchObject({ activeProjectId: PERSONAL.id, notice: null });
 
-    await seedSessionProject('lost', { activeProjectId: OTHER, activeProjectName: 'Gone' });
+    // A chat with no row yet (no turn) still moves to Personal.
+    await seedSessionProject('lost', { persisted: false, activeProjectId: OTHER, activeProjectName: 'Gone' });
     expect(await reconcileWithProjectList('lost', LIST)).toBe('lost');
     expect(getSessionProject('lost')).toMatchObject({
       activeProjectId: PERSONAL.id, notice: lostAccessMessage('Gone'),
     });
-    expect(mockPatch).toHaveBeenCalledTimes(1);
-    expect(mockPatch).toHaveBeenCalledWith('lost', { activeProjectId: PERSONAL.id });
+    expect(mockPatch).not.toHaveBeenCalled(); // no row to write: the first turn carries Personal
+
+    // A chat with a row has had a turn: its project is fixed, so it keeps it, says so, and writes nothing.
+    await seedSessionProject('ended', { activeProjectId: OTHER, activeProjectName: 'Gone' });
+    expect(await reconcileWithProjectList('ended', LIST)).toBe('lost');
+    expect(getSessionProject('ended')).toMatchObject({ activeProjectId: OTHER, notice: projectGoneMessage('Gone') });
+    expect(getSessionProject('ended')!.notice).toMatch(/was deleted, so this chat can't continue/);
+    expect(mockPatch).not.toHaveBeenCalled();
   });
 
   it('useSessionProject re-renders on change', async () => {

@@ -92,7 +92,7 @@ def test_invoke_custom_agent_in_added_builtins():
     added_builtins: set[str] = set()
     added_builtins.update({
         "dispatch_tool", "plan_and_execute_tool", "invoke_custom_agent",
-        "file_read", "shell",
+        "http_request", "current_time",
     })
 
     assert "invoke_custom_agent" in added_builtins

@@ -53,7 +53,10 @@ import { SignatureV4 } from "@smithy/signature-v4";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import crypto from "crypto";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { BedrockClient, ListInferenceProfilesCommand } from "@aws-sdk/client-bedrock";
+import { BedrockClient, ListGuardrailsCommand, ListInferenceProfilesCommand } from "@aws-sdk/client-bedrock";
+import { ssmCall } from "./runtimeArns";
+import { listOptions, readSettings, saveSelection } from "./guardrailSettings";
+import type { ListGuardrails } from "./guardrailSettings";
 import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { TranscriptAccumulator } from "./transcriptAccumulator";
@@ -715,6 +718,11 @@ export function buildApp(): Express {
     res.end(JSON.stringify({ error: { code: "forbidden", message: "Admin (gateway-admins) group required" } }));
     return false;
   }
+  // The platform's Bedrock guardrail (guardrailSettings.ts): listed from Bedrock, stored in SSM.
+  const guardrailRegion = process.env.AWS_REGION || "us-west-2";
+  const guardrailBedrock = new BedrockClient({ region: guardrailRegion });
+  const guardrailSsm = ssmCall(guardrailRegion);
+  const listGuardrails: ListGuardrails = (input) => guardrailBedrock.send(new ListGuardrailsCommand({ maxResults: 100, ...input }));
   app.use("/admin", async (req: any, res: any) => {
     if (!requireAdmin(req, res)) return;
     const full = String(req.originalUrl || req.url || "");
@@ -725,6 +733,47 @@ export function buildApp(): Express {
       res.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*" });
       res.end(JSON.stringify(body));
     };
+    // GET|PUT /admin/guardrails — the platform's guardrail (Settings -> Safety). Independent of the user pool.
+    if (sub === "/guardrails" || sub === "/guardrails/") {
+      const paramPath = (process.env.RUNTIME_ARN_PARAM_PATH || "").replace(/\/+$/, "");
+      if (!paramPath) {
+        json(503, { error: { code: "guardrails_unavailable", message: "RUNTIME_ARN_PARAM_PATH is not set" } });
+        return;
+      }
+      try {
+        if (method === "GET") {
+          const [guardrails, settings] = await Promise.all([listOptions(listGuardrails), readSettings(guardrailSsm, paramPath)]);
+          json(200, { guardrails, ...settings });
+          return;
+        }
+        if (method === "PUT") {
+          const raw = await new Promise<string>((resolve) => {
+            const chunks: Buffer[] = [];
+            req.on("data", (c: Buffer) => chunks.push(c));
+            req.on("end", () => resolve(Buffer.concat(chunks).toString() || "{}"));
+            req.on("error", () => resolve("{}"));
+          });
+          let body: unknown = {};
+          try { body = JSON.parse(raw); } catch { /* invalid JSON → empty body → 400 */ }
+          const r = await saveSelection(guardrailSsm, listGuardrails, paramPath, body);
+          if (!r.ok) {
+            json(r.status, { error: { code: r.code, message: r.message } });
+            return;
+          }
+          const actor = (req as AuthedRequest).actorId ?? "unknown";
+          console.log(`[admin-audit] actor=${actor} action=set_guardrail target=${
+            r.effective ? `${r.effective.id}:${r.effective.version}` : "none"} ts=${new Date().toISOString()}`);
+          json(200, { effective: r.effective });
+          return;
+        }
+        res.setHeader("allow", "GET, PUT");
+        json(405, { error: { code: "method_not_allowed", message: "GET or PUT" } });
+      } catch (err: any) {
+        console.error("[admin] guardrails failed:", err?.name ?? "", err?.message ?? err);
+        json(502, { error: { code: "guardrails_unavailable", message: "Could not read or save the guardrail setting" } });
+      }
+      return;
+    }
     if (!adminUserPoolId) {
       json(200, { users: [], warning: "USER_POOL_ID not configured" });
       return;
@@ -3135,8 +3184,9 @@ export function buildApp(): Express {
   // turn died with `ValidationException ... exceeds the model limit of 4096`.
   // Same value the agent runtimes read, set from CDK so the two cannot disagree;
   // the literal here is only for local dev.
-  const DEFAULT_MODEL_ID =
-    process.env.DEFAULT_MODEL_ID ?? "global.anthropic.claude-opus-5";
+  // Set by the deploy from agent/src/model/models.json. Unset (local dev) reports no default, and the SPA then
+  // leaves the orchestrator on its own default rather than guessing one.
+  const DEFAULT_MODEL_ID = process.env.DEFAULT_MODEL_ID || undefined;
   const bedrockClient = new BedrockClient({ region: REGION });
   let modelsCache: { data: any[]; ts: number } = { data: [], ts: 0 };
 

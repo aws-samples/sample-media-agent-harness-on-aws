@@ -24,8 +24,7 @@ Actor scoping (R11.2): :meth:`JobRegistry.list_for_actor` queries the
 Why a separate module from ``get_job_tool``: the two tools share a
 registry binding pattern but have different return shapes, different
 arguments, and different system-prompt guidance. Keeping them in
-their own files mirrors how Strands' built-in tools are organised
-(one tool per module under ``strands_tools/``) and keeps the
+their own files (one tool per module) keeps the
 ``set_registry`` / ``get_job`` pair from getting cluttered.
 
 Requirements: 11.2 (actor scoping). The original async-job-tracking

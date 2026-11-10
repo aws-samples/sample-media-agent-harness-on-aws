@@ -26,7 +26,7 @@ def skills(tmp_path):
         "alpha": {"scripts/run.py": "import helper\nprint('alpha run')\n", "scripts/helper.py": "X = 1\n",
                   "assets/page.html": "<html/>", "SKILL.md": "x"},
         "beta": {"scripts/run.py": "print('beta run')\n", "SKILL.md": "x", "secret.txt": "nope"},
-        "content_moderation": {"scripts/build_report.py": "print('br')\n", "SKILL.md": "x"},
+        "content-moderation": {"scripts/build_report.py": "print('br')\n", "SKILL.md": "x"},
     }.items():
         for rel, text in files.items():
             p = root / skill / rel
@@ -62,7 +62,7 @@ def test_ambiguous_bare_reference_stages_every_match_under_its_own_skill(skills)
 
 def test_skill_names_match_across_dash_and_underscore(skills):
     files = ss.files_to_stage("python content-moderation/scripts/build_report.py f.json", roots=skills)
-    assert files["skills/content_moderation/scripts/build_report.py"] == b"print('br')\n"
+    assert files["skills/content-moderation/scripts/build_report.py"] == b"print('br')\n"
 
 
 def test_size_cap_drops_siblings_then_everything(skills, monkeypatch):
@@ -89,7 +89,7 @@ def test_writer_code_recreates_the_files(tmp_path, skills):
 def test_the_real_skills_resolve():
     for text, key in [("python scripts/assemble_reel.py m.json o.mp4", "skills/agent-olive/scripts/assemble_reel.py"),
                       ("python media-references/scripts/estimate_cost.py", "skills/media-references/scripts/estimate_cost.py"),
-                      ("python scripts/build_report.py findings.json", "skills/content_moderation/scripts/build_report.py")]:
+                      ("python scripts/build_report.py findings.json", "skills/content-moderation/scripts/build_report.py")]:
         assert key in ss.files_to_stage(text), text
 
 

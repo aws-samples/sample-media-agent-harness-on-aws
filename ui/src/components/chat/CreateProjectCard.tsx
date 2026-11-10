@@ -3,15 +3,88 @@
  * with one button. The agent cannot create a project; the user's click does, through the same `POST /projects`
  * the New project form uses, so the name and ownership rules are the server's as always. After it exists, the card
  * offers to start a chat in it (a chat's project is fixed by its first turn, so the CURRENT chat cannot move).
+ * (`create_project` now creates the project itself and opens a chat there; this card serves links in older chats.)
+ *
+ * `delete_project` → `[Delete project “X”](project:delete?id=<pid>&name=X)` is {@link DeleteProjectCard}: the agent
+ * cannot delete, the user does, by typing the exact name in the same confirmation the Projects page uses. The proxy
+ * still checks that they own it and that the typed name matches.
  */
 import React, { useState } from 'react';
-import { createProject } from '../../projects/api';
+import { createProject, deleteProject } from '../../projects/api';
+import ConfirmDialog from '../ConfirmDialog';
 import { requestNewChatInProject } from '../../projects/newChatInProject';
 import { refreshProjectsList } from '../../projects/useProjectsList';
 import { theme } from '../../styles/tokens';
 import FolderIcon from '../icons/FolderIcon';
 
 export const PROJECT_LINK_PREFIX = 'project:new';
+export const DELETE_PROJECT_LINK_PREFIX = 'project:delete?';
+
+/** True for either project card link: what the chat's `a` override renders as a card. */
+export function isProjectCardLink(href: string): boolean {
+  return href.startsWith(PROJECT_LINK_PREFIX) || href.startsWith(DELETE_PROJECT_LINK_PREFIX);
+}
+
+export function parseDeleteProjectLink(href: string): { id: string; name: string } | null {
+  if (!href.startsWith(DELETE_PROJECT_LINK_PREFIX)) return null;
+  const q = new URLSearchParams(href.slice(DELETE_PROJECT_LINK_PREFIX.length));
+  const id = (q.get('id') || '').trim();
+  const name = q.get('name') || '';
+  return id && name.trim() ? { id, name } : null;
+}
+
+/** The card for a project link: {@link CreateProjectCard} or {@link DeleteProjectCard}. */
+export function ProjectLinkCard({ href }: { href: string }) {
+  return href.startsWith(DELETE_PROJECT_LINK_PREFIX) ? <DeleteProjectCard href={href} /> : <CreateProjectCard href={href} />;
+}
+
+type DeleteState = { phase: 'idle' } | { phase: 'confirm' } | { phase: 'busy' } | { phase: 'done' } | { phase: 'error'; message: string };
+
+export function DeleteProjectCard({ href }: { href: string }) {
+  const spec = parseDeleteProjectLink(href);
+  const [state, setState] = useState<DeleteState>({ phase: 'idle' });
+  if (!spec) return null;
+  const remove = async () => {
+    setState({ phase: 'busy' });
+    const r = await deleteProject(spec.id, spec.name);
+    if (r.ok) {
+      setState({ phase: 'done' });
+      void refreshProjectsList();
+    } else {
+      setState({
+        phase: 'error',
+        message: r.kind === 'error' ? r.message : r.kind === 'not_found' ? 'That project no longer exists.' : "Couldn't delete the project; try again.",
+      });
+    }
+  };
+  const open = state.phase === 'confirm' || state.phase === 'busy';
+  return (
+    <span style={cardStyle} data-testid="delete-project-card">
+      <span style={iconStyle} aria-hidden="true"><FolderIcon size={16} /></span>
+      <span style={bodyStyle}>
+        <span style={nameStyle}>{spec.name}</span>
+        <span style={metaStyle}>
+          {state.phase === 'done' ? 'Project deleted' : 'Delete project · removes every file in it, for every member'}
+        </span>
+        {state.phase === 'error' && <span role="alert" style={errorStyle}>{state.message}</span>}
+      </span>
+      {state.phase !== 'done' && (
+        <button type="button" style={dangerStyle} disabled={open} onClick={() => setState({ phase: 'confirm' })}
+          data-testid="delete-project-button">Delete…</button>
+      )}
+      <ConfirmDialog
+        open={open}
+        title="Delete project"
+        message={`Delete "${spec.name}"? This cannot be undone.`}
+        confirmLabel="Delete project"
+        requiredPhrase={spec.name}
+        loading={state.phase === 'busy'}
+        onConfirm={() => void remove()}
+        onCancel={() => setState({ phase: 'idle' })}
+      />
+    </span>
+  );
+}
 
 export function parseProjectLink(href: string): { name: string; description?: string; indexing: boolean } | null {
   if (!href.startsWith(PROJECT_LINK_PREFIX)) return null;
@@ -79,3 +152,4 @@ const btnStyle: React.CSSProperties = {
   background: theme.colors.surface, color: theme.colors.textPrimary, font: 'inherit', fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer',
 };
 const primaryStyle: React.CSSProperties = { ...btnStyle, border: 'none', background: theme.colors.primary, color: theme.colors.onPrimary };
+const dangerStyle: React.CSSProperties = { ...btnStyle, border: `1px solid ${theme.colors.error}`, color: theme.colors.error };

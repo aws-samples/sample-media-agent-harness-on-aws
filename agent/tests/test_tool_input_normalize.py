@@ -178,11 +178,7 @@ def test_real_tool_rejects_string_but_wrapper_coerces_past_model_type():
     """End-to-end on the installed strands version, offline (validation happens
     before any sandbox call): the raw JSON-string input trips the model_type
     validation error; wrapping coerces it to a dict so that error is gone."""
-    try:
-        from strands_tools.code_interpreter import AgentCoreCodeInterpreter
-    except Exception:
-        import pytest
-        pytest.skip("strands_tools code_interpreter unavailable")
+    from agentcore_code_interpreter import AgentCoreCodeInterpreter
     import os
     ci = AgentCoreCodeInterpreter(region=os.environ.get("AWS_REGION", "us-west-2"))
     raw = ci.code_interpreter

@@ -197,10 +197,10 @@ def test_http_request_flag_off_and_presign_failure_fail_open(s3, monkeypatch):
     assert tin.presign_artifact_url_in_http_request(use) is use
 
 
-def test_wrap_http_request_wraps_the_real_module_and_rewrites_on_stream(s3, monkeypatch):
+def test_wrap_http_request_wraps_the_real_tool_and_rewrites_on_stream(s3, monkeypatch):
     import tool_input_normalize as tin
     from security import url_guard
-    from strands_tools import http_request
+    from tools.http_request import http_request
 
     # The presigned S3 URL is then vetted by the SSRF guard; resolve it without network.
     monkeypatch.setattr(url_guard, "_resolver", lambda host, port: ["52.92.0.1"])

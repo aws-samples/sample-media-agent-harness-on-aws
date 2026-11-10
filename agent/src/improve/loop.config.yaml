@@ -12,7 +12,7 @@ observe:
   memory_id: mediaworks_harness_conversation_memory-hvhTmA58za
 
 judge:
-  model: global.anthropic.claude-sonnet-5
+  model: global.anthropic.claude-sonnet-5-5
   goal_source: full_conversation          # only stable source on multi-turn sessions (Finding 1)
   input_set: [goal, response, trajectory, plan]   # richest/most accurate (Finding 2)
   pass_threshold: 0.7                      # stable boundary; 0.9 over-sensitive (Finding 4)

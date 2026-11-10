@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SKILL = Path(__file__).parents[1] / "skills" / "content_moderation" / "SKILL.md"
+SKILL = Path(__file__).parents[1] / "skills" / "content-moderation" / "SKILL.md"
 TEXT = SKILL.read_text(encoding="utf-8")
 FLAT = " ".join(TEXT.split())
 

@@ -29,7 +29,12 @@ from strands import Agent, AgentSkills, Skill, tool
 from strands.models import BedrockModel
 import runtime_config_bootstrap  # noqa: F401,E402  — hydrate env before first-party imports (V2 1536B cap)
 from model.factory import build_model
-from strands_tools import file_read, http_request, current_time, load_tool, shell
+from model.defaults import model_for
+from model import guardrail as _model_guardrail
+# Host-exec tools (shell, file_read, load_tool, ...) are NEVER bound: they ran with the runtime role
+# (tests/test_no_host_exec_tools.py).
+from tools.current_time import current_time
+from tools.http_request import http_request
 from tools.result_files import read_result_files
 from tools.crop_video import crop_video
 from tools.media_quick import clip_video, extract_frames
@@ -106,7 +111,7 @@ OWNER_REDACT_SECRETS = os.environ.get("OWNER_REDACT_SECRETS", "")
 EXTERNAL_OUTPUT_REDACTION = os.environ.get(
     "EXTERNAL_OUTPUT_REDACTION", "off"
 ).strip().lower() in {"on", "true", "1"}
-DEFAULT_MODEL_ID = os.environ.get("DEFAULT_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
+DEFAULT_MODEL_ID = model_for("task")  # agent/src/model/models.json; no env override
 # Output token ceiling for a plan-chained task node (_execute_plan_node).
 # Generic to any node type — not specific to translation or media — a
 # node whose task legitimately produces a lot of output (long summaries,
@@ -521,7 +526,7 @@ else:
 # --- Code interpreter (optional, cached) ---
 _code_interpreter_tool = None
 try:
-    from strands_tools.code_interpreter import AgentCoreCodeInterpreter
+    from agentcore_code_interpreter import AgentCoreCodeInterpreter
     _ci_id = os.environ.get("CODE_INTERPRETER_ID", "")
     _ci = AgentCoreCodeInterpreter(region=REGION, identifier=_ci_id) if _ci_id else AgentCoreCodeInterpreter(region=REGION)
     # Coerce a model-stringified `code_interpreter_input` back to a dict before the
@@ -815,7 +820,6 @@ def artifact(operation: str, key: str = "", data_b64: str = "", content_type: st
 
 # --- Built-in tools (instant, no network) ---
 _BUILTINS: dict = {
-    "file_read": file_read,
     "http_request": http_request,
     # One concurrent call instead of one round-trip per file.
     "read_result_files": read_result_files,
@@ -824,8 +828,6 @@ _BUILTINS: dict = {
     "extract_frames": extract_frames,
     "clip_video": clip_video, "show_media_gallery": show_media_gallery,
     "current_time": current_time,
-    "load_tool": load_tool,
-    "shell": shell,
     "artifact": artifact,
 }
 if _code_interpreter_tool:
@@ -2923,6 +2925,12 @@ async def invoke(payload, context):
     # (dispatch_tool). A plan node, or any payload without it, never searches (fail closed).
     import web_search as _web_search
     _web_search.set_turn_allowed(payload.get("web_search") is True if isinstance(payload, dict) else False)
+    # The platform's Bedrock guardrail (model/guardrail.py), for an external custom-agent call only: there a PERSON wrote
+    # the prompt. A dispatch or plan node from a chat carries the orchestrator's instructions, which the prompt-attack
+    # filter flags, and the person's words were already checked at the orchestrator. Render imports this module but
+    # never runs invoke().
+    _external = isinstance(payload, dict) and isinstance(payload.get("principal"), dict)
+    _model_guardrail.bind(await asyncio.to_thread(_model_guardrail.platform_guardrail) if _external else None)
 
     # --- Pattern D: Plan Node single-action execution ---
     # Dispatched by the Plan Chainer Lambda for each ready node.
@@ -3413,6 +3421,7 @@ async def invoke(payload, context):
         )
         _stream_text = not (_will_write_s3 or _needs_whole_text_redaction)
 
+        _model_guardrail.bind_human_text(prompt)  # an external caller's words: the only input the guardrail checks
         stream = task_agent.stream_async(prompt)
         # Active channel so hook actions (render/notify) firing in Strands hook
         # callbacks can surface events into this SSE stream. Drained each event.

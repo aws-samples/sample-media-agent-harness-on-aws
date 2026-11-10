@@ -608,6 +608,19 @@ export function parseSessionProjectFixed(status: number, body: unknown): string 
   return typeof e.projectId === 'string' ? e.projectId : '';
 }
 
+export const SESSION_PROJECT_GONE_CODE = 'session_project_gone';
+
+/** `409 session_project_gone`: this chat's own project is gone, so it cannot continue. The Personal project to move to. */
+export function parseSessionProjectGone(status: number, body: unknown): { id: string; name: string } | null {
+  if (status !== 409) return null;
+  const err = (body as { error?: unknown } | null)?.error;
+  if (!err || typeof err !== 'object') return null;
+  const e = err as { code?: unknown; personalProject?: { id?: unknown; name?: unknown } };
+  if (e.code !== SESSION_PROJECT_GONE_CODE) return null;
+  const p = e.personalProject;
+  return p && typeof p.id === 'string' && p.id ? { id: p.id, name: typeof p.name === 'string' ? p.name : 'Personal' } : null;
+}
+
 // ------------------------------------------------------------------------------------------ asset routes
 
 /**

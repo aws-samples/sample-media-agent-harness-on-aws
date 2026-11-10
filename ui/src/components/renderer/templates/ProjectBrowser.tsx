@@ -8,7 +8,7 @@
  * The manifest carries the project id, its name and the starting filter — never asset rows or URLs: the grid lists
  * the assets as the signed-in user, so what shows is always current and access-checked.
  */
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import type { RendererProps } from '../types';
 import { theme } from '../../../styles/tokens';
 import ProjectAssetsSection, { type AssetsInitialFilter } from '../../projects/ProjectAssetsSection';
@@ -22,14 +22,23 @@ export interface ProjectBrowserData {
   filter?: AssetsInitialFilter;
 }
 
-const noop = () => {};
-
 export default function ProjectBrowser({ data }: RendererProps<ProjectBrowserData>) {
   const projectId = typeof data?.project_id === 'string' ? data.project_id : '';
   const name = typeof data?.project_name === 'string' && data.project_name ? data.project_name : 'Project';
   const filter = data?.filter && typeof data.filter === 'object' ? data.filter : undefined;
+  // The project was deleted (or the user lost access): the grid's reads answer 404. Say so once and unmount the grid,
+  // which also stops its status polling (it used to ignore the 404 and poll forever).
+  const [gone, setGone] = useState(false);
+  const onNotFound = useCallback(() => setGone(true), []);
   if (!projectId) {
     return <p style={emptyStyle} data-testid="project-browser-empty">No project to browse.</p>;
+  }
+  if (gone) {
+    return (
+      <p style={emptyStyle} data-testid="project-browser-gone">
+        "{name}" no longer exists, or you no longer have access to it.
+      </p>
+    );
   }
   return (
     <div style={wrapStyle} data-testid="project-browser">
@@ -46,7 +55,7 @@ export default function ProjectBrowser({ data }: RendererProps<ProjectBrowserDat
         <ProjectAssetsSection
           project={{ id: projectId, name, personal: false }}
           role="member"
-          onNotFound={noop}
+          onNotFound={onNotFound}
           sessionId={getActiveSessionId() || null}
           browseOnly
           initialFilter={filter}

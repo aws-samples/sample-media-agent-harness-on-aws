@@ -10,6 +10,7 @@ import GeneralSettings from '../components/settings/GeneralSettings';
 import ModelSettings from '../components/settings/ModelSettings';
 import GatewayListView from './GatewayListView';
 import UsersPanel from '../components/settings/UsersPanel';
+import SafetySettings from '../components/settings/SafetySettings';
 import UserEditor from '../components/settings/UserEditor';
 import CenterEditor from '../components/CenterEditor';
 import { ImproveCenter } from '../components/improve/ImproveCenter';
@@ -21,7 +22,7 @@ import type { DraftCategory } from '../lab-api';
 // Agents is deliberately absent: it duplicated the workspace's own Agents view
 // (main nav), which now owns the whole surface including delete, search, and the
 // built-in agents browser. See `CustomAgentCenterList` in WorkspaceView.
-type SettingsTab = 'general' | 'model' | CapTab | 'improve' | 'gateways' | 'users';
+type SettingsTab = 'general' | 'model' | CapTab | 'improve' | 'gateways' | 'users' | 'safety';
 
 const CAP_TABS: CapTab[] = ['tools', 'hooks'];
 
@@ -48,6 +49,8 @@ export default function SettingsView({ onBack, initialTab }: SettingsViewProps) 
     // who can administer the harness. Only gateway-admins see it (isGatewayAdmin);
     // the proxy independently enforces requireAdmin (403) server-side.
     ...(isGatewayAdmin ? [{ key: 'users' as SettingsTab, label: 'Users' }] : []),
+    // Safety (admin-only): the platform's Bedrock guardrail, for everyone. The proxy enforces requireAdmin too.
+    ...(isGatewayAdmin ? [{ key: 'safety' as SettingsTab, label: 'Safety' }] : []),
   ];
   const capabilityTabs: { key: SettingsTab; label: string }[] = [
     { key: 'tools', label: 'Tools' },
@@ -60,7 +63,7 @@ export default function SettingsView({ onBack, initialTab }: SettingsViewProps) 
   ];
 
   const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
-    const valid: SettingsTab[] = ['general', 'model', 'tools', 'hooks', 'improve', 'gateways', 'users'];
+    const valid: SettingsTab[] = ['general', 'model', 'tools', 'hooks', 'improve', 'gateways', 'users', 'safety'];
     // Legacy entry points. 'capabilities' predates the per-type tabs;
     // 'agents' and 'skills' both moved to the workspace main nav, and this modal
     // cannot navigate there, so they fall back to Tools rather than rendering a
@@ -128,6 +131,7 @@ export default function SettingsView({ onBack, initialTab }: SettingsViewProps) 
               {activeTab === 'general' && <div style={{ maxWidth: 720 }}><GeneralSettings /></div>}
               {activeTab === 'model' && <div style={{ maxWidth: 720 }}><ModelSettings /></div>}
               {activeTab === 'gateways' && <GatewayListView embedded />}
+              {activeTab === 'safety' && <div style={{ maxWidth: 720 }}><SafetySettings /></div>}
               {activeTab === 'users' && (
                 creatingUser
                   ? <UserEditor

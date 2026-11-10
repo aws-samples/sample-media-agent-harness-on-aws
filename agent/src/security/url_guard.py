@@ -3,7 +3,7 @@
 Every server-side fetch of a URL that a model or a user chose goes through here:
 ``read_result_files``, ``view_images``, ``media_probe``, ``caption_parser``, peak
 extraction, the Render Agent's sidecar / container reads, ``artifact_import``, and the
-builtin ``http_request`` tool (whose session gets :class:`GuardedAdapter` mounted).
+builtin ``http_request`` tool (``tools/http_request.py``, which sends every request through :func:`fetch`).
 User MCP endpoint registration uses :func:`validate_url` (the gateway connects, not us).
 
 What it enforces
@@ -267,27 +267,43 @@ def mount(session: requests.Session, *, allow_http: bool = False,
     return session
 
 
-def session(*, allow_http: bool = False, max_redirects: int = MAX_REDIRECTS) -> requests.Session:
+def session(*, allow_http: bool = False, max_redirects: int = MAX_REDIRECTS,
+            **adapter_kwargs) -> requests.Session:
     """A fresh ``requests.Session`` with the guard mounted."""
-    return mount(requests.Session(), allow_http=allow_http, max_redirects=max_redirects)
+    return mount(requests.Session(), allow_http=allow_http, max_redirects=max_redirects, **adapter_kwargs)
 
 
-def get(url: str, *, timeout: float = DEFAULT_TIMEOUT_S, headers: Optional[Mapping[str, str]] = None,
-        stream: bool = False, allow_redirects: bool = True, max_redirects: int = MAX_REDIRECTS,
-        allow_http: bool = False) -> requests.Response:
-    """Guarded ``requests.get``. Raises :class:`BlockedURLError` (a ``ValueError``) when refused."""
+def request(method: str, url: str, *, timeout: float = DEFAULT_TIMEOUT_S,
+            headers: Optional[Mapping[str, str]] = None, data=None, stream: bool = False,
+            allow_redirects: bool = True, max_redirects: int = MAX_REDIRECTS,
+            allow_http: bool = False, max_retries=None) -> requests.Response:
+    """Guarded ``requests.request``. Raises :class:`BlockedURLError` (a ``ValueError``) when refused.
+
+    ``max_retries`` (an int or a urllib3 ``Retry``) goes to the adapter; a retry re-sends on the
+    already-pinned connection pool, so it never resolves the host again.
+    """
     # No separate pre-check: GuardedAdapter.send vets each hop exactly once and pins THAT
     # answer, so a second lookup can never disagree with the address actually connected to.
-    s = session(allow_http=allow_http, max_redirects=max_redirects)
+    adapter_kwargs = {} if max_retries is None else {"max_retries": max_retries}
+    s = session(allow_http=allow_http, max_redirects=max_redirects, **adapter_kwargs)
     try:
-        resp = s.get(url, timeout=timeout, headers=dict(headers or {}), stream=stream,
-                     allow_redirects=allow_redirects)
+        resp = s.request(method, url, timeout=timeout, headers=dict(headers or {}), data=data,
+                         stream=stream, allow_redirects=allow_redirects)
     except BaseException:
         s.close()
         raise
     if not stream:
         s.close()  # a streamed body still needs its pooled connection; GC closes that session
     return resp
+
+
+def get(url: str, *, timeout: float = DEFAULT_TIMEOUT_S, headers: Optional[Mapping[str, str]] = None,
+        stream: bool = False, allow_redirects: bool = True, max_redirects: int = MAX_REDIRECTS,
+        allow_http: bool = False, max_retries=None) -> requests.Response:
+    """Guarded ``requests.get``. Raises :class:`BlockedURLError` (a ``ValueError``) when refused."""
+    return request("GET", url, timeout=timeout, headers=headers, stream=stream,
+                   allow_redirects=allow_redirects, max_redirects=max_redirects, allow_http=allow_http,
+                   max_retries=max_retries)
 
 
 class ResponseTooLarge(ValueError):
@@ -301,6 +317,8 @@ class FetchResult:
     body: bytes
     url: str
     truncated: bool = False
+    #: Status codes of the redirect hops followed before this response, in order.
+    history: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -313,16 +331,25 @@ class FetchResult:
 def fetch(url: str, *, max_bytes: int, timeout: float = DEFAULT_TIMEOUT_S,
           deadline_s: Optional[float] = None, headers: Optional[Mapping[str, str]] = None,
           truncate: bool = False, raise_for_status: bool = True,
-          max_redirects: int = MAX_REDIRECTS, allow_http: bool = False) -> FetchResult:
-    """GET ``url`` through the guard, reading at most ``max_bytes``.
+          max_redirects: int = MAX_REDIRECTS, allow_http: bool = False,
+          method: str = "GET", data=None, allow_redirects: bool = True,
+          max_retries=None) -> FetchResult:
+    """Send ``method`` (default GET) to ``url`` through the guard, reading at most ``max_bytes``.
 
     ``truncate=True`` returns the first ``max_bytes`` with ``truncated=True``; otherwise an
     over-cap body (or an over-cap ``Content-Length``) raises :class:`ResponseTooLarge`.
-    ``deadline_s`` bounds the whole transfer (default: 3x ``timeout``).
+    ``deadline_s`` bounds the whole transfer (default: 3x ``timeout``). ``data`` is the request
+    body; ``allow_redirects=False`` returns a 3xx as is (every hop that IS followed is vetted).
     """
     deadline = time.monotonic() + (deadline_s if deadline_s is not None else 3 * timeout)
-    resp = get(url, timeout=timeout, headers=headers, stream=True, max_redirects=max_redirects,
-               allow_http=allow_http)
+    kwargs = {"timeout": timeout, "headers": headers, "stream": True, "allow_redirects": allow_redirects,
+              "max_redirects": max_redirects, "allow_http": allow_http}
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
+    if method.upper() == "GET" and data is None:
+        resp = get(url, **kwargs)  # a plain GET keeps going through get(), the seam callers' tests fake
+    else:
+        resp = request(method, url, data=data, **kwargs)
     try:
         if raise_for_status:
             resp.raise_for_status()
@@ -346,12 +373,14 @@ def fetch(url: str, *, max_bytes: int, timeout: float = DEFAULT_TIMEOUT_S,
                 break
         body = b"".join(chunks)[:max_bytes]
         return FetchResult(status=resp.status_code, headers=dict(resp.headers), body=body,
-                           url=resp.url, truncated=truncated)
+                           url=resp.url, truncated=truncated,
+                           history=tuple(r.status_code for r in getattr(resp, "history", None) or ()))
     finally:
         resp.close()
 
 
 __all__: Iterable[str] = (
     "BlockedURLError", "FetchResult", "GuardedAdapter", "MAX_REDIRECTS", "ResponseTooLarge",
-    "Target", "fetch", "get", "is_blocked_ip", "mount", "session", "set_resolver", "validate_url",
+    "Target", "fetch", "get", "is_blocked_ip", "mount", "request", "session", "set_resolver",
+    "validate_url",
 )

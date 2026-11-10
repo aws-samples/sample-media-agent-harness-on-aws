@@ -28,9 +28,9 @@ export const ChatAssetContext = createContext<ChatAssetContextValue | null>(null
 
 /** react-markdown drops URLs with unknown schemes; keep ours, defer everything else to its default. */
 export function keepAssetUrls(url: string, fallback: (u: string) => string): string {
-  // `asset:` (an inline project image) and `project:new?…` (a proposed project's card) are ours; the default
-  // transform would blank both as unsafe schemes.
-  return url.startsWith(ASSET_SCHEME) || url.startsWith('project:new?') ? url : fallback(url);
+  // `asset:` (an inline project image), `project:new?…` and `project:delete?…` (project cards) are ours; the
+  // default transform would blank them as unsafe schemes.
+  return url.startsWith(ASSET_SCHEME) || url.startsWith('project:new?') || url.startsWith('project:delete?') ? url : fallback(url);
 }
 
 type Phase = { state: 'loading' } | { state: 'ready'; url: string } | { state: 'unavailable' };

@@ -40,6 +40,7 @@
     "test:job-latency-synth": "ts-node test/job-latency.synth.test.ts",
     "test:app-version-synth": "ts-node test/app-version.synth.test.ts",
     "test:security-synth": "ts-node test/security-origin-lock.synth.test.ts",
+    "test:guardrail-synth": "ts-node test/guardrail.synth.test.ts",
     "test:lineage-edges-synth": "ts-node test/lineage-edges.synth.test.ts"
   },
   "dependencies": {

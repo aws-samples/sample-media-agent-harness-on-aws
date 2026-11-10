@@ -176,6 +176,13 @@ export interface ExecutionSummary {
    * from api.ts. Present only on a Projects turn that produced citations; absent otherwise.
    */
   citations?: CitationBlock;
+  /**
+   * `switch_project` / `create_project` asked the chat to open a NEW chat in this project when the turn ends, and
+   * send it `prompt` (agent `project_search.turn_actions`). Acted on from the live stream only.
+   */
+  open_project?: { projectId: string; projectName?: string; prompt?: string };
+  /** The platform's Bedrock guardrail this turn ran with, and whether it blocked something. */
+  guardrail?: { name?: string; version?: string; intervened?: boolean };
 }
 
 export type StreamEvent =

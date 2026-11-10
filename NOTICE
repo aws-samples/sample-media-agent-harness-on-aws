@@ -1,2 +1,6 @@
 Media Agent Harness
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+This product includes software derived from Strands Agents Tools
+(https://github.com/strands-agents/tools), Copyright Amazon.com, Inc. or its affiliates,
+licensed under the Apache License, Version 2.0: agent/src/agentcore_code_interpreter.py.

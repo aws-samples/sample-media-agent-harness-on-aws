@@ -1,4 +1,4 @@
-"""The deterministic moderation report builder (skills/content_moderation/scripts/build_report.py).
+"""The deterministic moderation report builder (skills/content-moderation/scripts/build_report.py).
 
 Staging session a2d759c2: three sg5 nodes of ONE plan improvised three JSON schemas (`asset.video_tag` vs
 `asset.tag`, `summary` vs `counts`, three `rating_basis` shapes) and three PDF layouts, none of them the six
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).parents[1] / "skills" / "content_moderation" / "scripts" / "build_report.py"
+SCRIPT = Path(__file__).parents[1] / "skills" / "content-moderation" / "scripts" / "build_report.py"
 
 
 def _mod():

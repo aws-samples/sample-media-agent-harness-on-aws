@@ -94,7 +94,7 @@ def test_detector_catches_the_shipped_regressions(tmp_path, monkeypatch):
 
 def test_the_two_recipes_name_the_instructed_output_prefix():
     pdf = (SKILLS / "pdf" / "SKILL.md").read_text()
-    cm = (SKILLS / "content_moderation" / "SKILL.md").read_text()
+    cm = (SKILLS / "content-moderation" / "SKILL.md").read_text()
     assert "SESSION OUTPUT LOCATION" in pdf and "S3 CONTEXT" in pdf
     assert "artifacts/<job-uuid>" not in cm and "OUTPUT prefix" in cm
 

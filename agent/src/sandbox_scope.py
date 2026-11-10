@@ -104,7 +104,7 @@ def scope_tool_use(tool_use: Any, field: str = "code_interpreter_input") -> Any:
 def release(code_interpreter: Any, scope: str) -> int:
     """Stop every sandbox session this node opened and forget it. Returns how many were stopped.
 
-    Reaches into ``strands_tools``' session bookkeeping (``_sessions`` on the instance, the
+    Reaches into the interpreter's session bookkeeping (``_sessions`` on the instance, the
     module-level ``_session_mapping``) because the tool offers no public "stop by name". Every
     step is best-effort and never raises: a session that cannot be stopped simply ages out at its
     900 s timeout, which is what happened to all of them before.
@@ -125,7 +125,7 @@ def release(code_interpreter: Any, scope: str) -> int:
             except Exception as e:  # noqa: BLE001
                 logger.debug("sandbox_scope: stop %s failed: %s", name, e)
         try:
-            from strands_tools.code_interpreter import agent_core_code_interpreter as _acci  # noqa: PLC0415
+            import agentcore_code_interpreter as _acci  # noqa: PLC0415
 
             mapping = getattr(_acci, "_session_mapping", None)
             if isinstance(mapping, dict):

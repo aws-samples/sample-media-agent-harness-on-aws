@@ -1,6 +1,6 @@
 """Project_Tools: the Main_Agent's handles on the Active_Project's assets (ingestion design Component 17).
 
-Seven ``@tool async def`` functions bound per turn, only on the Main_Agent and only when the turn has an
+``@tool async def`` functions bound per turn, only on the Main_Agent and only when the turn has an
 Active_Project and ``ASSET_SERVICE_FN`` is configured:
 
 | Tool | Asset_Service command |
@@ -12,6 +12,19 @@ Active_Project and ``ASSET_SERVICE_FN`` is configured:
 | ``readd_asset(asset_id)`` | ``readd`` |
 | ``show_asset(asset_id)`` | ``resolve_assets`` (then an ``asset-player`` manifest) |
 | ``browse_project(query?, folder?, kind?)`` | none (a ``project-browser`` manifest) |
+
+The project-level tools work on the user's project LIST, not the Active_Project, through the proxy's own
+``/projects`` API (:mod:`.registry_client`, the same routes and rules as the browser):
+
+| Tool | ``/projects`` call | Then |
+|---|---|---|
+| ``list_projects()`` | ``GET /projects`` | ids stay out of the reply; ``current`` marks this chat's project |
+| ``switch_project(name, prompt?)`` | ``GET /projects`` | ``open_project`` on the turn's summary (:mod:`.turn_actions`) |
+| ``create_project(name, …, prompt?)`` | ``POST /projects`` | ``open_project``, as above |
+| ``delete_project(name)`` | ``GET /projects`` | a ``project:delete`` card; only the user's typed-name confirmation deletes |
+
+``open_project`` makes the chat open a NEW chat in that project and send it ``prompt``: a chat's project is fixed
+by its first turn, so nothing of this chat moves.
 
 ``project_status(name=...)`` returns name-scoped facts only (:func:`_name_lookup`): the Asset_Service also
 replies with project-wide counts, failures and the collection state, which drowned a "how many X files"
@@ -51,12 +64,15 @@ from urllib.parse import quote
 from strands import tool
 
 from .assets import ASSET_SERVICE_FN_ENV, CALLER, _default_token_source, _request_ids
+from . import turn_actions
 from .compact import OPENABLE_KINDS
+from .registry_client import RegistryClient
 
 logger = logging.getLogger(__name__)
 
 TOOL_NAMES = ("project_status", "register_s3_location", "retry_asset", "remove_asset", "readd_asset",
-              "show_asset", "use_asset", "browse_project", "organize_project", "create_project")
+              "show_asset", "use_asset", "browse_project", "organize_project", "list_projects", "switch_project",
+              "create_project", "delete_project")
 
 # Above this many items (or for any folder rename) organize_project asks for the user's go-ahead first: a move
 # changes where the whole team finds the files.
@@ -277,8 +293,37 @@ def _forget(session_id: str, code: str) -> None:
         (_PENDING.get(session_id) or {}).pop(code, None)
 
 
+def _project_row(p: dict, current_id: str) -> dict:
+    row = {"name": p.get("name"), "role": p.get("role"), "personal": bool(p.get("personal"))}
+    for k in ("indexing", "activeAssetCount"):
+        if k in p:
+            row[k] = p[k]
+    if p.get("projectId") == current_id:
+        row["current"] = True
+    return row
+
+
+def _match_project(rows: list, name: str) -> dict:
+    """``{project}`` for the one project named ``name`` (case- and space-insensitive), else ``{error}``."""
+    want = " ".join(str(name or "").split()).casefold()
+    if not want:
+        return {"error": "invalid_name", "message": "Say which project (by name)."}
+    exact = [p for p in rows if " ".join(str(p.get("name") or "").split()).casefold() == want]
+    if len(exact) == 1:
+        return {"project": exact[0]}
+    near = [str(p.get("name")) for p in rows if want in str(p.get("name") or "").casefold()]
+    if len(exact) > 1:
+        return {"error": "ambiguous_name", "message": "More than one project has that name; ask the user which.",
+                "candidates": [str(p.get("name")) for p in exact]}
+    return {"error": "project_not_found",
+            "message": "No project of yours has that name" + ("; did they mean one of these?" if near else
+                                                              "; list_projects shows the ones they can use."),
+            **({"candidates": near[:10]} if near else {})}
+
+
 def make_project_tools(project_id: str, *, function_name: Optional[str] = None, client: Any = None,
-                       token_source: Optional[Callable[[], str]] = None, project_name: str = "") -> list:
+                       token_source: Optional[Callable[[], str]] = None, project_name: str = "",
+                       registry: Any = None) -> list:
     """The project tools for ``project_id`` (the turn's Active_Project), or ``[]`` when no Asset_Service is set."""
     fn = function_name if function_name is not None else os.environ.get(ASSET_SERVICE_FN_ENV, "")
     if not fn:
@@ -609,29 +654,119 @@ def make_project_tools(project_id: str, *, function_name: Optional[str] = None, 
             out["bookmarked"] = {"count": saved, "failed": failed}
         return out
 
+    reg = registry if registry is not None else RegistryClient()
+
+    async def _projects() -> tuple[list, Optional[dict]]:
+        out = await asyncio.to_thread(reg.list)
+        if "error" in out:
+            return [], out
+        return out["projects"], None
+
+    def _open_in(pid: str, pname: str, prompt: str) -> dict:
+        session_id, _turn = _request_ids()
+        if not turn_actions.request_open_project(session_id, pid, pname, prompt):
+            return {"error": "already_switching",
+                    "message": "This turn already opens a chat in another project; finish the turn there."}
+        return {"status": "opening_new_chat", "project": {"projectId": pid, "name": pname},
+                "message": (f"A new chat in \"{pname}\" opens when this reply ends"
+                            + (" and sends it the prompt" if prompt.strip() else "")
+                            + ". Say so in one short sentence and stop: the rest happens in that chat.")}
+
     @tool
-    async def create_project(name: str, description: str = "", indexing: bool = True) -> dict:
-        """Offer the user a NEW project. You cannot create one yourself: this returns a link that shows the user a
-        "Create project" button in your reply; the project is created when THEY click it (with their own sign-in,
-        so the usual name and ownership rules apply). Put the returned `markdown` in your reply exactly as given,
-        on its own line, and say nothing implying the project already exists.
+    async def list_projects() -> dict:
+        """List the projects the user can work in: their Personal project, the ones they own, and the ones they
+        were invited to. Each has `name`, `role` (owner | member), `personal`, `indexing` (files analyzed for
+        search) and `activeAssetCount` when known; `current` marks the project THIS chat is in.
+        """
+        rows, err = await _projects()
+        if err:
+            return err
+        return {"projects": [_project_row(p, project_id) for p in rows], "current": project_name}
+
+    @tool
+    async def switch_project(name: str, prompt: str = "") -> dict:
+        """Move the user to another project: when this reply ends the chat opens a NEW chat in that project and,
+        when `prompt` is given, sends it as that chat's first message. This chat, its files and its history stay
+        where they are; nothing is moved or copied. A chat's project is fixed by its first message, which is why
+        switching always means a new chat.
+
+        Use it when the user asks to go to, open, or work in another project, or when a skill says to switch.
+        Pass the user's request (or the skill's next step) as `prompt` so the work carries on there. Returns
+        `already_here` when this chat is already in that project: then simply continue in this chat.
+        After `opening_new_chat`, say so in one short sentence and stop.
 
         Args:
-            name: The project name the user asked for (keep their spelling).
+            name: The project's name (case-insensitive). Use list_projects when unsure.
+            prompt: Optional first message for the new chat (up to 2000 characters).
+        """
+        rows, err = await _projects()
+        if err:
+            return err
+        match = _match_project(rows, name)
+        if "error" in match:
+            return match
+        p = match["project"]
+        if p.get("projectId") == project_id:
+            return {"status": "already_here", "project": {"name": p.get("name")},
+                    "message": "This chat is already in that project; continue here."}
+        return _open_in(str(p.get("projectId")), str(p.get("name") or name), prompt)
+
+    @tool
+    async def create_project(name: str, description: str = "", indexing: bool = True, prompt: str = "") -> dict:
+        """Create a NEW project owned by the user, then move them into it: when this reply ends the chat opens a
+        new chat in that project and, when `prompt` is given, sends it as that chat's first message. Nothing in
+        this chat is moved. Create one only when the user asks for it (or a skill they started says to); never to
+        work around a refused or missing project. Fails with `name_taken` when they already have one of that name.
+
+        Args:
+            name: The project name the user asked for (keep their spelling; up to 100 characters).
             description: Optional one-line description.
             indexing: Analyze files for search as they are added (default true; false = store only).
+            prompt: Optional first message for the new chat (up to 2000 characters).
         """
         clean = " ".join(str(name or "").split())[:100]
         if not clean:
             return {"error": "invalid_name", "message": "Ask the user what to call the project."}
-        from urllib.parse import quote
-        query = f"name={quote(clean)}" + (f"&description={quote(description.strip()[:300])}" if description.strip() else "") \
-            + ("" if indexing else "&indexing=0")
+        out = await asyncio.to_thread(reg.create, clean, description=" ".join(str(description or "").split())[:300],
+                                      indexing=bool(indexing))
+        if "error" in out:
+            return out
+        made = out.get("project") if isinstance(out.get("project"), dict) else {}
+        pid = str(made.get("projectId") or "")
+        if not pid:
+            return {"error": "unavailable", "message": "The project service gave an unexpected reply; try again."}
+        opened = _open_in(pid, str(made.get("name") or clean), prompt)
+        return {**opened, "created": True}
+
+    @tool
+    async def delete_project(name: str) -> dict:
+        """Offer to DELETE one of the user's projects. You cannot delete it yourself: this returns a card for your
+        reply, and the project is deleted only if the user types its exact name there and confirms. Deleting removes
+        every file in it for every member and cannot be undone. Only the owner can delete; the Personal project
+        cannot be deleted. Use it only when the user asks to delete a project. Put the returned `markdown` in your
+        reply exactly as given, on its own line, and do not say the project is deleted.
+
+        Args:
+            name: The project's name (case-insensitive). Use list_projects when unsure.
+        """
+        rows, err = await _projects()
+        if err:
+            return err
+        match = _match_project(rows, name)
+        if "error" in match:
+            return match
+        p = match["project"]
+        if p.get("personal"):
+            return {"error": "personal_project", "message": "The Personal project cannot be deleted."}
+        if p.get("role") != "owner":
+            return {"error": "not_owner", "message": "Only the project's owner can delete it; a member can leave it."}
+        pid, pname = str(p.get("projectId")), str(p.get("name") or "")
         return {
-            "status": "awaiting_user_click",
-            "markdown": f"[Create project “{clean}”](project:new?{query})",
-            "message": "Include `markdown` in your reply verbatim. The project exists only after the user clicks it.",
+            "status": "awaiting_user_confirmation",
+            "markdown": f"[Delete project “{pname}”](project:delete?id={quote(pid)}&name={quote(pname)})",
+            "message": "Include `markdown` in your reply verbatim. Nothing is deleted unless the user confirms there.",
         }
 
     return [project_status, register_s3_location, retry_asset, remove_asset, readd_asset, show_asset,
-            use_asset, browse_project, organize_project, create_project]
+            use_asset, browse_project, organize_project, list_projects, switch_project, create_project,
+            delete_project]

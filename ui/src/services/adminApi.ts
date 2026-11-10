@@ -82,3 +82,44 @@ export async function deleteUser(username: string): Promise<void> {
   });
   if (!res.ok) throw new AdminApiError(res.status);
 }
+
+// ---- The platform's Bedrock guardrail (Settings -> Safety; ui/server/guardrailSettings.ts) ----
+
+export interface GuardrailRef { id: string; version: string; name: string }
+export interface GuardrailOption { id: string; name: string; description: string; versions: string[] }
+export interface GuardrailSettingsView {
+  guardrails: GuardrailOption[];
+  /** The admin's pick, `none`, or null (never chosen: the default applies). */
+  selected: GuardrailRef | 'none' | null;
+  default: GuardrailRef | null;
+  /** What every agent turn runs with. */
+  effective: GuardrailRef | null;
+}
+
+/** GET /admin/guardrails */
+export async function getGuardrails(): Promise<GuardrailSettingsView> {
+  const res = await authFetch('/admin/guardrails', { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new AdminApiError(res.status);
+  const b = await res.json();
+  return {
+    guardrails: Array.isArray(b?.guardrails) ? b.guardrails : [],
+    selected: b?.selected ?? null,
+    default: b?.default ?? null,
+    effective: b?.effective ?? null,
+  };
+}
+
+/** PUT /admin/guardrails — a pinned version, `'default'` (follow the platform default), or `null` (off). */
+export async function setGuardrail(pick: { id: string; version: string } | 'default' | null): Promise<GuardrailRef | null> {
+  const res = await authFetch('/admin/guardrails', {
+    method: 'PUT',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify(pick === 'default' ? { useDefault: true } : pick ?? { none: true }),
+  });
+  if (!res.ok) {
+    let message: string | undefined;
+    try { message = (await res.json())?.error?.message; } catch { /* not JSON */ }
+    throw new AdminApiError(res.status, message);
+  }
+  return (await res.json())?.effective ?? null;
+}

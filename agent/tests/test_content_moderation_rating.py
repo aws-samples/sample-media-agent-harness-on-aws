@@ -22,13 +22,13 @@ import textwrap
 SKILL = (
     pathlib.Path(__file__).resolve().parents[1]
     / "skills"
-    / "content_moderation"
+    / "content-moderation"
     / "SKILL.md"
 )
 
 
 # 2026-10-11 (session a2d759c2): the rating code moved out of SKILL.md into the deterministic report builder,
-# `skills/content_moderation/scripts/build_report.py`, which every sg5 node now RUNS instead of re-typing.
+# `skills/content-moderation/scripts/build_report.py`, which every sg5 node now RUNS instead of re-typing.
 # These cases exercise that builder: same fixtures, same expectations.
 _BUILDER = SKILL.parent / "scripts" / "build_report.py"
 
