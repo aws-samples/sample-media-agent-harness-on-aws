@@ -215,9 +215,11 @@ class TestReasoningEffort:
             assert reasoning_effort() is None
             assert self._arf(build_model(OPUS)) is None
 
-    def test_supported_generations_are_capable(self):
+    def test_supported_generations_are_capable(self, monkeypatch):
         # Verified live via Bedrock Converse (us-west-2, 2026-10): generation >=4.6 or
-        # >=5 across opus/sonnet/haiku accepts output_config.effort.
+        # >=5 across opus/sonnet/haiku accepts output_config.effort. (The 5.5 models also get the
+        # preserved-thinking field, TestThinkingBinding; off here so this checks effort alone.)
+        monkeypatch.setenv("BEDROCK_THINKING_PREFIX_MISMATCH", "off")
         for mid in ("us.anthropic.claude-opus-4-6", "us.anthropic.claude-opus-4-7",
                     "global.anthropic.claude-opus-4-8", "us.anthropic.claude-opus-5",
                     "us.anthropic.claude-opus-5-5", "us.anthropic.claude-sonnet-4-6",
@@ -285,3 +287,54 @@ class TestReasoningEffort:
         assert captured.get("additional_request_fields") == {
             "output_config": {"effort": "low"}}, \
             "fallback dropped the effort field — it would silently restore full effort"
+
+
+class TestThinkingBinding:
+    """Preserved thinking: Opus/Sonnet/Haiku 5.5 reject a replayed thinking block whose prefix changed (enforced by
+    default for AWS accounts created on or after 2026-08-31). build_model sends the block_binding control so a stale
+    block is dropped instead of failing the turn. Shapes verified live on Bedrock Converse (us-east-1, 2026-11-09):
+    Opus 5.5 takes block_binding alone; Sonnet/Haiku 5.5 answer "thinking.type: Field required" without a type."""
+
+    BETA = "thinking-binding-controls-2026-08-01"
+
+    def _arf(self, model):
+        return model.get_config().get("additional_request_fields")
+
+    def test_opus_5_5_gets_drop_block_without_a_thinking_type(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_THINKING_PREFIX_MISMATCH", raising=False)
+        monkeypatch.delenv("BEDROCK_REASONING_EFFORT", raising=False)
+        arf = self._arf(build_model("global.anthropic.claude-opus-5-5"))
+        # no thinking.type: an explicit adaptive type front-loaded reasoning (TestReasoningEffort)
+        assert arf == {"anthropic_beta": [self.BETA],
+                       "thinking": {"block_binding": {"prefix_mismatch_behavior": "drop_block"}}}
+
+    def test_sonnet_and_haiku_5_5_send_the_type_they_require(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_THINKING_PREFIX_MISMATCH", raising=False)
+        for mid in ("global.anthropic.claude-sonnet-5-5", "us.anthropic.claude-haiku-5-5"):
+            thinking = self._arf(build_model(mid, effort="low"))["thinking"]
+            assert thinking == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}, mid
+
+    def test_models_without_the_check_get_nothing(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_THINKING_PREFIX_MISMATCH", raising=False)
+        monkeypatch.delenv("BEDROCK_REASONING_EFFORT", raising=False)
+        for mid in ("global.anthropic.claude-opus-5", "global.anthropic.claude-opus-4-8",
+                    "global.anthropic.claude-sonnet-5", "us.anthropic.claude-haiku-4-5", "us.amazon.nova-pro-v1:0"):
+            assert self._arf(build_model(mid)) is None, mid
+
+    def test_the_mode_comes_from_env_and_off_sends_nothing(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_REASONING_EFFORT", raising=False)
+        monkeypatch.setenv("BEDROCK_THINKING_PREFIX_MISMATCH", "error")
+        arf = self._arf(build_model("global.anthropic.claude-opus-5-5"))
+        assert arf["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "error"}
+        for off in ("off", "none", "bogus"):
+            monkeypatch.setenv("BEDROCK_THINKING_PREFIX_MISMATCH", off)
+            assert self._arf(build_model("global.anthropic.claude-opus-5-5")) is None, off
+
+    def test_it_merges_with_effort_and_caller_fields(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_THINKING_PREFIX_MISMATCH", raising=False)
+        arf = self._arf(build_model("global.anthropic.claude-opus-5-5", effort="low",
+                                    additional_request_fields={"anthropic_beta": ["x"],
+                                                               "thinking": {"type": "adaptive"}}))
+        assert arf["output_config"] == {"effort": "low"}
+        assert arf["anthropic_beta"] == ["x", self.BETA]
+        assert arf["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}

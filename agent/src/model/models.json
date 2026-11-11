@@ -1,6 +1,7 @@
 {
   "_doc": "THE one place the harness's default models are set. Agents read it (agent/src/model/defaults.py); the deploy reads it too (infra/lib/agent-infra-stack.ts: the UI proxy's /models default and BEDROCK_REASONING_EFFORT). A user's pick in Settings -> Model still wins for the orchestrator per request, and sub-agents dispatched in that turn inherit it. Change a model here and nowhere else; agent/tests/test_model_defaults.py fails on a model id hard-coded anywhere else.",
   "reasoning_effort": "low",
+  "thinking_prefix_mismatch": "drop_block",
   "agents": {
     "orchestrator": "global.anthropic.claude-opus-5-5",
     "task": "global.anthropic.claude-sonnet-5-5",

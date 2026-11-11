@@ -477,6 +477,65 @@ def reasoning_request_fields(model_id: str, effort: Optional[str] = None) -> dic
     return {"output_config": {"effort": level}}
 
 
+# ---- Preserved thinking: the history-editing check ------------------------
+# Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 sign each thinking block over the prefix that produced it (the system
+# prompt, the tools, every earlier message) and reject a replayed block whose prefix changed - "Invalid `signature`
+# in `thinking` block. The block is bound to a different conversation". Enforced by default for AWS accounts created
+# on or after 2026-08-31 (every new account, a workshop's included); older accounts are enforced only when a request
+# sets the field below. The harness keeps the prefix stable within a turn (turn_context_injector); this field is the
+# safety net for any other mid-turn edit: "drop_block" drops the stale blocks and the call proceeds, where the
+# default fails the whole turn. Env BEDROCK_THINKING_PREFIX_MISMATCH: drop_block (default) | error (opts an
+# unenforced account INTO enforcement - how the sandbox proves the prefix is stable) | off (send nothing).
+# Shapes VERIFIED on Bedrock Converse (us-east-1, a new account, 2026-11-09): Opus 5.5 takes block_binding alone;
+# Sonnet 5.5 and Haiku 5.5 reject it without thinking.type ("thinking.type: Field required"), so they get
+# "adaptive" - their default when the field is omitted, so it changes nothing else.
+THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_THINKING_BINDING_MODES = ("drop_block", "error")
+_THINKING_BINDING_MODELS: dict[str, Optional[str]] = {   # id substring -> thinking.type to send alongside, or None
+    "claude-opus-5-5": None,
+    "claude-sonnet-5-5": "adaptive",
+    "claude-haiku-5-5": "adaptive",
+}
+
+
+def thinking_binding_mode() -> Optional[str]:
+    """``drop_block`` (default) or ``error`` from env BEDROCK_THINKING_PREFIX_MISMATCH; None for ``off``."""
+    from model.defaults import THINKING_PREFIX_MISMATCH  # noqa: PLC0415 - the deploy sets the env from the same file
+
+    raw = (os.environ.get("BEDROCK_THINKING_PREFIX_MISMATCH") or THINKING_PREFIX_MISMATCH).strip().lower()
+    return raw if raw in _THINKING_BINDING_MODES else None
+
+
+def thinking_binding_request_fields(model_id: str) -> dict[str, Any]:
+    """additionalModelRequestFields that set the preserved-thinking prefix check's behaviour for ``model_id``.
+
+    ``{}`` for a model without the check (or with the mode ``off``): the beta header and field are sent only to the
+    verified models, as an unknown field fails the whole invoke."""
+    mode = thinking_binding_mode()
+    mid = (model_id or "").lower()
+    match = next((fam for fam in _THINKING_BINDING_MODELS if fam in mid), None)
+    if not mode or match is None:
+        return {}
+    thinking: dict[str, Any] = {"block_binding": {"prefix_mismatch_behavior": mode}}
+    if _THINKING_BINDING_MODELS[match]:
+        thinking = {"type": _THINKING_BINDING_MODELS[match], **thinking}
+    return {"anthropic_beta": [THINKING_BINDING_BETA], "thinking": thinking}
+
+
+def _merge_request_fields(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """``base`` updated with ``extra``: ``anthropic_beta`` lists are unioned and ``thinking`` objects merged, so a
+    caller's own beta or thinking setting survives (the caller's ``thinking.type`` wins)."""
+    out = dict(base)
+    for key, value in extra.items():
+        if key == "anthropic_beta":
+            out[key] = list(dict.fromkeys([*(out.get(key) or []), *value]))
+        elif key == "thinking" and isinstance(out.get(key), dict):
+            out[key] = {**value, **out[key], "block_binding": value.get("block_binding", out[key].get("block_binding"))}
+        else:
+            out[key] = value
+    return out
+
+
 # Families whose output ceiling is BELOW DEFAULT_MAX_TOKENS. Same shape, and the
 # same reason, as _CACHE_CAPABLE above: no API reports this, so it is a list that
 # needs maintaining, and the failure it prevents is total rather than degraded —
@@ -569,6 +628,8 @@ def build_model(
     # the fallback must never silently drop it (it would quietly restore full effort).
     arf = dict(extra.pop("additional_request_fields", None) or {})
     arf.update(reasoning_request_fields(model_id, effort))
+    # Preserved thinking: a mid-turn prefix edit drops the stale thinking blocks instead of failing the turn.
+    arf = _merge_request_fields(arf, thinking_binding_request_fields(model_id))
     if arf:
         extra["additional_request_fields"] = arf
 

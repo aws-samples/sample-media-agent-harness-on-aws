@@ -23,6 +23,7 @@ def test_models_json_names_every_agent_and_an_effort():
     for agent, mid in MODELS["agents"].items():
         assert mid.startswith("global.anthropic.claude-"), (agent, mid)
     assert MODELS["reasoning_effort"] in {"low", "medium", "high"}
+    assert MODELS["thinking_prefix_mismatch"] in {"drop_block", "error", "off"}
 
 
 def test_the_agents_use_it():

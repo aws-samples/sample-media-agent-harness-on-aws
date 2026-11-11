@@ -15,6 +15,8 @@ _DATA = json.loads(_PATH.read_text(encoding="utf-8"))
 
 AGENT_MODELS: dict[str, str] = dict(_DATA["agents"])
 REASONING_EFFORT: str = str(_DATA["reasoning_effort"])
+#: Preserved-thinking prefix check (model/factory.py thinking_binding_mode): drop_block | error | off.
+THINKING_PREFIX_MISMATCH: str = str(_DATA["thinking_prefix_mismatch"])
 
 
 def model_for(agent: str) -> str:

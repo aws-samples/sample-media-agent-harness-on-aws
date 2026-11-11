@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [1.2.3] — multi-step turns no longer fail on new AWS accounts
+
+### Fixed
+- **"Invalid signature in thinking block" on new AWS accounts.** Claude Opus, Sonnet and Haiku 5.5 sign each
+  thinking block over the conversation before it, and Bedrock rejects a block whose earlier conversation changed.
+  Accounts created on or after 2026-08-31 enforce this by default (every Workshop Studio account included), and the
+  harness moved its per-turn context (remembered context, project and graph rules) to the newest message on every
+  model call, so multi-step turns failed there. The context now stays on the turn's opening message, so the
+  conversation before every thinking block is unchanged within a turn. As a safety net, Claude 5.5 models also ask
+  Bedrock to drop a stale thinking block rather than fail the turn (`thinking_prefix_mismatch: drop_block` in
+  `agent/src/model/models.json`; an environment can set `thinkingPrefixMismatch: "error"` to force the check on for
+  testing). Verified on staging with the check forced on: Opus/Sonnet/Haiku 5.5, Opus 4.8 and GPT-6.1-Sol, plus
+  restyle, storyboard, recast, ads, content moderation, project tools and Lab 1, with no signature errors.
+
 ## [1.2.2] — no guardrail by default; the harness guardrail blocks only clear attacks
 
 ### Changed

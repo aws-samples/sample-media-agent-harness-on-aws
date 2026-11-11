@@ -404,6 +404,12 @@ export interface EnvConfig {
    */
   harnessGuardrail?: boolean;
   /**
+   * Preserved-thinking prefix check for this env, overriding agent/src/model/models.json `thinking_prefix_mismatch`
+   * (default `drop_block`). `error` forces Bedrock's thinking-signature check on in an account that does not enforce
+   * it by default (created before 2026-08-31): a test env runs with it to prove every turn keeps its prefix stable.
+   */
+  thinkingPrefixMismatch?: "drop_block" | "error" | "off";
+  /**
    * AgentCore Web Search on the shared Platform Gateway (agent-harness-help-web-search R6-R8,
    * media-harness-web-search-toggle). `enabled` creates the `web-search` connector target on the Platform
    * Gateway, grants its role `bedrock-agentcore:InvokeWebSearch`, and adds a Cedar permit for exactly the

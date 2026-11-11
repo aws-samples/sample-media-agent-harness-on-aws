@@ -1369,8 +1369,10 @@ def _compose_turn_context(*parts: str) -> str:
     return "\n\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
 
 
-try:  # Strands' per-call context injection (folds text into the latest user message, after its cache point)
-    from strands.vended_plugins.context_injector import ContextInjector as _ContextInjector
+try:  # Per-turn context injection on Strands' model-input middleware: rendered once per turn and folded into the
+    # turn's opening user message on every call, so the prefix stays identical across the turn (preserved
+    # thinking; see turn_context_injector). Strands' own ContextInjector moved the text to the latest message.
+    from turn_context_injector import TurnContextInjector as _ContextInjector
 except Exception:  # noqa: BLE001 - older strands: memory/inventory stay where they were
     _ContextInjector = None
 
@@ -2614,17 +2616,16 @@ async def invoke(payload, context):
     if _ContextInjector is not None and (
         _turn_prompt or getattr(session_manager, "ephemeral", False)
     ):
-        # Per-call, never persisted, folded in AFTER the message cache point: this turn's
-        # remembered context (read when the hook has run) and the inventory hint. On every call
-        # of the turn, as when they lived in the turn's message / the system prompt.
+        # Never persisted: this turn's remembered context (read when the hook has run) and the inventory
+        # hint, rendered on the turn's first call and folded into the turn's opening message on every call
+        # of the turn, as when they lived in the turn's message / the system prompt. Moving it between
+        # calls invalidated the turn's thinking blocks (preserved thinking, Claude Opus 5.5 and later).
         _sm_for_ctx = session_manager
 
         def _render_turn_context(_ctx, **_kw) -> str:
             return _compose_turn_context(getattr(_sm_for_ctx, "turn_context", "") or "", _turn_prompt)
 
-        _request_plugins.append(
-            _ContextInjector(_render_turn_context, name="harness:turn-context", trigger="everyTurn")
-        )
+        _request_plugins.append(_ContextInjector(_render_turn_context, name="harness:turn-context"))
     request_agent_kwargs = {
         "model": request_model,
         "system_prompt": _request_prompt,

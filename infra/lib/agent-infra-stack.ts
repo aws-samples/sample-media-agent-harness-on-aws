@@ -246,10 +246,10 @@ export class AgentInfraStack extends cdk.Stack {
     // second place to set a model is how the task agent once ran Opus 5 while its code said Sonnet 5.5.
     const modelDefaults = JSON.parse(
       require("fs").readFileSync(path.join(__dirname, "../../agent/src/model/models.json"), "utf-8"),
-    ) as { reasoning_effort: string; agents: Record<string, string> };
+    ) as { reasoning_effort: string; thinking_prefix_mismatch: "drop_block" | "error" | "off"; agents: Record<string, string> };
     const defaultModelId = modelDefaults.agents.orchestrator;
-    if (!defaultModelId || !modelDefaults.reasoning_effort) {
-      throw new Error("agent/src/model/models.json needs agents.orchestrator and reasoning_effort");
+    if (!defaultModelId || !modelDefaults.reasoning_effort || !modelDefaults.thinking_prefix_mismatch) {
+      throw new Error("agent/src/model/models.json needs agents.orchestrator, reasoning_effort and thinking_prefix_mismatch");
     }
 
     // ---- Container images + SPA: pushed by CI, or built here in CodeBuild ----
@@ -3047,6 +3047,13 @@ export class AgentInfraStack extends cdk.Stack {
       // 1536-byte env budget. factory.py sends ONLY output_config.effort (no thinking field):
       // an explicit thinking:{adaptive} front-loaded reasoning and spiked TTFT to 8-18s.
       BEDROCK_REASONING_EFFORT: modelDefaults.reasoning_effort,
+      // Preserved thinking (Claude Opus/Sonnet/Haiku 5.5, model/factory.py): what a mid-turn prefix edit does to the
+      // stale thinking blocks. drop_block (the models.json default) drops them and the turn goes on; `error` opts an
+      // account that is not enforced by default (created before 2026-08-31) INTO the check, so a test deploy proves
+      // the prefix is stable; `off` sends nothing (new accounts are enforced regardless). Per env: env-config
+      // `thinkingPrefixMismatch`, else agent/src/model/models.json `thinking_prefix_mismatch`.
+      BEDROCK_THINKING_PREFIX_MISMATCH:
+        props.envConfig?.thinkingPrefixMismatch ?? modelDefaults.thinking_prefix_mismatch,
       DYNAMIC_FANOUT_ENABLED: dynamicFanoutFlag,
       MEDIA_PROXY_BUCKET: props.envConfig?.media?.proxyBucket ?? "",
       HARNESS_GATEWAY_ID: gateway.attrGatewayIdentifier,
