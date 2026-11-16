@@ -261,6 +261,8 @@ export default function AssetPlayer({ data, theme: t, onInteraction }: RendererP
     return {
       template: 'nle-timeline',
       id: `asset-${assetId}`,
+      // The file it plays: the timeline snaps a dragged range onto this file's keyframes (useKeyframes).
+      sourceAssetId: assetId,
       title: displayName,
       duration: 0,
       durationIsEstimate: true,

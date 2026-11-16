@@ -2,8 +2,7 @@
 //
 // Image queries in the Moments tab (mock search-and-actions.html §1): the bar holds words OR an image, never both
 // (M2C searches one kind per call). Image mode: the field becomes the image, with no text input; "Search by words"
-// or ✕ goes back to an empty, focused box. Recent searches live behind a clock button (no pills under the field).
-// A text-only viewState from before still restores.
+// or ✕ goes back to an empty, focused box. An image search opens as the tab's next version, like a words search.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react';
@@ -21,7 +20,7 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock('../../../projects/api', async (orig) => ({ ...(await orig<typeof import('../../../projects/api')>()),
   searchMomentsByImages: h.searchByImages, searchMoments: h.searchText, searchAssets: h.searchAssets }));
-vi.mock('../../../projects/assetUrlBatcher', () => ({ request: vi.fn(async () => new Map()) }));
+vi.mock('../../../projects/assetUrlBatcher', () => ({ request: vi.fn(async () => new Map()), requestFrames: vi.fn(async () => new Map()) }));
 vi.mock('../../../projects/upload/queryImage', async (orig) => ({
   ...(await orig<typeof import('../../../projects/upload/queryImage')>()), uploadQueryImage: h.upload }));
 vi.mock('../../../projects/useMomentUrls', () => ({
@@ -160,35 +159,29 @@ describe('image query chips', () => {
     expect(h.searchText).toHaveBeenCalledWith(PID, 'dock at dawn');
   });
 
-  it('recent searches sit behind the clock — no history pills under the field — and navigate', async () => {
+  it('an image search opens as the next version, named by the image; there is no recent-searches clock', async () => {
+    const opened: Array<{ manifest: Record<string, any> }> = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent).detail);
+    window.addEventListener('lab:open-view', onOpen);
     render(<ClipGallery data={data({ queryRef: imageRef })} title="" theme={theme} />);
-    fireEvent.click(screen.getByTestId('query-search-words'));
-    fireEvent.change(screen.getByTestId('moments-search-input'), { target: { value: 'dock at dawn' } });
-    fireEvent.submit(screen.getByRole('search'));
-    fireEvent.click(screen.getByTestId('search-by-image'));
+    expect(screen.queryByTestId('moments-recent')).toBeNull();
+    fireEvent.click(screen.getByTestId('query-image-chip'));
+    fireEvent.click(within(screen.getByTestId('query-image-menu')).getByText(/Use a different image/));
     await pickFile();
-    expect(screen.queryByTestId('moments-history')).toBeNull();
-    expect(screen.queryAllByTestId('moments-history-pill')).toHaveLength(0);
-    fireEvent.click(screen.getByTestId('moments-recent'));
-    const rows = within(screen.getByTestId('moments-recent-menu')).getAllByTestId('moments-recent-row');
-    expect(rows).toHaveLength(3); // the agent's results, the words, the image
-    expect(rows[0]).toHaveTextContent("The agent's results");
-    expect(within(rows[1]).getByTestId('moments-recent-text-tile')).toHaveTextContent('Aa');
-    expect(rows[1]).toHaveTextContent('“dock at dawn”');
-    expect(within(rows[2]).getByTestId('query-thumb')).toBeInTheDocument();
-    expect(rows[2]).toHaveAttribute('aria-current', 'true');
-    fireEvent.click(rows[0]);
-    expect(screen.queryByTestId('moments-recent-menu')).toBeNull();
-    expect(screen.getByTestId('query-image-chip')).toHaveTextContent('still.jpg'); // back on the agent's own query
+    await waitFor(() => expect(opened).toHaveLength(1));
+    window.removeEventListener('lab:open-view', onOpen);
+    expect(opened[0].manifest.galleryMoments.queryRef).toEqual({ type: 'image', match: 'any', images: [{ assetId: IMG2, label: 'dock.jpg' }] });
+    const { viewVersionNote } = await import('../../../shared/renderSubject');
+    expect(viewVersionNote(opened[0].manifest)).toBe('dock.jpg');
   });
 });
 
 describe('back-compat', () => {
-  it('a text-only viewState from before restores and re-runs its text search', () => {
+  it("a tab saved with the old in-tab search history shows its own cards and searches nothing", () => {
     render(<ClipGallery data={data({ query: 'title card' }, { search: { history: [{ q: 'dock' }], index: 1 } })} title="" theme={theme} />);
-    expect(h.searchText).toHaveBeenCalledWith(PID, 'dock');
-    expect(screen.getByTestId('moments-search-input')).toHaveValue('dock');
-    expect(screen.queryByTestId('query-image-chip')).toBeNull();
+    expect(h.searchText).not.toHaveBeenCalled();
+    expect(screen.getByTestId('moments-search-input')).toHaveValue('title card');
+    expect(screen.getByTestId('mc-m1')).toBeInTheDocument();
   });
 
   it('a manifest with only the old text query still pre-fills the box', () => {

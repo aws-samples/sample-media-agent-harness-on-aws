@@ -76,8 +76,8 @@ describe('ActionLine — a direct action as a chat turn', () => {
     await openActionOutputs(frames.outputs!, 's1', 'frame', 'x.mp4', { resolve, open, sleep: async () => {} });
     window.removeEventListener(RESULT_GALLERY_EVENT, on);
     expect(seen).toEqual([
-      { sessionId: 's1', kind: 'video', label: '3 clips · x.mp4', items: outs.map((o) => ({ url: o.url, name: o.name })) },
-      { sessionId: 's1', kind: 'image', label: '3 frames · x.mp4', items: frames.outputs!.map((o) => ({ url: o.url, name: o.name })) },
+      { sessionId: 's1', kind: 'video', label: '3 clips · x.mp4', items: outs.map((o) => ({ url: o.url, name: o.name, kind: o.kind })) },
+      { sessionId: 's1', kind: 'image', label: '3 frames · x.mp4', items: frames.outputs!.map((o) => ({ url: o.url, name: o.name, kind: o.kind })) },
     ]);
     expect(resolve).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();

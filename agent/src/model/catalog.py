@@ -7,31 +7,47 @@ and pass to dispatch_tool.
 
 import logging
 import os
+import re
 from typing import Optional
 
 import boto3
 
+from model.defaults import PICKER
 from model.factory import supports_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
-# Non-text model keywords to filter out
-_EXCLUDE = {
-    "stable", "embed", "pegasus", "upscale", "outpaint", "inpaint",
-    "background", "recolor", "replace", "style", "sketch", "structure",
-    "erase", "image",
-}
+# THE supported list (models.json `picker`), the same one the UI proxy's GET /models applies: one list, so the
+# picker never offers a model the agents would refuse, and neither offers one that fails every turn.
+_PICKER = tuple(re.compile(p) for p in PICKER)
 
 
-# Superseded generations. Every one of these is strictly replaced by something
-# else already in the list, and together they were a quarter of the picker.
-# Matched against the profile ID (stable) rather than the display name.
-_LEGACY = (
-    "claude-3-haiku", "claude-3-sonnet",      # 2024, no prompt caching
-    "claude-opus-4-1",                        # superseded by 4.5+
-    "llama3-1", "llama3-2", "llama3-3",       # superseded by Llama 4
-    "meta.llama3-1", "meta.llama3-2", "meta.llama3-3",
-)
+def supported(model_id: str) -> bool:
+    """Whether ``model_id`` is on the supported list (every model when the list is empty)."""
+    return not _PICKER or any(p.search(model_id or "") for p in _PICKER)
+
+
+def _active_model_ids(client) -> Optional[set[str]]:
+    """The foundation models Bedrock lists as ACTIVE (not LEGACY), or None when that cannot be read."""
+    try:
+        resp = client.list_foundation_models()
+    except Exception as e:  # a missing grant or a blip: offer the supported list unfiltered, never nothing
+        logger.warning("Could not read model lifecycles: %s", e)
+        return None
+    return {m["modelId"] for m in resp.get("modelSummaries", [])
+            if (m.get("modelLifecycle") or {}).get("status") == "ACTIVE"}
+
+
+def current(profile: dict, active: Optional[set[str]]) -> bool:
+    """Whether every model behind an inference profile is current: ACTIVE, not LEGACY and not retired.
+
+    A model Bedrock no longer lists is retired (its profile can outlive it: Nova Premier, Sonnet 4 in 2026-11).
+    ``active`` None (lifecycles unreadable) keeps every profile.
+    """
+    if active is None:
+        return True
+    ids = [str(m.get("modelArn", "")).split("foundation-model/")[-1] for m in profile.get("models") or []]
+    return bool(ids) and all(i in active for i in ids)
 
 
 def discover_models(region: Optional[str] = None) -> list[dict]:
@@ -44,16 +60,14 @@ def discover_models(region: Optional[str] = None) -> list[dict]:
     region = region or os.environ.get("AWS_REGION", "us-west-2")
     try:
         client = boto3.client("bedrock", region_name=region)
+        active = _active_model_ids(client)
         profiles = []
         paginator = client.get_paginator("list_inference_profiles")
         for page in paginator.paginate(typeEquals="SYSTEM_DEFINED", maxResults=100):
             for p in page.get("inferenceProfileSummaries", []):
                 if p.get("status") != "ACTIVE":
                     continue
-                name_lower = (p.get("inferenceProfileName") or "").lower()
-                if any(kw in name_lower for kw in _EXCLUDE):
-                    continue
-                if any(tag in p["inferenceProfileId"].lower() for tag in _LEGACY):
+                if not supported(p["inferenceProfileId"]) or not current(p, active):
                     continue
                 profiles.append({
                     "id": p["inferenceProfileId"],

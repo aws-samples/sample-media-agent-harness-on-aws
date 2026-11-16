@@ -40,8 +40,14 @@ const mocks = vi.hoisted(() => ({
   getSessionTranscript: vi.fn(() => Promise.resolve([] as unknown[])),
   updateSessionTranscript: vi.fn(() => Promise.resolve()),
   upload: vi.fn(),
+  // Projects are off in these tests, so a real move is refused and the chat opens a new one; a test may accept it.
+  moveHandedOffChat: vi.fn(async () => ({ ok: false as const, error: { status: 0, code: 'projects_disabled' } })),
 }));
 
+vi.mock('../projects/sessionProjectStore', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../projects/sessionProjectStore')>()),
+  moveHandedOffChat: mocks.moveHandedOffChat,
+}));
 vi.mock('../LabContext', () => ({ useLabContext: mocks.useLabContext }));
 vi.mock('../api', () => ({
   invokeAgentStreaming: mocks.invokeAgentStreaming,
@@ -360,6 +366,34 @@ describe('ChatCanvas — open_project from a live turn', () => {
     await flush();
     await flush();
     expect(seen).toHaveBeenCalledWith({ projectId: 'plab', projectName: 'workshop-lab01', prompt: 'start lab01' });
+    off();
+  });
+
+  it('moves a chat whose only turn handed off into that project and carries on there (no second chat)', async () => {
+    const { onNewChatInProjectRequest } = await import('../projects/newChatInProject');
+    const opened = vi.fn();
+    const off = onNewChatInProjectRequest(opened);
+    const sent = vi.fn();
+    const onSend = (e: Event) => sent((e as CustomEvent).detail);
+    window.addEventListener('chat:send', onSend);
+    mocks.moveHandedOffChat.mockResolvedValueOnce({ ok: true, value: undefined } as never);
+    // The hand-off turn, then the lab's own first turn in the moved chat.
+    mocks.invokeAgentStreaming.mockImplementationOnce(async (_req: unknown, cb: (e: unknown) => void) => {
+      cb({ type: 'text', text: 'Opening Lab 1.' });
+      cb(summary({ open_project: { projectId: 'plab', projectName: 'Lab 1', prompt: 'start lab 1' } }));
+    }).mockImplementation(async (_req: unknown, cb: (e: unknown) => void) => {
+      cb({ type: 'text', text: 'Welcome to Lab 1.' });
+      cb(summary({}));
+    });
+    setSession('FROM');
+    render(<ChatCanvas />);
+    typeAndSubmit('start lab 1');
+    await flush();
+    await flush();
+    expect(mocks.moveHandedOffChat).toHaveBeenCalledWith('FROM', 'plab', 'Lab 1');
+    expect(sent).toHaveBeenCalledWith({ prompt: 'start lab 1', sessionId: 'FROM' });
+    expect(opened).not.toHaveBeenCalled();
+    window.removeEventListener('chat:send', onSend);
     off();
   });
 

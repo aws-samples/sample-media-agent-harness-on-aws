@@ -113,25 +113,25 @@ The M2C submit tools are asynchronous. In this application:
           but snaps to the nearest keyframe: asking for 4.958 s gave 5.042 s. When the
           marks must be frame-exact, re-encode web-safe (`-c:v libopenh264 -b:v 5M
           -pix_fmt yuv420p -c:a aac -movflags +faststart`), which gives the exact duration.
+          The staged build has ONE H.264 encoder — `libopenh264` in some envs, `libx264` in
+          others: read `ffmpeg -hide_banner -encoders` once and use whichever it lists.
         * Write each output to the session OUTPUT prefix given in the S3 CONTEXT section and finish with ONE
           `build_clip_gallery_manifest` for the combined tab.
       Size is NOT the reason to split (a 227 MB source downloads in seconds). ENCODE TIME
-      is: re-encoding runs at roughly 0.5x realtime at 1080p in this sandbox, so a batch
-      whose clips total more than about 5 minutes of footage should be split across
-      parallel nodes, several clips per node — never one node per clip.
-   **Provisioning ffmpeg + ffprobe in `code_interpreter`:** the sandbox has NO system
-   ffmpeg/ffprobe, and `imageio-ffmpeg` ships **ffmpeg only (no ffprobe)** — do not rely on
-   `imageio_ffmpeg.get_ffmpeg_exe()` when you need to probe. Fetch the **harness's own static
-   ffmpeg build** (it ships BOTH), which the deploy stages in the workspace (skills) bucket — it is
-   the ONLY source; never download ffmpeg from anywhere else. Read it by KEY with boto3 (the sandbox
-   role can read it): bucket = the workspace bucket named in the S3 CONTEXT guidance
-   (`SKILLS_S3_BUCKET`), key = `tools/ffmpeg/ffmpeg-release-arm64-static.tar.xz` (the sandbox is
-   arm64). There is NO public or CDN link to it — `https://<artifacts-domain>/tools/ffmpeg/…`
-   answers **403 by design**, so do not try URLs, list the prefix, or HEAD your way to the
-   filename. Extract it and put `ffmpeg` AND `ffprobe` on `PATH` once at the start of the turn;
-   then both resolve by bare name. (`agent-olive`'s `scripts/assemble_reel.py` does exactly this
-   self-provisioning — pass `FFMPEG_S3_URI=s3://<skills-bucket>/tools/ffmpeg`, which it appends the
-   exact filename to; prefer calling that script over hand-rolling the download.)
+      is: re-encoding runs at roughly 0.5x realtime at 1080p in this sandbox, and a plan
+      step has 600 s for EVERYTHING, model turns included. Count every encode pass — each
+      clip you re-encode AND a final join/mux you re-encode — and split a step whose total
+      re-encoded footage is over about 2 minutes across parallel steps, several clips per
+      step — never one node per clip. Encode the pieces once with identical settings, then
+      join them with `-c copy` (near-instant) and mux the audio without re-encoding the
+      video: a 168 s reel re-encoded twice in one step ran out its 600 s (c7d66001).
+   **`ffmpeg` and `ffprobe` are already on `PATH` in every `code_interpreter` cell** (Python
+   `subprocess` and shell commands alike): the harness provisions its own static build the first time
+   either runs. Call them by bare name; never download ffmpeg yourself, and do not rely on
+   `imageio-ffmpeg` (it has no ffprobe). Only if a cell reports them missing: the build is in the
+   workspace (skills) bucket (`SKILLS_S3_BUCKET`), key = `tools/ffmpeg/ffmpeg-release-arm64-static.tar.xz`,
+   read by KEY with boto3. There is NO public or CDN link to it — `https://<artifacts-domain>/tools/ffmpeg/…`
+   answers **403 by design**, so do not try URLs or list the prefix.
    **Reading source media in `code_interpreter`:** our artifacts (`https://<artifacts-domain>/artifacts/…`)
    are NOT public — an unsigned download can 403. Either read the object by KEY with boto3 from
    the workspace (skills) bucket named in the S3 CONTEXT guidance (`SKILLS_S3_BUCKET`; key =
@@ -285,6 +285,12 @@ you write MUST include `-movflags +faststart`:
   separately is how shot 8 got shot 1's length and a 28.46s reel silently became 27.17s. After each
   `ffmpeg -t <target>`, `ffprobe` the output and call `verify_trim(i, target, actual)` so an
   over/under-trim FAILS LOUDLY instead of shipping a short reel.
+  **Shots that go back over the ORIGINAL audio** (a recast or restyle of a scene, reassembled with
+  its dialogue): run `scripts/reassemble_shots.py spec.json out.mp4` (its docstring has the spec) — never a
+  hand-written loop. Each shot gets exactly the source's frames from its start to the NEXT shot's start (detected
+  shots leave gaps, so per-shot lengths add up short and the dialogue drifts: c7d66001), every piece is encoded at
+  the source's frame rate and size (a replacement at fal's 24 fps made 8e2acba8's reel 4033 frames for a 5044-frame
+  scene), and the script verifies the frame count and the A/V sync before it returns.
 
 - Video + external audio track (mux) → ffmpeg in `code_interpreter`. Download both
   URLs, remux with `-c copy -movflags +faststart` (stream copy, lossless, fast; faststart

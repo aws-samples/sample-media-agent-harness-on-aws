@@ -38,7 +38,6 @@ findings.json (content-moderation/findings-v1):
          "confidence": "verified" | "supporting"}     # optional, default "verified"
       ],
       "corroboration": [{"start": sec, "end": sec, "tone": str, "topic": str}],   # optional, sg4
-      "not_assessed": [category, ...]                 # optional: categories the evidence could not cover
     }
 """
 from __future__ import annotations
@@ -180,11 +179,10 @@ def validate(raw: Any) -> dict:
                      "end": _num(c.get("end"), f"corroboration[{i}].end"),
                      "tone": _str(c.get("tone"), f"corroboration[{i}].tone", required=False),
                      "topic": _str(c.get("topic"), f"corroboration[{i}].topic", required=False)})
-    na = raw.get("not_assessed") or []
-    if not isinstance(na, list) or any(c not in CATEGORIES for c in na):
-        raise FindingsError(f"not_assessed must be a list of categories from {', '.join(CATEGORIES)}")
-    return {"asset": out_asset, "evidence": out_ev, "findings": out_f, "corroboration": corr,
-            "not_assessed": list(dict.fromkeys(na))}
+    # Coverage is a fact about the evidence, decided in build() from `evidence` alone. A findings file from older
+    # instructions may still carry a `not_assessed` list: it is ignored, never trusted over the evidence (the same
+    # Meridian evidence printed four categories "not assessed" on one run and "nothing found" on the next).
+    return {"asset": out_asset, "evidence": out_ev, "findings": out_f, "corroboration": corr}
 
 
 # ------------------------------------------------------------------------------------------- rating logic
@@ -247,10 +245,7 @@ def build(findings_in: dict, *, generated_at: Optional[str] = None) -> dict:
     for cat in CATEGORIES:
         if cat in flagged_cats:
             continue
-        if cat in d["not_assessed"]:
-            not_flagged.append({"category": cat, "status": "not_assessed",
-                                "reason": "the classifier reported it could not cover this category"})
-        elif cat == "LANGUAGE" and not spoken_layer:
+        if cat == "LANGUAGE" and not spoken_layer:
             not_flagged.append({"category": cat, "status": "not_assessed", "reason": "no transcript was scanned"})
         elif not visual_layer and not spoken_layer:
             not_flagged.append({"category": cat, "status": "not_assessed", "reason": "no evidence layer was read"})

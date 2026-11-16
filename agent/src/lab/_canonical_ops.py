@@ -775,6 +775,7 @@ def _build_shared_asset(
         "created_at": source.created_at,
         "updated_at": timestamp_ms,
         "version": source.version,
+        "deprecated": source.deprecated,
         # publish_policy is invariant under Share — authority travels
         # with the lineage row across partition keys.
         "publish_policy": source.publish_policy,
@@ -1332,17 +1333,20 @@ async def deprecate_asset(
             "Update": {
                 "TableName": asset_index.table_name,
                 "Key": {"PK": target_pk, "SK": target_sk},
+                # ``deprecated`` is the stored truth; a legacy ``status``
+                # attribute is dropped so nothing can contradict it.
                 "UpdateExpression": (
-                    "SET #status = :deprecated, "
+                    "SET deprecated = :true, "
                     "#current = :false, "
-                    "updatedAt = :now"
+                    "updatedAt = :now "
+                    "REMOVE #status"
                 ),
                 "ExpressionAttributeNames": {
                     "#status": "status",
                     "#current": "current",
                 },
                 "ExpressionAttributeValues": {
-                    ":deprecated": "deprecated",
+                    ":true": True,
                     ":false": False,
                     ":now": timestamp_ms,
                 },
@@ -1571,7 +1575,7 @@ async def clone_asset(
     *before* this CRUD method is reached, per the design); generates a
     fresh ``draft_id``; copies the source's S3 prefix to a new draft
     prefix under the actor's drafts partition; and writes a single
-    AssetIndex draft row with ``recordType=draft``,
+    AssetIndex working-copy row (no ``version``),
     ``cloned_from=(publishedId, version)``, and ``promoted_from=None``.
 
     Sequence:

@@ -187,6 +187,7 @@ def _workflow_record(
         category="workflow",
         name=name,
         status=status,
+        version=None if status == "draft" else 1,
         scope="private",
         s3_prefix=f"users/{actor_id}/drafts/workflows/{asset_id}/",
         created_at=_TS,

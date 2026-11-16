@@ -16,6 +16,7 @@
  */
 import {
   getAssetUrls,
+  type FrameAsk,
   type AssetUrlEntry,
   type AssetUrlsResponse,
   type ProjectsApiErrorBody,
@@ -40,12 +41,16 @@ export type AssetUrlOutcome =
   | { ok: false; kind: 'not_found' }
   | { ok: false; kind: 'error'; code: string; message: string };
 
+interface BatchResult { assets: Map<string, AssetUrlOutcome>; frames: Map<string, string> }
+
 interface PendingBatch {
   /** Distinct ids collected this microtask (dedupes in-flight ids within the batch). */
   ids: Set<string>;
-  /** Shared promise every waiter of this batch awaits, resolving to the combined per-id map. */
-  promise: Promise<Map<string, AssetUrlOutcome>>;
-  resolve: (results: Map<string, AssetUrlOutcome>) => void;
+  /** Moment pictures asked for this microtask, by `"<asset_id>@<at_ms>"` (one request carries both). */
+  frames: Map<string, FrameAsk>;
+  /** Shared promise every waiter of this batch awaits, resolving to the combined results. */
+  promise: Promise<BatchResult>;
+  resolve: (results: BatchResult) => void;
 }
 
 /** One pending batch per Project, replaced the moment it flushes. */
@@ -112,18 +117,21 @@ function spreadChunkResult(
 }
 
 /** Fetch every id of a flushed batch, chunked to {@link MAX_IDS_PER_CALL}, into one combined map. */
-async function runBatch(projectId: string, ids: string[]): Promise<Map<string, AssetUrlOutcome>> {
+async function runBatch(projectId: string, ids: string[], frameAsks: FrameAsk[] = []): Promise<BatchResult> {
   const combined = new Map<string, AssetUrlOutcome>();
-  const chunks: string[][] = [];
-  for (let i = 0; i < ids.length; i += MAX_IDS_PER_CALL) {
-    chunks.push(ids.slice(i, i + MAX_IDS_PER_CALL));
+  const frames = new Map<string, string>();
+  const chunks: { ids: string[]; frames: FrameAsk[] }[] = [];
+  const n = Math.max(Math.ceil(ids.length / MAX_IDS_PER_CALL), Math.ceil(frameAsks.length / MAX_IDS_PER_CALL));
+  for (let c = 0; c < n; c++) {
+    chunks.push({ ids: ids.slice(c * MAX_IDS_PER_CALL, (c + 1) * MAX_IDS_PER_CALL),
+      frames: frameAsks.slice(c * MAX_IDS_PER_CALL, (c + 1) * MAX_IDS_PER_CALL) });
   }
   await Promise.all(
-    chunks.map(async (chunk) => {
+    chunks.map(async ({ ids: chunk, frames: chunkFrames }) => {
       let result: ProjectsResult<AssetUrlsResponse>;
       try {
         // Contractually never undefined; a stub that answers nothing must not break the batch.
-        result = (await getAssetUrls(projectId, chunk))
+        result = (await getAssetUrls(projectId, chunk, chunkFrames))
           ?? { ok: false, kind: 'error', status: 0, code: 'batch_error', message: 'no answer' };
       } catch (e) {
         // `getAssetUrls` is contractually non-throwing; treat a surprise as a per-chunk error.
@@ -137,9 +145,10 @@ async function runBatch(projectId: string, ids: string[]): Promise<Map<string, A
         noteAssetFolders(projectId, folders);
       }
       spreadChunkResult(chunk, result, combined);
+      if (result.ok) for (const [k, f] of Object.entries(result.value.frames ?? {})) if (f?.url) frames.set(k, f.url);
     }),
   );
-  return combined;
+  return { assets: combined, frames };
 }
 
 /**
@@ -148,34 +157,56 @@ async function runBatch(projectId: string, ids: string[]): Promise<Map<string, A
  * exactly the (non-empty, deduped) ids requested. Blank ids are dropped; an empty request resolves to
  * an empty map without any network call.
  */
-export function request(projectId: string, assetIds: string[]): Promise<Map<string, AssetUrlOutcome>> {
-  const requested = Array.from(new Set(assetIds.filter((id) => typeof id === 'string' && id.length > 0)));
-  if (requested.length === 0) return Promise.resolve(new Map());
-
+/** The Project's batch collecting this microtask's asks, opened (and its flush scheduled) on first use. */
+function batchFor(projectId: string): PendingBatch {
   let batch = pending.get(projectId);
   if (!batch) {
-    let resolveFn!: (results: Map<string, AssetUrlOutcome>) => void;
-    const promise = new Promise<Map<string, AssetUrlOutcome>>((res) => {
+    let resolveFn!: (results: BatchResult) => void;
+    const promise = new Promise<BatchResult>((res) => {
       resolveFn = res;
     });
-    batch = { ids: new Set(), promise, resolve: resolveFn };
-    pending.set(projectId, batch);
+    const opened: PendingBatch = { ids: new Set(), frames: new Map(), promise, resolve: resolveFn };
+    batch = opened;
+    pending.set(projectId, opened);
     scheduleMicrotask(() => {
       // Detach this batch so calls arriving after the flush open a fresh one.
       pending.delete(projectId);
-      const ids = Array.from(batch!.ids);
-      void runBatch(projectId, ids).then(batch!.resolve);
+      void runBatch(projectId, Array.from(opened.ids), Array.from(opened.frames.values())).then(opened.resolve);
     });
   }
+  return batch;
+}
 
+export function request(projectId: string, assetIds: string[]): Promise<Map<string, AssetUrlOutcome>> {
+  const requested = Array.from(new Set(assetIds.filter((id) => typeof id === 'string' && id.length > 0)));
+  if (requested.length === 0) return Promise.resolve(new Map());
+  const batch = batchFor(projectId);
   for (const id of requested) batch.ids.add(id);
 
   // Each waiter awaits the shared batch result, then projects out only the ids it asked for.
-  return batch.promise.then((all) => {
+  return batch.promise.then(({ assets }) => {
     const mine = new Map<string, AssetUrlOutcome>();
     for (const id of requested) {
-      const outcome = all.get(id);
+      const outcome = assets.get(id);
       if (outcome) mine.set(id, outcome);
+    }
+    return mine;
+  });
+}
+
+/**
+ * A moment's own picture per ask (`"<asset_id>@<at_ms>"` → URL), in the SAME request as the cards' asset URLs
+ * (coalesced per microtask), so a gallery page still costs one call. An ask the route cannot serve is absent.
+ */
+export function requestFrames(projectId: string, asks: FrameAsk[]): Promise<Map<string, string>> {
+  if (asks.length === 0) return Promise.resolve(new Map());
+  const batch = batchFor(projectId);
+  for (const a of asks) batch.frames.set(`${a.asset_id}@${a.at_ms}`, a);
+  return batch.promise.then(({ frames }) => {
+    const mine = new Map<string, string>();
+    for (const a of asks) {
+      const url = frames.get(`${a.asset_id}@${a.at_ms}`);
+      if (url) mine.set(`${a.asset_id}@${a.at_ms}`, url);
     }
     return mine;
   });

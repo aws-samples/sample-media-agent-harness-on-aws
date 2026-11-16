@@ -92,7 +92,8 @@ def show_media_gallery(items: list[dict], title: str = "", subtitle: str = "") -
     Use it to let the user HEAR or SEE several files side by side: a voice audition (label each with the voice's
     NAME, e.g. "agent_olive_voice_v4 · female · en · your clone"), TTS chunks or lip-sync segments to review,
     or any "show me these" set. Audio and video become playable cards with a mark-in/out ruler; all-image sets
-    become an image gallery. Prefer this over dispatching the Render Agent for a gallery.
+    become an image gallery; a single video opens in the video view (its timeline). Prefer this over dispatching
+    the Render Agent for a gallery.
 
     Args:
         items: ``[{"url": <an s3:// uri as a tool returned it (preferred: e.g. get_voice's preview_uri -- no
@@ -117,6 +118,15 @@ def show_media_gallery(items: list[dict], title: str = "", subtitle: str = "") -
     items = [{**it, "url": _stable_src(it.get("url") or it.get("src"))} if isinstance(it, dict) else it
              for it in items]
     manifest = build_gallery_manifest(items, title=title, subtitle=subtitle)
+    clips = manifest.get("galleryClips") or []
+    if len(clips) == 1 and clips[0].get("kind") == "video" and str(clips[0].get("src") or "").startswith("https://"):
+        # ONE video is not a gallery: it opens in the video view (timeline, Clip / Frame / Crop), as any rendered
+        # video does. c7d66001's final reel came up as a one-card "Review & clip takes" gallery instead.
+        from render.artifacts import dispatch_render, rendered_this_session
+        if rendered_this_session(clips[0]["src"]):  # already open in its own video tab (a plan's render did it)
+            return json.dumps({"status": "already_open", "items": 1, "template": "video"})
+        if dispatch_render([clips[0]["src"]], label=title or clips[0].get("label") or None):
+            return json.dumps({"status": "opened", "items": 1, "template": "video"})
     n = len(manifest.get("galleryClips") or manifest.get("images") or [])
     try:
         # The ORIGINAL (presigned) links, normalised: the end-of-turn auto-render matches these and skips them,

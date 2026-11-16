@@ -196,6 +196,14 @@ def test_find_by_name_ranks_exact_prefix_substring(world):
     ]
 
 
+def test_a_name_without_its_extension_is_exact():
+    """`Netflix_Open_Content_Meridian` is the original `.mp4`, ahead of its newer `_clip_*` copies (prefix)."""
+    from ingestion.store import _name_rank
+    assert _name_rank({"displayName": "netflix_open_content_meridian.mp4"}, "netflix_open_content_meridian") == 0
+    assert _name_rank({"displayName": "netflix_open_content_meridian_clip_0000.mp4"},
+                      "netflix_open_content_meridian") == 1
+
+
 def test_find_by_name_surfaces_exact_name_past_the_limit(world):
     # The reported failure: typing the exact filename still did not find it, because 20+ newer substring
     # matches (crop derivatives) filled the limit and the exact upload sorted after them. Ranking must

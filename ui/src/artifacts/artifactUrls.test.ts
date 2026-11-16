@@ -528,10 +528,32 @@ describe('project ASSET source keys', () => {
     expect(out.src).toBe(CDN_URL);
   });
 
-  it('ignores lookalikes that are not a project asset key', async () => {
-    expect(hasArtifactRefs({ src: `${CDN}/projects/${PID}/notakind:x/clip.mp4` })).toBe(false);
+  it('ignores lookalikes that are not a project file key', async () => {
     expect(hasArtifactRefs({ src: `https://evil.example/projects/${PID}/${AID}/clip.mp4` })).toBe(false);
+    expect(hasArtifactRefs({ src: `${CDN}/projects/not-a-pid/import/clip.mp4` })).toBe(false);
     expect(hasArtifactRefs({ src: CDN_URL })).toBe(true);
+  });
+
+  // Staging 2026-11-14 (IND403 Lab 1): a job tab's source was the import-inbox file, registered in place at
+  // `projects/<pid>/import/<name>` — no asset id in the key — so it reached <video> as the private CDN URL (403).
+  it('resolves a file registered in place through resolve-locations, then the Asset_URL_Route', async () => {
+    const IMPORT_KEY = `projects/${PID}/import/Meridian.mp4`;
+    authFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body));
+      if (url === `/projects/${PID}/assets/resolve-locations`) {
+        expect(body.locations).toEqual([IMPORT_KEY]);
+        return new Response(JSON.stringify({ locations: { [IMPORT_KEY]: AID } }), { status: 200 });
+      }
+      if (url === `/projects/${PID}/assets/urls`) {
+        expect(body.asset_ids).toEqual([AID]);
+        return new Response(JSON.stringify({ urls: { [AID]: { source: { url: SIGNED, expiresAt: Math.floor(Date.now() / 1000) + 3600 } } } }), { status: 200 });
+      }
+      return presigner.handle(input, init);
+    });
+    const out = await resolveArtifactUrlsDeep({ tracks: [{ type: 'video', src: `${CDN}/${IMPORT_KEY}` }] });
+    expect(out.tracks[0].src).toBe(SIGNED);
+    expect(presigner.calls).toHaveLength(0);
   });
 });
 

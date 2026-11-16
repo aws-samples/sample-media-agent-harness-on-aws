@@ -311,7 +311,8 @@ class NormalizedCodeInterpreterTool(_DelegatingTool):
         fp = (*sc.fingerprint(pid, sid, creds), getattr(info, "session_id", None))
         if self._injected.get(name) == fp:
             return
-        sc.install(info.client.invoke, pid, sid)
+        import sandbox_ffmpeg  # noqa: PLC0415
+        sc.install(info.client.invoke, pid, sid, setup=sandbox_ffmpeg.setup_code())
         self._injected[name] = fp
         logger.info("sandbox_credentials: injected into sandbox %s", name)
 

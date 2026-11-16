@@ -6,6 +6,7 @@ detect: stats.num_people
 template: composite-timeline
 deliverable: facemetadata.json
 lanes: people[] name=name spans=appearances start=begin_ms end=end_ms units=ms
+lane_set: people
 thumbnails: people[] key=thumbnail_key label=name
 rows: people[] cols=name,gender,age_range,total_screen_time_sec,confidence,name_source,num_tracks
 duration: duration_sec

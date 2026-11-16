@@ -88,14 +88,17 @@ export function failedNotificationTurn(
 export function summaryNotificationTurn(
   jobId: string,
   label?: string,
-): { prompt: string; displayText: string } {
+): { prompt: string; displayText: string; turnPurpose: 'results_summary' } {
   const name = label || 'completed';
   return {
-    prompt: `Briefly summarize the results of the ${name} job (id ${jobId}). Its artifacts are `
-      + `already rendered in the panel, but the result is not in this conversation, so read the `
+    prompt: `Briefly summarize the results of the ${name} job (id ${jobId}). The panel shows its `
+      + `artifacts by itself (on the file's own tab), but the result is not in this conversation, so read the `
       + `stored result ONCE: call get_plan_results("${jobId}") if it is a plan, otherwise `
       + `get_job("${jobId}"). That only reads the cached result. Do NOT presign, re-render, or `
       + `re-feature the artifacts — just give a short summary.`,
     displayText: `Summarize the ${label || 'job'} results`,
+    // Enforced, not just asked: the agent withholds its gallery / clip / frame tools for this turn (main.py), so a
+    // summary can never open a second tab of results the panel already shows.
+    turnPurpose: 'results_summary',
   };
 }

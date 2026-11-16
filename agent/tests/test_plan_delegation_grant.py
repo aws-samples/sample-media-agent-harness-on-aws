@@ -250,3 +250,11 @@ def test_plan_row_carries_the_trusted_producing_project(monkeypatch):
     )
     plan_rows = [i for i in _FakeStateStore.last._table.items if str(i.get("node_id")).startswith("PLAN#")]
     assert "producing_project_id" not in plan_rows[0]
+
+
+def test_a_runtime_maps_template_tools_need_a_grant_too():
+    """A `map` node lists no tools; its children run `config.template.tools`. 0e53b848's recast map had the fal tools
+    only there: no grant was minted and every child found the fal gateway "awaiting user token"."""
+    node = _Node("recast_map", [])
+    node.config = {"template": {"tools": ["clip_video", "usr-8ddf___submit_job", "usr-8ddf___check_job"]}}
+    assert pae._user_gated_tools_in_plan(_Plan([node])) == ["usr-8ddf___check_job", "usr-8ddf___submit_job"]

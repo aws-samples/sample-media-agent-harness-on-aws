@@ -47,21 +47,24 @@
     {
       "end": 63.796,
       "group": "Kawhi Leonard",
-      "id": "l-0-0",
+      "id": "people-0-0",
+      "laneSet": "people",
       "name": "Kawhi Leonard",
       "start": 62.996
     },
     {
       "end": 64.797,
       "group": "Kawhi Leonard",
-      "id": "l-0-1",
+      "id": "people-0-1",
+      "laneSet": "people",
       "name": "Kawhi Leonard",
       "start": 63.997
     },
     {
       "end": 11.0,
       "group": "Person_1",
-      "id": "l-1-0",
+      "id": "people-1-0",
+      "laneSet": "people",
       "name": "Person_1",
       "start": 10.0
     }

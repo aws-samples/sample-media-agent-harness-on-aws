@@ -53,7 +53,7 @@ import { SignatureV4 } from "@smithy/signature-v4";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import crypto from "crypto";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { BedrockClient, ListGuardrailsCommand, ListInferenceProfilesCommand } from "@aws-sdk/client-bedrock";
+import { BedrockClient, ListFoundationModelsCommand, ListGuardrailsCommand, ListInferenceProfilesCommand } from "@aws-sdk/client-bedrock";
 import { ssmCall } from "./runtimeArns";
 import { listOptions, readSettings, saveSelection } from "./guardrailSettings";
 import type { ListGuardrails } from "./guardrailSettings";
@@ -115,6 +115,7 @@ import { labRuntimeSessionId } from "./labSession";
 import {
   decideRenderSession,
   composeRenderTabs,
+  renderTabLabel,
   isSafeSessionId,
   isSessionRenderKey,
   renderViewId,
@@ -1483,7 +1484,23 @@ export function buildApp(): Express {
               ...(projectFields ?? {}),
             },
             ConditionExpression: "attribute_not_exists(sessionId)",
-          }));
+          })).catch(async (putErr: any) => {
+            if (putErr?.name !== "ConditionalCheckFailedException") throw putErr;
+            // The row exists. A deleted chat (`active = 0`) is gone and its id is not reused; anything else is
+            // the caller's chat already persisted (the shared catch below answers 200).
+            const existing = await ddbClient.send(new GetCommand({
+              TableName: sessionsTable,
+              Key: { sessionId },
+              ProjectionExpression: "#active",
+              ExpressionAttributeNames: { "#active": "active" },
+            }));
+            if (existing.Item?.active === 0) {
+              const gone: any = new Error("This chat was deleted");
+              gone.name = "SessionDeleted";
+              throw gone;
+            }
+            throw putErr;
+          });
           res.writeHead(201, { "content-type": "application/json", "access-control-allow-origin": "*" });
           res.end(JSON.stringify({ sessionId, createdAt: now }));
           return;
@@ -1522,7 +1539,7 @@ export function buildApp(): Express {
               TableName: sessionsTable,
               Key: { sessionId: sessionIdParam },
             }));
-            rendersOwned = !!ownRow.Item && ownRow.Item.actorId === sessionsActorId;
+            rendersOwned = !!ownRow.Item && ownRow.Item.actorId === sessionsActorId && ownRow.Item.active !== 0;
           } catch (e) {
             console.error(`[agentcore-proxy] /sessions/${sessionIdParam}/renders ownership lookup failed:`, e);
             rendersOwned = false;
@@ -1553,19 +1570,7 @@ export function buildApp(): Express {
               const body = await obj.Body?.transformToString();
               const manifest = body ? JSON.parse(body) : null;
               if (!manifest) return null;
-              // A manifest carries `renderSkill` but no tab label -- the label was only
-              // ever passed through the stream. Derive one so a restored tab is named after
-              // the work ("Shot Segmentation") instead of falling back to "Render Output".
-              const skill = String(manifest.renderSkill ?? "").split(",")[0].trim();
-              const fromSkill = skill
-                .replace(/^render[-_]/, "")
-                .split(/[-_\s]+/)
-                .filter(Boolean)
-                .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
-                .join(" ");
-              // A manifest that names itself (an `asset-player` tab from show_asset is titled with the file's
-              // Display_Name) keeps that name; it carries no renderSkill, so it was restored as "Render Output".
-              const label = fromSkill || (typeof manifest.title === "string" ? manifest.title.trim() : "");
+              const label = renderTabLabel(manifest);
               // Order by the manifest's OWN creation time when it has one (never later than the
               // object's LastModified): a viewState PATCH rewrites the object (new LastModified), and
               // a tab must not jump to the end of the strip because the user moved its range.
@@ -1616,7 +1621,8 @@ export function buildApp(): Express {
             Key: { sessionId: sessionIdParam },
           }));
           const item = got.Item;
-          const owned = !!item && item.actorId === sessionsActorId;
+          // A deleted chat (`active = 0`) is gone: its transcript is not served, whoever asks.
+          const owned = !!item && item.actorId === sessionsActorId && item.active !== 0;
           let transcript: unknown[] = [];
           if (owned) {
             const fromS3 = uploadBucket
@@ -1925,6 +1931,11 @@ export function buildApp(): Express {
         res.writeHead(405, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
       } catch (err: any) {
+        if (err.name === "SessionDeleted") {
+          res.writeHead(410, { "content-type": "application/json", "access-control-allow-origin": "*" });
+          res.end(JSON.stringify({ error: "session_deleted" }));
+          return;
+        }
         if (err.name === "ConditionalCheckFailedException") {
           res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
           res.end(JSON.stringify({ sessionId: sessionIdParam || "exists" }));
@@ -2606,6 +2617,9 @@ export function buildApp(): Express {
         if (!res.headersSent) {
           res.writeHead(500, { "content-type": "application/json", "access-control-allow-origin": "*" });
           res.end(JSON.stringify({ ok: false, error: "internal error" }));
+        } else if (!res.writableEnded) {
+          // Already streaming a long action's keep-alive: end it with the failure in the body.
+          res.end(JSON.stringify({ ok: false, error: "internal error" }));
         }
       });
     });
@@ -3187,6 +3201,11 @@ export function buildApp(): Express {
   // Set by the deploy from agent/src/model/models.json. Unset (local dev) reports no default, and the SPA then
   // leaves the orchestrator on its own default rather than guessing one.
   const DEFAULT_MODEL_ID = process.env.DEFAULT_MODEL_ID || undefined;
+  // The supported-model list, from the deploy (agent/src/model/models.json `picker`); unset = every model.
+  const MODEL_PICKER: RegExp[] = (() => {
+    try { return (JSON.parse(process.env.MODEL_PICKER || "[]") as string[]).map((p) => new RegExp(p)); } catch { return []; }
+  })();
+  const supportedModel = (id: string) => MODEL_PICKER.length === 0 || MODEL_PICKER.some((p) => p.test(id));
   const bedrockClient = new BedrockClient({ region: REGION });
   let modelsCache: { data: any[]; ts: number } = { data: [], ts: 0 };
 
@@ -3199,6 +3218,18 @@ export function buildApp(): Express {
         return;
       }
 
+      // The foundation models Bedrock lists as ACTIVE (not LEGACY): a profile is offered only when every model
+      // behind it is one (a model no longer listed is retired; its profile can outlive it, e.g. Nova Premier).
+      // Unreadable (a missing grant, a blip) = no lifecycle filter, never an empty picker. Same rule as the
+      // agents' model/catalog.current.
+      const active: Set<string> | null = await bedrockClient.send(new ListFoundationModelsCommand({}))
+        .then((r) => new Set((r.modelSummaries ?? []).filter((m) => m.modelLifecycle?.status === "ACTIVE").map((m) => m.modelId ?? "")))
+        .catch((e: any) => { console.warn("[agentcore-proxy] model lifecycles unreadable:", e?.message); return null; });
+      const current = (p: { models?: { modelArn?: string }[] }) => {
+        if (!active) return true;
+        const ids = (p.models ?? []).map((m) => String(m.modelArn ?? "").split("foundation-model/").pop() ?? "");
+        return ids.length > 0 && ids.every((id) => active.has(id));
+      };
       const profiles: any[] = [];
       let nextToken: string | undefined;
       do {
@@ -3210,13 +3241,9 @@ export function buildApp(): Express {
         const resp = await bedrockClient.send(cmd);
         for (const p of resp.inferenceProfileSummaries ?? []) {
           if (p.status !== "ACTIVE") continue;
-          // Filter out image/embedding/video models
-          const name = (p.inferenceProfileName ?? "").toLowerCase();
-          if (name.includes("stable") || name.includes("embed") || name.includes("pegasus") ||
-              name.includes("upscale") || name.includes("outpaint") || name.includes("inpaint") ||
-              name.includes("background") || name.includes("recolor") || name.includes("replace") ||
-              name.includes("style") || name.includes("sketch") || name.includes("structure") ||
-              name.includes("erase")) continue;
+          // Only the supported models (models.json `picker`, the list the agents apply too): every other one failed
+          // every turn somewhere (IND403: Marketplace access denied, an 8,192-token output limit).
+          if (!supportedModel(p.inferenceProfileId ?? "") || !current(p)) continue;
           profiles.push({
             id: p.inferenceProfileId,
             name: p.inferenceProfileName,
@@ -3329,7 +3356,7 @@ export function buildApp(): Express {
       (it) =>
         it.current === true &&
         it.category === "specialty-agent" &&
-        it.recordType === "published" &&
+        typeof it.version === "number" &&
         it.deprecated !== true,
     );
     return current ?? null;
@@ -3679,9 +3706,9 @@ export function buildApp(): Express {
               ? async (sid: string) => (await ddbClient.send(new GetCommand({
                   TableName: sessionsTable,
                   Key: { sessionId: sid },
-                  ProjectionExpression: "#actor, #locked",
-                  ExpressionAttributeNames: { "#actor": "actorId", "#locked": "locked" },
-                }))).Item as { actorId?: unknown; locked?: unknown } | undefined
+                  ProjectionExpression: "#actor, #locked, #active",
+                  ExpressionAttributeNames: { "#actor": "actorId", "#locked": "locked", "#active": "active" },
+                }))).Item as { actorId?: unknown; locked?: unknown; active?: unknown } | undefined
               : null,
           );
         } catch (lookupErr: any) {
@@ -3939,14 +3966,14 @@ export function buildApp(): Express {
         // A lookup failure fails CLOSED (503, retryable): letting the turn through on a DynamoDB blip
         // would be letting it through unchecked.
         if (effectiveSessionId) {
-          let sessionRow: { actorId?: unknown; locked?: unknown } | undefined;
+          let sessionRow: { actorId?: unknown; locked?: unknown; active?: unknown } | undefined;
           if (ddbClient && sessionsTable) {
             try {
               const snap = await ddbClient.send(new GetCommand({
                 TableName: sessionsTable,
                 Key: { sessionId: effectiveSessionId },
-                ProjectionExpression: "#actor, #locked",
-                ExpressionAttributeNames: { "#actor": "actorId", "#locked": "locked" },
+                ProjectionExpression: "#actor, #locked, #active",
+                ExpressionAttributeNames: { "#actor": "actorId", "#locked": "locked", "#active": "active" },
               }));
               sessionRow = snap.Item as typeof sessionRow;
             } catch (lookupErr: any) {
@@ -4087,14 +4114,14 @@ export function buildApp(): Express {
             .catch((e: any) => console.error("[agentcore-proxy] provisional transcript failed:", e?.message))
             .finally(() => { provisionalInFlight = false; });
         };
-        const runFinalize = (error?: string) => {
-          if (!finalizeEnabled || finalized) return;
+        const runFinalize = (error?: string): Promise<void> => {
+          if (!finalizeEnabled || finalized) return Promise.resolve();
           finalized = true; // blocks any new provisional; the final write lands last
           try {
             acc!.finish();
           } catch (e: any) {
             console.error("[agentcore-proxy] transcript accumulate failed:", e?.message);
-            return;
+            return Promise.resolve();
           }
           if (notifyGeneratedMedia && turnGate.kind === "proceed" && turnGate.turnContext) {
             const { text, steps, summary } = acc!.result();
@@ -4104,10 +4131,17 @@ export function buildApp(): Express {
             });
           }
           // Wait for any in-flight provisional to settle, then write the authoritative final.
-          void provisionalPromise
+          return provisionalPromise
             .catch(() => {})
             .then(() => writeTurn(error))
             .catch((e: any) => console.error("[agentcore-proxy] transcript finalize failed:", e?.message));
+        };
+        // A turn that hands the chat to another project (`open_project`) ends only once it is recorded: the chat's
+        // next request moves it there, and the gate allows that only after reading this turn's hand-off.
+        const endAfterFinalize = (error?: string) => {
+          const done = runFinalize(error);
+          const handsOff = !!acc && !!(acc.result().summary as { open_project?: unknown } | null)?.open_project;
+          void (handsOff ? done : Promise.resolve()).then(() => { if (!res.writableEnded) res.end(); });
         };
         const onClientClose = () => {
           clientGone = true;
@@ -4153,8 +4187,7 @@ export function buildApp(): Express {
         upstream.on("end", () => {
           stopHeartbeat();
           req.off("close", onClientClose);
-          if (!res.writableEnded) res.end();
-          runFinalize();
+          endAfterFinalize();
         });
         upstream.on("error", (streamErr: Error) => {
           stopHeartbeat();

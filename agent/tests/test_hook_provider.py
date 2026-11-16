@@ -6,6 +6,7 @@ attributes) and a fake registry to verify callback registration.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import types
@@ -154,16 +155,31 @@ def test_layer3_bucket_field_plus_nested_dict(  ):
 
 
 def test_layer3_unknown_tool_shape():
-    """Layer 3: a hypothetical new tool with bucket + keys in a list."""
+    """Layer 3: a new tool with a bucket and a LIST of keys under a field that says so."""
     result = {"content": [{"json": {
         "targetBucket": "new-tool-output-bucket",
-        "artifacts": ["renders/frame_001.png", "renders/frame_002.png"],
+        "artifact_keys": ["renders/frame_001.png", "renders/frame_002.png"],
         "status_file": "renders/status.txt",
     }}]}
     uris = extract_output_uris(result)
     assert "s3://new-tool-output-bucket/renders/frame_001.png" in uris
     assert "s3://new-tool-output-bucket/renders/frame_002.png" in uris
     assert not any("status.txt" in u for u in uris)
+
+
+def test_layer3_never_turns_a_name_into_a_location():
+    """A display name is not an object key. Redesign 2026-11-11: a content review's `videos[].name`
+    ("Netflix_Open_Content_Meridian.mp4") sat beside its `sourceUri`, became
+    `s3://<bucket>/Netflix_Open_Content_Meridian.mp4` (no such object) and opened a dead 10:00 video row."""
+    src = "s3://skills-bucket/projects/p1/video:3a8c4a0e/Netflix_Open_Content_Meridian.mp4"
+    result = {"content": [{"text": json.dumps({"review": {"videos": [
+        {"assetId": "video:3a8c4a0e", "sourceUri": src, "name": "Netflix_Open_Content_Meridian.mp4",
+         "title": "Meridian.mov", "fileName": "clip.mp4"}]}})}]}
+    uris = extract_output_uris(result)
+    assert uris == [src]
+    # A bucket with names in a plain list is no shape of keys either.
+    assert extract_output_uris({"content": [{"json": {
+        "targetBucket": "b", "artifacts": ["renders/frame_001.png"]}}]}) == []
 
 
 def test_layer2_does_not_suppress_layer3_vtt():

@@ -123,6 +123,10 @@ def _parse_skill_frontmatter(md: str) -> dict:
         return meta
     _DECL_KEYS = {"detect", "markers", "segments", "lanes", "boxes", "boxes_by", "rows",
                   "thumbnails", "duration", "summary", "deliverable", "subsumes",
+                  # Which LANE SET the declaration's segments/lanes draw ("speakers", "people", "scenes"): the
+                  # timeline shows each set as its newest view drew it (composeTimeline), so a re-run or an agent
+                  # correction replaces that set and leaves every other lane alone.
+                  "lane_set",
                   # The producing TOOL's federated target (e.g. "shot-segmentation").
                   # This is the AUTHORITATIVE view key: the tool that ran determines the
                   # view, deterministically. `detect:` content-scoring stays only as a

@@ -609,35 +609,18 @@ def _is_url_form(s: str) -> bool:
     return low.startswith(("https://", "http://", _PROXY_PATH))
 
 
-def presign_artifact_urls_in(value: Any, expires_in: int = 21600,
-                             trusted_project_id: Optional[str] = None) -> tuple[Any, bool]:
-    """Deep-walk ``value``; replace each string that IS one of our artifact URLs with a
-    presigned S3 GET. Returns ``(new_value, changed)``.
-
-    The input is never mutated: containers along a changed path are copied, everything
-    else is shared. Non-matching strings are untouched, and a string whose presign fails
-    keeps its original value (with a warning) so the external tool still sees the URL.
-    """
+def map_strings(value: Any, fn) -> tuple[Any, bool]:
+    """Deep-walk ``value`` and replace each string ``s`` with ``fn(s)`` (``None`` = keep). Returns
+    ``(new_value, changed)``. The input is never mutated: containers along a changed path are copied,
+    everything else is shared."""
     if isinstance(value, str):
-        if not _is_url_form(value):
-            return value, False
-        if own_artifact_key(value) is None:
-            asset_key = trusted_project_asset_key(value, trusted_project_id)
-            if asset_key is None:
-                return value, False
-            signed = _presign_key(asset_key, expires_in)
-            return (signed, True) if signed else (value, False)
-        signed = presign_artifact_url(value, expires_in)
-        if not signed:
-            logger.warning("tool-input artifact presign unavailable; passing the original URL "
-                           "(%s)", value.split("?", 1)[0])
-            return value, False
-        return signed, True
+        nv = fn(value)
+        return (nv, True) if nv is not None and nv != value else (value, False)
     if isinstance(value, dict):
         out: dict = {}
         changed = False
         for k, v in value.items():
-            nv, c = presign_artifact_urls_in(v, expires_in, trusted_project_id)
+            nv, c = map_strings(v, fn)
             out[k] = nv
             changed = changed or c
         return (out, True) if changed else (value, False)
@@ -645,10 +628,80 @@ def presign_artifact_urls_in(value: Any, expires_in: int = 21600,
         items = []
         changed = False
         for v in value:
-            nv, c = presign_artifact_urls_in(v, expires_in, trusted_project_id)
+            nv, c = map_strings(v, fn)
             items.append(nv)
             changed = changed or c
         if not changed:
             return value, False
         return (type(value)(items) if isinstance(value, tuple) else items), True
     return value, False
+
+
+def presign_artifact_urls_in(value: Any, expires_in: int = 21600,
+                             trusted_project_id: Optional[str] = None) -> tuple[Any, bool]:
+    """Deep-walk ``value``; replace each string that IS one of our artifact URLs with a
+    presigned S3 GET. Returns ``(new_value, changed)``.
+
+    The input is never mutated. Non-matching strings are untouched, and a string whose presign fails
+    keeps its original value (with a warning) so the external tool still sees the URL.
+    """
+    def one(value: str) -> Optional[str]:
+        if not _is_url_form(value):
+            return None
+        if own_artifact_key(value) is None:
+            asset_key = trusted_project_asset_key(value, trusted_project_id)
+            return _presign_key(asset_key, expires_in) if asset_key is not None else None
+        signed = presign_artifact_url(value, expires_in)
+        if not signed:
+            logger.warning("tool-input artifact presign unavailable; passing the original URL "
+                           "(%s)", value.split("?", 1)[0])
+        return signed
+
+    return map_strings(value, one)
+
+
+# Copy -> origin, per object key: a copy never changes where it came from (the importer writes it once).
+_ORIGIN_CACHE: dict[str, Optional[str]] = {}
+
+
+def _origin_of(bucket: str, key: str) -> Optional[str]:
+    """The ``s3://`` original an imported copy names in its ``origin`` metadata, if it still exists."""
+    ck = f"{bucket}/{key}"
+    if ck in _ORIGIN_CACHE:
+        return _ORIGIN_CACHE[ck]
+    origin = None
+    try:
+        meta = _client().head_object(Bucket=bucket, Key=key).get("Metadata") or {}
+        cand = str(meta.get("origin") or "")
+        if cand.startswith("s3://") and "/" in cand[5:]:
+            ob, ok = cand[5:].split("/", 1)
+            try:
+                _client().head_object(Bucket=ob, Key=ok)
+                origin = cand
+            except Exception as exc:  # noqa: BLE001
+                code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+                # Gone (the producer cleaned its scratch prefix up): keep the copy. Not ours to read (403): the
+                # producer's tools read it with their own role, so the original still stands.
+                origin = None if code in ("404", "NoSuchKey", "NotFound") else cand
+    except Exception:  # noqa: BLE001 — no copy there, or unreadable: nothing to swap
+        origin = None
+    _ORIGIN_CACHE[ck] = origin
+    return origin
+
+
+def origin_refs_in(value: Any) -> tuple[Any, bool]:
+    """Deep-walk a tool's input and replace each ``s3://`` URI of OUR copy of another system's output with that
+    output's original (the copy's ``origin`` metadata, written by result_resolution.make_s3_importer).
+
+    Our copies exist for durable links and display; a tool of the producer reads its own bucket (M2C: "must be on
+    the proxy bucket"), so it must be handed what it returned. Only ``s3://`` identities are swapped — an https link
+    is for fetching, and an external tool must keep being able to fetch it. Anything else is left as is.
+    """
+    bucket = artifacts_bucket()
+
+    def one(value: str) -> Optional[str]:
+        if not bucket or not value.startswith(f"s3://{bucket}/"):
+            return None
+        return _origin_of(bucket, value[len(f"s3://{bucket}/"):])
+
+    return map_strings(value, one)

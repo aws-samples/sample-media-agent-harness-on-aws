@@ -104,9 +104,13 @@ def test_categories_not_flagged_distinguishes_clean_from_not_assessed():
     assert status["LANGUAGE"] == "not_assessed"           # no transcript scanned
     assert status["VIOLENCE"] == "attested_clean"         # shot descriptions covered it
     assert len(status) == 8
+    # Coverage comes from the evidence alone: a `not_assessed` list in the findings (older instructions) is ignored.
+    # Meridian 2026-11-11: identical evidence printed four categories "not assessed" on one run, "nothing found" on
+    # the next, because the model's list overrode what the shots and transcript covered.
     t = BR.build({**TIDAL, "not_assessed": ["SEXUAL"]})
     st = {c["category"]: c["status"] for c in t["categories_not_flagged"]}
-    assert st["SEXUAL"] == "not_assessed" and "SUBSTANCE" not in st
+    assert st["SEXUAL"] == "attested_clean" and "SUBSTANCE" not in st
+    assert st == {c["category"]: c["status"] for c in BR.build(TIDAL)["categories_not_flagged"]}
 
 
 def test_supporting_evidence_never_sets_the_rating():

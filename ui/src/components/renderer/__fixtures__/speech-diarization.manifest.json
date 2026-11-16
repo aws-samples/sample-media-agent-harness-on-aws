@@ -18,21 +18,24 @@
     {
       "end": 29.318,
       "group": "SPEAKER_01",
-      "id": "s-0",
+      "id": "speakers-0",
+      "laneSet": "speakers",
       "name": "So these guys just disappeared?",
       "start": 26.978
     },
     {
       "end": 34.015,
       "group": "SPEAKER_00",
-      "id": "s-1",
+      "id": "speakers-1",
+      "laneSet": "speakers",
       "name": "Yeah, on that stretch of road.",
       "start": 30.018
     },
     {
       "end": 36.0,
       "group": "SPEAKER_01",
-      "id": "s-2",
+      "id": "speakers-2",
+      "laneSet": "speakers",
       "name": "With the big rock.",
       "start": 34.5
     }

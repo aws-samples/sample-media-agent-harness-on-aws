@@ -28,6 +28,8 @@ export interface MintedUrl {
   obtainedAt: number;
   /** Optional signer-reported expiry; the age check uses `obtainedAt`. */
   expiresAt?: number;
+  /** A video's hero still (`rendition.jpg`), shown on its card so no card mounts a player. */
+  poster?: string;
 }
 
 /** The playback position and play intent captured before a `src` swap. */

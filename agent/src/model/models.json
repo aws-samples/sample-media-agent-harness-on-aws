@@ -1,5 +1,5 @@
 {
-  "_doc": "THE one place the harness's default models are set. Agents read it (agent/src/model/defaults.py); the deploy reads it too (infra/lib/agent-infra-stack.ts: the UI proxy's /models default and BEDROCK_REASONING_EFFORT). A user's pick in Settings -> Model still wins for the orchestrator per request, and sub-agents dispatched in that turn inherit it. Change a model here and nowhere else; agent/tests/test_model_defaults.py fails on a model id hard-coded anywhere else.",
+  "_doc": "THE one place the harness's default models are set. Agents read it (agent/src/model/defaults.py); the deploy reads it too (infra/lib/agent-infra-stack.ts: the UI proxy's /models default and BEDROCK_REASONING_EFFORT). A user's pick in Settings -> Model still wins for the orchestrator per request, and sub-agents dispatched in that turn inherit it. Change a model here and nowhere else; agent/tests/test_model_defaults.py fails on a model id hard-coded anywhere else. `fallbacks`: per model id, the models that take over (in order) when it is unavailable (throttled or a Bedrock outage, after its retries), never on a bad request (model/factory.py with_fallbacks). `geo_profile_fallbacks`: in a runtime Region starting with the key, every global. model in a chain (the primary included) is followed by the same model on that geography's profile (us-west-2 -> global.X, us.X, then the next model). A geography profile routes and is throttled apart from global., so a global. ServiceUnavailableException ('Bedrock is unable to process your request') often succeeds there and the turn stays on its model. Only geographies listed here: a us. profile does not exist from eu-west-1 or ap-*, where it would fail with a ValidationException that ends the chain, so no geography-locked id is ever written here. `picker`: the models a person may pick (Settings -> Model, an agent's model) and the agents may choose: inference-profile ids matching any of these patterns, and only while Bedrock lists their models as ACTIVE (model/catalog.current: LEGACY and retired models drop out by themselves). The families the harness runs on (tool use, streaming, its 16K output budget; checked live 2026-11-15): Claude 4 and later (not Opus 4.1), Nova 2, and GPT. Outside it, a model failed every turn in a workshop account (IND403: 'Marketplace access denied', an '8,192-token limit'). The UI proxy gets it from the deploy as MODEL_PICKER.",
   "reasoning_effort": "low",
   "thinking_prefix_mismatch": "drop_block",
   "agents": {
@@ -9,5 +9,22 @@
     "render": "global.anthropic.claude-sonnet-5-5",
     "lab_chat": "global.anthropic.claude-sonnet-5-5",
     "improve_judge": "global.anthropic.claude-sonnet-5-5"
-  }
+  },
+  "fallbacks": {
+    "global.anthropic.claude-opus-5-5": [
+      "global.anthropic.claude-opus-5",
+      "global.anthropic.claude-sonnet-5-5"
+    ],
+    "global.anthropic.claude-sonnet-5-5": [
+      "global.anthropic.claude-sonnet-5"
+    ]
+  },
+  "geo_profile_fallbacks": {
+    "us-": "us."
+  },
+  "picker": [
+    "anthropic\\.claude-(?:opus|sonnet|haiku|fable)-(?!4-1)(?:4|[5-9])",
+    "amazon\\.nova-2-",
+    "openai\\.gpt-\\d"
+  ]
 }

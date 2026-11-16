@@ -1119,14 +1119,16 @@ def make_s3_importer(s3_client, skills_bucket: str, artifacts_domain: str,
         # shot-segmentation shots.json/recurrence.json became unreadable → the render agent
         # 403'd and the shots lane stalled). Copying makes the deliverable durable.
         dest_key = f"{import_prefix}{(relpath or '').lstrip('/')}"
-        ct = mimetypes.guess_type(dest_key)[0]
+        ct = mimetypes.guess_type(dest_key)[0] or "application/octet-stream"
         try:
-            kwargs = {"Bucket": skills_bucket, "Key": dest_key,
-                      "CopySource": {"Bucket": src_bucket, "Key": src_key}}
-            if ct:
-                kwargs["ContentType"] = ct
-                kwargs["MetadataDirective"] = "REPLACE"
-            s3_client.copy_object(**kwargs)
+            # The copy says where it came from (`x-amz-meta-origin`): our copy is for durable links and display,
+            # but a tool of the producer (M2C reads only its own proxy bucket) must be handed the ORIGINAL — the
+            # gateway call path swaps a copy for its origin (agent jobs/origin_refs). Without it, a scene
+            # enrichment handed the workspace copy of shots.json failed "must be on the proxy bucket".
+            s3_client.copy_object(Bucket=skills_bucket, Key=dest_key,
+                                  CopySource={"Bucket": src_bucket, "Key": src_key},
+                                  ContentType=ct, MetadataDirective="REPLACE",
+                                  Metadata={"origin": f"s3://{src_bucket}/{src_key}"})
         except Exception:
             return None
         return f"https://{artifacts_domain}/{dest_key}"

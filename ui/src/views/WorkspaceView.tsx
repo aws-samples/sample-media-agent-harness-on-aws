@@ -1,5 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import HarnessTour from '../components/tour/HarnessTour';
+import { viewSubjectIds, viewVersionNote } from '../shared/renderSubject';
+import { OPEN_VIEW_EVENT, type OpenViewDetail } from '../components/renderer/openView';
 import HelpButton from '../components/tour/HelpButton';
 import { fetchModels, type ModelInfo } from '../api';
 import { theme } from '../styles/tokens';
@@ -12,7 +14,7 @@ import { onNewChatInProjectRequest, setPendingOpen } from '../projects/newChatIn
 import { projectsEnabled as isProjectsEnabled, peekProjectsEnabled } from '../projects/api';
 import ProjectsSurface from '../components/projects/ProjectsSurface';
 import { OPEN_PROJECT_GRAPH_EVENT } from '../components/projects/graph/graphResult';
-import { routeTimelineAction, type TimelineActionLike } from '../projects/mediaActions';
+import { routeTimelineAction, setVersionDetail, type TimelineActionLike } from '../projects/mediaActions';
 import { openActionOutputs } from '../components/chat/ActionLine';
 import { RESULT_GALLERY_EVENT, resultGalleryManifest, type ResultGalleryDetail } from '../projects/mediaActions';
 import { OPEN_PROJECT_EVENT } from '../projects/openProject';
@@ -50,7 +52,6 @@ import type { CustomAgentSummary } from '../components/SessionSidebar';
 import ActivityPanel from '../components/ActivityPanel';
 import CompletionNotifications from '../components/CompletionNotifications';
 import type { JobNotification } from '../services/notifications';
-import { rollupRenderUrls } from '../services/notifications';
 import { useMomentClipAutoOpen } from '../hooks/useMomentClipAutoOpen';
 // buildResultTabs is intentionally not used here any more: the render-artifacts
 // hook is the only producer of render tabs. renderTab/manifestBlock stay for
@@ -61,7 +62,7 @@ import { OPEN_ASSET_EVENT, type OpenAssetEventDetail } from '../projects/openCit
 import { pageOfSpan } from '../shared/pageLocator';
 import { normalizeViewState } from '../shared/renderViewState';
 import type { RenderManifest } from '../components/nle/manifestParser';
-import { renderTabKey, entryManifestKey, manifestKeyOfUrl, newClientId } from '../components/renderer/renderTabKey';
+import { renderTabKey, entryManifestKey, manifestKeyOfUrl, newClientId, sessionOfRenderKey } from '../components/renderer/renderTabKey';
 import { setActiveSessionId } from '../services/activeSession';
 import { collapseToLineages } from '../utils/publishedLineages';
 import { setRenderCache } from '../utils/safeStorage';
@@ -120,9 +121,14 @@ export function tabIndexHoldingManifest(tabs: RenderHistoryEntry[], key: string)
   });
 }
 
+const noteOf = (manifest: unknown): { note?: string } => {
+  const note = viewVersionNote(manifest);
+  return note ? { note } : {};
+};
+
 export function mergeServerRenders(
   cached: RenderHistoryEntry[],
-  serverRenders: { key: string; label?: string; createdAt: string; manifest?: Record<string, unknown>; composite?: boolean; sourceKey?: string; memberKeys?: string[] }[],
+  serverRenders: { key: string; label?: string; createdAt: string; manifest?: Record<string, unknown>; composite?: boolean; sourceKey?: string; memberKeys?: string[]; subjectIds?: string[] }[],
 ): RenderHistoryEntry[] {
   const isComposite = (r: typeof serverRenders[number]) => r.composite === true || String(r.key).startsWith('composite:');
   // Every tab carries its stable identity (R8.3): the manifest key, or the composite key. A
@@ -143,6 +149,8 @@ export function mergeServerRenders(
       label: r.label,
       key: r.key,
       blocks: [{ template: 'manifest-router', title: r.label || 'Render Output', data }],
+      subjectIds: r.subjectIds ?? viewSubjectIds(r.manifest),
+      ...(isComposite(r) ? {} : noteOf(r.manifest)),
     };
     // The SAME solo render already on screen keeps its blocks (by identity), so a reconcile never
     // reloads it — notably an Expand view, whose block also carries its inline manifest.
@@ -768,10 +776,17 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
     }));
     // Frame / Clip / Crop on ONE file of the chat's project run DIRECTLY (no model turn): the proxy runs them in
     // the chat's warm sandbox and the chat gets an action line. Anything it refuses goes to the agent as before.
+    // A trim, clip or crop of some of a gallery's items (same kind of file out) comes back as that gallery's next
+    // version, in its own tab. Frames are a different kind of file: their own gallery.
+    const setVersion = (data?.verb === 'trim' || data?.verb === 'clip' || data?.verb === 'crop') && Array.isArray(data?.set) && data?.origin && Array.isArray(batchClips)
+      ? { set: data.set, clips: batchClips, origin: data.origin } : null;
     routeTimelineAction(data as TimelineActionLike, activeSessionRef.current, {
       projectOf: (sid) => getSessionProject(sid)?.activeProjectId,
       sendToAgent,
-      openOutputs: openActionOutputs,
+      openOutputs: setVersion
+        ? (_outputs, sid, _op, _name, record) => window.dispatchEvent(new CustomEvent(RESULT_GALLERY_EVENT,
+            { detail: setVersionDetail(setVersion, record, sid, String(data?.verb)) }))
+        : (outputs, sid, op, name) => { void openActionOutputs(outputs, sid, op, name); },
       // A brand-new chat has no row until its first turn; the action names the chat, as a first message would.
       prepare: (sid) => persistSessionForAction(sid, (s) => createSession(s, clean.slice(0, 80))),
     });
@@ -986,22 +1001,16 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
         setRenderIndex(action.index);
       } else if (action.kind === 'fetch') {
         lastResultsFetchRef.current.set(n.jobId, Date.now());
-        const urls = rollupRenderUrls(n, Array.from(jobsStore.getSnapshot().jobsById.values()));
-        if (urls.length) {
-          // Tab comes from the server render list (handleSelectSession above) + the reconcile/hook — do
-          // NOT also author a client URL tab here (lab:render-urls). That appended a duplicate
-          // 'composing' tab which the reconcile then removed: the notification-click tab flicker the
-          // user reported. This stays pure navigation + a text-only summary.
-          const { prompt: summary, displayText } = summaryNotificationTurn(n.jobId, n.label);
-          requestAnimationFrame(() => window.dispatchEvent(
-            new CustomEvent('chat:auto-render', { detail: { prompt: summary, displayText, sessionId: n.sessionId } }),
-          ));
-        } else {
-          const prompt = `The ${n.label || 'requested'} job/flow completed (${n.jobId}). Fetch its results, give me a brief summary, and feature the artifacts.`;
-          requestAnimationFrame(() => window.dispatchEvent(
-            new CustomEvent('chat:auto-render', { detail: { prompt, displayText: `Show the ${n.label || 'job'} results`, sessionId: n.sessionId } }),
-          ));
-        }
+        // ONE turn for every success, whether or not the job's outputs resolve to browser URLs here (an M2C job
+        // reports s3:// outputs, so shot segmentation never did): read the stored result and summarise it. The
+        // render hook puts the outputs on the file's own tab; the turn carries `results_summary`, so the agent
+        // cannot open a second, gallery tab of them. The old fallback asked it to "feature the artifacts", and
+        // it did — a "Shot segmentation — 6 shots" gallery beside the clip that already showed them (staging
+        // session eb4275b7). The tab comes from the server render list, never a client URL tab (that flickered).
+        const { prompt: summary, displayText, turnPurpose } = summaryNotificationTurn(n.jobId, n.label);
+        requestAnimationFrame(() => window.dispatchEvent(
+          new CustomEvent('chat:auto-render', { detail: { prompt: summary, displayText, turnPurpose, sessionId: n.sessionId } }),
+        ));
       }
       // action.kind === 'suppress' → in-flight dedup: a fetch was just dispatched; do nothing.
     } else if (n.kind === 'failure' && n.sessionId && !targetLocked) {
@@ -1151,6 +1160,8 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
         status: 'ready',
         key: predictedKey,
         clientOnly: true,
+        subjectIds: viewSubjectIds(manifest),
+        ...noteOf(manifest),
       };
       const next = [...prev, entry];
       setRenderIndex(next.length - 1);
@@ -1184,7 +1195,7 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
   }, [activeSession]);
 
   const openAssetInPanel = useCallback((detail: OpenAssetEventDetail) => {
-    const { ref, kind, displayName, startMs, sessionId, range } = detail || ({} as OpenAssetEventDetail);
+    const { ref, kind, displayName, startMs, sessionId, range, sourceLocation } = detail || ({} as OpenAssetEventDetail);
     if (!ref || !displayName || (sessionId && sessionId !== activeSession)) return;
     // A Moment's Expand carries the card's In/Out: the FULL asset opens with that span selected (the
     // persisted `viewState.range`, restored by the timeline once the media length is known) — the
@@ -1199,6 +1210,9 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
       title: label,
       ref, kind, displayName, startMs, origin: viewState ? 'moment' : 'citation',
       ...(viewState ? { viewState } : {}),
+      // The file this view plays: an analysis of the same file (shots, speakers) folds into this tab
+      // server-side (renderSession.composeRenderTabs) instead of opening beside it.
+      ...(sourceLocation ? { sourceLocation } : {}),
     }, label);
   }, [activeSession, openClientViewTab]);
 
@@ -1218,6 +1232,12 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
     };
     const onOpenAsset = (e: Event) => openAssetInPanel((e as CustomEvent).detail as OpenAssetEventDetail);
     const onGallery = (e: Event) => openResultGallery((e as CustomEvent).detail as ResultGalleryDetail);
+    // A renderer's own view (a Moments search's results, as the tab's next version) — for the chat on screen only.
+    const onView = (e: Event) => {
+      const d = (e as CustomEvent<OpenViewDetail>).detail;
+      if (d?.manifest && (!d.sessionId || d.sessionId === activeSessionRef.current)) openClientViewTab(d.manifest, d.label);
+    };
+    window.addEventListener(OPEN_VIEW_EVENT, onView as EventListener);
     window.addEventListener(RESULT_GALLERY_EVENT, onGallery as EventListener);
     window.addEventListener('lab:render-media', onMedia as EventListener);
     window.addEventListener('lab:render-urls', onUrls as EventListener);
@@ -1227,8 +1247,9 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
       window.removeEventListener('lab:render-urls', onUrls as EventListener);
       window.removeEventListener(OPEN_ASSET_EVENT, onOpenAsset as EventListener);
       window.removeEventListener(RESULT_GALLERY_EVENT, onGallery as EventListener);
+      window.removeEventListener(OPEN_VIEW_EVENT, onView as EventListener);
     };
-  }, [handleUploadedMedia, renderUrlsInPanel, openAssetInPanel, openResultGallery]);
+  }, [handleUploadedMedia, renderUrlsInPanel, openAssetInPanel, openResultGallery, openClientViewTab]);
 
   // Remove a render tab (each generation adds one; let the user prune extras —
   // they can always reprompt for more). Prunes history, keeps the selected index
@@ -1251,8 +1272,13 @@ export default function WorkspaceView({ onOpenSettings, onShowLanding = () => {}
       // /api/artifact?key=<key>; legacy/composing tabs without one are local-only, no server delete.
       // An Expand view whose save is still in flight has no manifestUrl yet; its save deletes what
       // it creates (removedTabKeysRef).
-      const key = entryManifestKey(removed);
-      if (key && activeSession) deleteSessionRender(activeSession, key).catch(() => {});
+      // A composite tab has no manifest of its own: its MEMBERS are what the server lists, so they are deleted too —
+      // otherwise the closed tab came back on the next reconcile.
+      const members = (removed.blocks?.[0]?.data as { memberKeys?: unknown } | undefined)?.memberKeys;
+      const keys = new Set([entryManifestKey(removed), ...(Array.isArray(members) ? members.map(String) : [])]);
+      for (const key of keys) {
+        if (key && activeSession && sessionOfRenderKey(key) === activeSession) deleteSessionRender(activeSession, key).catch(() => {});
+      }
       // Removing a tab before the current one shifts selection left; removing the
       // current/after is handled by the panel's Math.min clamp on renderIndex.
       setRenderIndex(cur => (idx < cur ? Math.max(0, cur - 1) : cur));

@@ -1507,10 +1507,22 @@ def _user_gated_tools_in_plan(plan, user_jwt_tool_names: "set[str] | None" = Non
     gated_set = user_jwt_tool_names or set()
     found: set[str] = set()
     for node in plan.nodes:
-        for tool_name in (node.tools or []):
+        for tool_name in _node_tools(node):
             if _tool_is_user_gated(tool_name) or tool_name in gated_set:
                 found.add(tool_name)
     return sorted(found)
+
+
+def _node_tools(node) -> list[str]:
+    """Every tool a node can run: its own, plus a runtime ``map``'s child template's. A map lists none itself; its
+    children are created by the chainer from ``config.template`` (8e2acba8/0e53b848: the recast map's fal tools
+    were only there, no grant was minted, and every child found the fal gateway "awaiting user token")."""
+    tools = [t for t in (getattr(node, "tools", None) or []) if isinstance(t, str)]
+    config = getattr(node, "config", None)
+    template = config.get("template") if isinstance(config, dict) else None
+    if isinstance(template, dict):
+        tools += [t for t in (template.get("tools") or []) if isinstance(t, str)]
+    return tools
 
 
 def _error(tool_use_id: str, message: str) -> dict:

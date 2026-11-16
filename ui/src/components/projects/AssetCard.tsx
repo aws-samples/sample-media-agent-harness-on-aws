@@ -17,6 +17,7 @@ import Badge from '../ui/Badge';
 import MoreIcon from '../icons/MoreIcon';
 import SearchIcon from '../icons/SearchIcon';
 import { request as requestAssetUrls } from '../../projects/assetUrlBatcher';
+import { useHeroStill } from '../../projects/heroStill';
 import { openAssetAt } from '../../projects/openCitation';
 import { formatBytes } from '../../projects/upload/kinds';
 import { assetRole, type AssetView } from '../../projects/api';
@@ -92,8 +93,11 @@ export default function AssetCard({
   selected = false, selecting = false, onSelectedChange, dragIds, onMove, onLineage,
 }: AssetCardProps) {
   const { assetId, kind, displayName, status } = asset;
-  const [thumb, setThumb] = useState<string | null>(null);
+  // The hero still (re-read when the status moves, e.g. indexing wrote it); after one failed refresh, the kind icon.
+  const hero = useHeroStill(projectId, assetId, kind, status);
   const [thumbRetried, setThumbRetried] = useState(false);
+  const [thumbFailed, setThumbFailed] = useState(false);
+  const thumb = thumbFailed ? null : hero.still;
   const [menuOpen, setMenuOpen] = useState(false);
   const [showReason, setShowReason] = useState(false);
   const [opening, setOpening] = useState(false);
@@ -101,27 +105,6 @@ export default function AssetCard({
   const [focused, setFocused] = useState(false);
   const reasonId = useId();
   const reason = status === 'failed' ? failureReason(asset) : null;
-
-  const loadThumb = useCallback(async () => {
-    const results = await requestAssetUrls(projectId, [assetId]);
-    const out = results.get(assetId);
-    // A video shows only its hero image (never the source: that is the whole video file).
-    if (out?.ok) setThumb(out.entry.rendition?.url ?? (kind === 'image' ? out.entry.source?.url : undefined) ?? null);
-    else setThumb(null);
-  }, [projectId, assetId, kind]);
-
-  useEffect(() => {
-    if (kind !== 'image' && kind !== 'video') return;
-    let live = true;
-    void requestAssetUrls(projectId, [assetId]).then((results) => {
-      if (!live) return;
-      const out = results.get(assetId);
-      if (out?.ok) setThumb(out.entry.rendition?.url ?? (kind === 'image' ? out.entry.source?.url : undefined) ?? null);
-    });
-    return () => {
-      live = false;
-    };
-  }, [kind, projectId, assetId, status]);
 
   // The project file standard, the same as a file in chat: click → the preview (a modal over the grid); its icons
   // are Preview, Download and Open in side panel. The side panel is where a file is worked on.
@@ -209,11 +192,11 @@ export default function AssetCard({
           onError={() => {
             // A presigned URL can expire while the card sits on screen: ask once for a fresh one.
             if (thumbRetried) {
-              setThumb(null);
+              setThumbFailed(true);
               return;
             }
             setThumbRetried(true);
-            void loadThumb();
+            hero.reload();
           }}
         />
       ) : (

@@ -28,7 +28,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../../../projects/api', async (orig) => ({ ...(await orig<typeof import('../../../projects/api')>()),
   searchMomentsByImages: h.searchByImages }));
-vi.mock('../../../projects/assetUrlBatcher', () => ({ request: vi.fn(async () => new Map()) }));
+vi.mock('../../../projects/assetUrlBatcher', () => ({ request: vi.fn(async () => new Map()), requestFrames: vi.fn(async () => new Map()) }));
 
 vi.mock('../../../projects/useMomentUrls', () => ({
   useMomentUrls: (block: { items: { id: string }[] }) => (h.blocks.push(block), {

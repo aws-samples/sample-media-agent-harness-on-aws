@@ -83,10 +83,21 @@ def test_declared_error_detects_top_level_error_payload():
     assert err.startswith("Cannot proceed")
 
 
+def test_declared_error_detects_a_status_error_payload():
+    # c7d66001's assemble step: no top-level "error", the failure is in "status" + "errors"
+    err = _declared({"status": "error", "final_url": None, "per_shot": [],
+                     "errors": ["chunk1 FAILED upstream", "AccessDenied reading plan step outputs"]})
+    assert err == "chunk1 FAILED upstream; AccessDenied reading plan step outputs"
+    assert _declared({"status": "FAILED"}) == "status: FAILED"
+    assert _declared({"status": "failure", "errors": "no input"}) == "no input"
+
+
 def test_declared_error_ignores_non_error_payloads():
     assert _declared({"uri": "s3://bkt/out.wav"}) == ""
     assert _declared({"text": "a normal summary with the word error in prose"}) == ""
     assert _declared({"error": ""}) == ""          # empty error is not a failure
     assert _declared({"error": None}) == ""
+    assert _declared({"error": False, "status": "ok"}) == ""
+    assert _declared({"status": "completed", "piece_a_status": "FAILED"}) == ""  # only the node's own status
     assert _declared("not a dict") == ""
     assert _declared(None) == ""

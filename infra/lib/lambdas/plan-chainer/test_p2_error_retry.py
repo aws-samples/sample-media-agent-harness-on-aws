@@ -376,3 +376,15 @@ def test_a_consumer_is_not_given_a_producer_tool_it_already_has_under_its_other_
              {"id": "c", "tools": ["submit_job"], "depends_on": ["p"]}]
     tools, note = pc._ensure_node_can_reach_its_inputs(nodes[1], nodes)
     assert tools == ["submit_job"] and note == ""
+
+
+def test_a_job_whose_input_the_provider_refused_is_retried_once(monkeypatch):
+    """8e2acba8: fal refused a recast clip's input (`value_error (video_url)`, nothing ran or billed) and the whole
+    plan ended. An input rejection is correctable with its reason; a job that RAN and failed stays terminal."""
+    monkeypatch.setattr(pc, "MAX_NODE_RETRIES", 1)
+    row = {"status": "failed", "retries": 0, "gateway_status": "FAILED", "job_id": "req-1",
+           "error": "The model rejected this job: value_error (video_url). No output was produced."}
+    assert pc._should_retry_node(row) is True
+    assert pc._should_retry_node({**row, "retries": 1}) is False  # bounded
+    assert pc._should_retry_node({**row, "last_retry_error": row["error"]}) is False  # same error: stop
+    assert pc._should_retry_node({**row, "error": "422: content_policy_violation (likeness)"}) is False

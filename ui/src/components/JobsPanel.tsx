@@ -1,7 +1,9 @@
 import React, { forwardRef, useImperativeHandle, useRef, useEffect } from 'react';
 import { theme } from '../styles/tokens';
 import { useJobs, loadSession } from '../hooks/useJobs';
-import { statusLabel } from '../utils/jobStatus';
+import { formatElapsed, isActive, statusLabel } from '../utils/jobStatus';
+import { labelForTrio } from '../services/notifications';
+import { summaryNotificationTurn } from '../services/resultsFetch';
 import type { Job, JobStatus } from '../types/jobs';
 
 /**
@@ -57,6 +59,8 @@ export interface RunRow {
   nodeTotal: number;
   nodeDone: number;
   nodeFailed: number;
+  /** A running plan's current step (its first active node's workflow), shown instead of a bare "Running". */
+  runningStep?: string;
   /** Status to display for the row (derived from children for a plan). */
   aggregateStatus: JobStatus;
 }
@@ -105,7 +109,9 @@ export function rollUpRuns(jobs: readonly Job[]): RunRow[] {
     else if (nodeFailed > 0) aggregateStatus = 'FAILED';
     else if (nodeDone === nodeTotal) aggregateStatus = 'SUCCEEDED';
     else aggregateStatus = plan.status;
-    rows.push({ job: plan, isPlan: true, nodeTotal, nodeDone, nodeFailed, aggregateStatus });
+    const runningNode = nodes.find((n) => n.status === 'PENDING' || n.status === 'RUNNING');
+    rows.push({ job: plan, isPlan: true, nodeTotal, nodeDone, nodeFailed, aggregateStatus,
+      ...(runningNode ? { runningStep: labelForTrio(runningNode.trioId) } : {}) });
   }
 
   rows.sort((a, b) => {
@@ -143,6 +149,14 @@ const JobsPanel = forwardRef<JobsPanelHandle, JobsPanelProps>(function JobsPanel
   const sessionJobs = jobsForSession(jobs, activeSessionId);
   const runRows = rollUpRuns(sessionJobs);
   const now = Date.now();
+  // Re-render once a second while anything runs, so its elapsed time ticks.
+  const anyActive = sessionJobs.some((j) => isActive(j.status));
+  const [, setTick] = React.useState(0);
+  useEffect(() => {
+    if (!anyActive) return;
+    const t = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [anyActive]);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useImperativeHandle(ref, () => ({
@@ -168,12 +182,13 @@ const JobsPanel = forwardRef<JobsPanelHandle, JobsPanelProps>(function JobsPanel
   const handleGetResults = (job: Job): void => {
     // Push the fetch-results request straight into the chat as a live turn
     // (not just pre-fill the input), scoped to the job's own session.
-    const prompt = `Fetch the results for job ${job.jobId} and feature the artifacts (with download links) for me.`;
-    // displayText keeps the raw jobId — an execution ARN embedding the account id, for standalone
-    // Step Functions jobs — out of the visible/stored chat bubble. The agent still receives the id
-    // via `prompt` (it needs it to fetch); only the user-facing text is the clean label.
+    // The same results-summary turn as the bell: the render hook puts the outputs on the file's own tab, and the
+    // agent may not open a gallery of them too ("feature the artifacts" did — a second tab of the same shots).
+    // displayText keeps the raw jobId — an execution ARN embedding the account id, for standalone Step Functions
+    // jobs — out of the visible/stored chat bubble; the agent still receives it via `prompt`.
+    const { prompt, turnPurpose } = summaryNotificationTurn(job.jobId, labelForTrio(job.trioId));
     const displayText = `Fetch results for ${job.nodeId ?? 'this job'}`;
-    window.dispatchEvent(new CustomEvent('chat:send', { detail: { prompt, displayText, sessionId: job.sessionId } }));
+    window.dispatchEvent(new CustomEvent('chat:send', { detail: { prompt, displayText, turnPurpose, sessionId: job.sessionId } }));
   };
 
   return (
@@ -192,10 +207,17 @@ const JobsPanel = forwardRef<JobsPanelHandle, JobsPanelProps>(function JobsPanel
       ) : (
         runRows.map(row => {
           const job = row.job;
-          const label = row.isPlan ? planDisplayName(job.trioId) : job.trioId;
+          // The workflow's name ("Shot Segmentation"), as the notification says it — not the raw trio id.
+          const label = row.isPlan ? planDisplayName(job.trioId) : labelForTrio(job.trioId);
+          // A running plan says which step it is on and how long it has run (IND403: "Jobs only pulses").
           const meta = row.isPlan
-            ? `${row.nodeDone}/${row.nodeTotal} · ${statusLabel(row.aggregateStatus)} · ${formatRelativeTime(job.startAt, now)}`
-            : `${statusLabel(job.status)} · ${formatRelativeTime(job.startAt, now)}`;
+            ? isActive(row.aggregateStatus)
+              ? `${row.nodeDone}/${row.nodeTotal} · ${row.runningStep ?? statusLabel(row.aggregateStatus)} · ${formatElapsed(job.startAt, job.updatedAt, row.aggregateStatus)}`
+              : `${row.nodeDone}/${row.nodeTotal} · ${statusLabel(row.aggregateStatus)} · ${formatRelativeTime(job.startAt, now)}`
+            // Running: how long it has been going, ticking (a pulsing dot alone read as stuck). Done: when.
+            : isActive(job.status)
+              ? `${statusLabel(job.status)} · ${formatElapsed(job.startAt, job.updatedAt, job.status)}`
+              : `${statusLabel(job.status)} · ${formatRelativeTime(job.startAt, now)}`;
           const dotColor = statusColor(row.aggregateStatus);
           return (
             <div key={job.jobId} data-job-id={job.jobId} data-job-row="" style={rowStyle} title={`${job.trioId} · ${row.aggregateStatus}`}>
@@ -223,7 +245,6 @@ const JobsPanel = forwardRef<JobsPanelHandle, JobsPanelProps>(function JobsPanel
 
 export default JobsPanel;
 
-function isActive(s: JobStatus): boolean { return s === 'PENDING' || s === 'RUNNING'; }
 
 /** "plan|meridian-media-pipeline" -> "meridian-media-pipeline". */
 function planDisplayName(trioId: string): string {

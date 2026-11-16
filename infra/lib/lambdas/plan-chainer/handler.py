@@ -359,6 +359,15 @@ def _is_missing_input_error(error: str) -> bool:
     return any(sig in e for sig in signatures)
 
 
+def _is_input_rejection(error: str) -> bool:
+    """The provider VALIDATED the job's input and refused it before running (fal answers a 422 with a pydantic
+    `value_error` / `type_error` on a field, and the gateway reports "No output was produced"). Distinct from a job
+    that ran and failed, which a retry would pay for again; content-policy refusals are excluded separately."""
+    e = (error or "").lower()
+    return any(sig in e for sig in ("value_error", "type_error", "unprocessable", "422", "rejected this job",
+                                    "no output was produced", "validation error"))
+
+
 def _is_content_policy_error(error: str) -> bool:
     """A provider CONTENT-POLICY rejection — e.g. a fal/Seedance image→video 422 that
     flags a real-person likeness in the REFERENCE IMAGE ("potentially containing
@@ -477,7 +486,10 @@ def _should_retry_node(row: dict) -> bool:
     # carried the job's reason these rows had no `error` and were never retried; writing the
     # reason must not newly make them retry-eligible -- a re-dispatch costs a task-agent turn and
     # possibly a fresh paid job, and a prose answer would overwrite the real reason.
-    if str(row.get("gateway_status") or "").strip().upper() == "FAILED":
+    # The one exception: the provider REFUSED the job's input before running it (a fal 422 / `value_error` on a
+    # field, "no output was produced") -- nothing ran and nothing was billed, and the node can correct its input
+    # with the reason in hand (8e2acba8: a recast clip fal read as one 16 s shot ended the whole plan).
+    if str(row.get("gateway_status") or "").strip().upper() == "FAILED" and not _is_input_rejection(error):
         return False
     if _is_missing_input_error(error):
         return False
@@ -1144,13 +1156,15 @@ def _reap_stalled_nodes(session_id, plan_id, actor_id, nodes_json, node_statuses
     return reaped
 
 
-def _node_has_inflight_registered_job(actor_id, plan_id, node_id, stalled_seconds) -> bool:
+def _node_has_inflight_registered_job(actor_id, plan_id, node_id, stalled_seconds, on_error: bool = True) -> bool:
     """True if a job registered by this plan node during its turn is still non-terminal.
 
     Queries the job registry's (actorId, updatedAt) GSI for rows touched since the node's last
     progress (the job's row is written at submit and bumped by every poll), filtered to this
-    run + node. On a read error it answers True (do not reap): a node is only force-failed when
-    we positively know nothing is in flight for it — the next sweep, a minute later, re-asks.
+    run + node. ``on_error`` is the answer when the registry cannot be read. The watchdog keeps the
+    default True (do not reap): a node is only force-failed when we positively know nothing is in
+    flight for it — the next sweep, a minute later, re-asks. The dispatch gate passes False, so a
+    read error degrades to the row-only gate instead of wedging every dependent.
     """
     if not actor_id or not plan_id or not node_id:
         return False
@@ -1178,9 +1192,14 @@ def _node_has_inflight_registered_job(actor_id, plan_id, node_id, stalled_second
                 return False
             kwargs["ExclusiveStartKey"] = last
     except Exception:
-        logger.warning("watchdog: registered-job lookup failed for %s#%s; not reaping it",
-                       plan_id, node_id, exc_info=True)
-        return True
+        logger.warning("registered-job lookup failed for %s#%s; answering %s", plan_id, node_id, on_error,
+                       exc_info=True)
+        return on_error
+
+
+# How far back the dispatch gate looks for a dep's registered jobs (a fal render can run for hours; every poll
+# bumps the row's updatedAt, so a live job is always inside this window).
+_DISPATCH_GATE_WINDOW_S = 6 * 3600
 
 
 # (session_id, plan_id) pairs this warm container has already put on the watch list, so a
@@ -1542,6 +1561,20 @@ def _advance_plan(session_id: str, plan_record: dict, items: list):
         and not _node_gateway_failed(node_states.get(nid, {}))
     }
 
+    # The row names at most ONE job, but a node can submit several and settle before they finish (c7d66001's
+    # recast_amit submitted two fal recasts; `reassemble` ran on the inputs while both still rendered and the reel
+    # was built from the un-recast strips). So a completed dep also waits on every job it REGISTERED (runId +
+    # planNodeId) that is still running. Memoized per pass; asked only for deps of pending nodes.
+    _inflight: dict = {}
+
+    def _dep_done(dep: str) -> bool:
+        if dep not in succeeded:
+            return False
+        if dep not in _inflight:
+            _inflight[dep] = _node_has_inflight_registered_job(actor_id, plan_id, dep, _DISPATCH_GATE_WINDOW_S,
+                                                               on_error=False)
+        return not _inflight[dep]
+
     ready_nodes = []
     for node_def in nodes_json:
         nid = node_def["id"]
@@ -1549,7 +1582,7 @@ def _advance_plan(session_id: str, plan_record: dict, items: list):
         if current_status != "pending":
             continue
         deps = node_def.get("depends_on", [])
-        if all(dep in succeeded for dep in deps):
+        if all(_dep_done(dep) for dep in deps):
             ready_nodes.append(node_def)
 
     if not ready_nodes and not results_ready_nodes:
@@ -3956,41 +3989,14 @@ def _session_output_prefix(session_id: str, project_id: str = "") -> str:
 
 
 def _make_import_artifact(session_id: str = "", project_id: str = ""):
-    """Build the ``import_artifact(src_bucket, src_key, relpath) -> url|None`` injected into
-    result_resolution.build_aggregate so get_plan_results returns downloadable https urls (and
-    inline-playable audio) instead of un-fetchable s3:// refs.
-
-    Copies a plan deliverable from a foreign bucket (the M2C proxy) into OUR bucket under this
-    session's OUTPUT prefix (``artifacts/<session_id>/output/``) and returns a permanent CloudFront
-    url. Skips objects already in our bucket; server-side copy_object (no bytes through the
-    process); best-effort — never raises.
-    """
-    out_prefix = _session_output_prefix(session_id, project_id)
-
-    def _import_artifact(src_bucket, src_key, relpath):
-        if not SKILLS_S3_BUCKET or not ARTIFACTS_DOMAIN:
-            return None
-        if src_bucket == SKILLS_S3_BUCKET:
-            # Already in our bucket — no copy; just form the CloudFront url for the existing key
-            # so the aggregate carries a browser-fetchable https url instead of an s3:// ref.
-            return f"https://{ARTIFACTS_DOMAIN}/{src_key}"
-        import mimetypes
-        dest_key = f"{out_prefix}{(relpath or '').lstrip('/')}"
-        ct = mimetypes.guess_type(dest_key)[0]
-        try:
-            kwargs = {"Bucket": SKILLS_S3_BUCKET, "Key": dest_key,
-                      "CopySource": {"Bucket": src_bucket, "Key": src_key}}
-            if ct:
-                kwargs["ContentType"] = ct
-                kwargs["MetadataDirective"] = "REPLACE"
-            _s3.copy_object(**kwargs)
-        except Exception:
-            logger.exception("auto-import: copy failed s3://%s/%s -> s3://%s/%s",
-                             src_bucket, src_key, SKILLS_S3_BUCKET, dest_key)
-            return None
-        return f"https://{ARTIFACTS_DOMAIN}/{dest_key}"
-
-    return _import_artifact
+    """The ``import_artifact(src_bucket, src_key, relpath) -> url|None`` injected into
+    result_resolution.build_aggregate: the SAME importer the polling worker uses
+    (result_resolution.make_s3_importer — one copy rule, and every copy records its origin), writing under this
+    session's OUTPUT prefix so get_plan_results returns durable https urls instead of un-fetchable s3:// refs."""
+    if not SKILLS_S3_BUCKET or not ARTIFACTS_DOMAIN:
+        return lambda *_a, **_k: None
+    return result_resolution.make_s3_importer(_s3, SKILLS_S3_BUCKET, ARTIFACTS_DOMAIN,
+                                              import_prefix=_session_output_prefix(session_id, project_id))
 
 
 def _entry_has_result(entry) -> bool:

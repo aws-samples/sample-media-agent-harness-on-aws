@@ -115,9 +115,17 @@ export default function UnifiedTimelineLanes({ audioTracks, peaks, markers: rawM
     // A person the manifest already lays out as a segment group (shot-segmentation timelines carry both
     // `segments` grouped by Person_N and the face `annotations` behind them) gets ONE lane, not two.
     .filter((p) => !groupNames.includes(p.label) && !groupNames.includes(p.entityId));
-  const looksLikeShots = markers.length > 0 && markers.every(
+  // Marker bands: untagged markers are the Shots band (as before); each named set (`laneSet`) gets its own.
+  const markerBands = Array.from(markers.reduce((acc, m) => {
+    const set = typeof m.laneSet === 'string' ? m.laneSet : '';
+    acc.set(set, [...(acc.get(set) ?? []), m]);
+    return acc;
+  }, new Map<string, ManifestMarker[]>())).map(([set, list]) => ({ set, list })).sort((a, b) => (a.set ? 1 : 0) - (b.set ? 1 : 0));
+  const shotMarkers = markerBands.find((b) => !b.set)?.list ?? [];
+  const looksLikeShots = shotMarkers.length > 0 && shotMarkers.every(
     (m) => /shot|content|black|scene|cut/i.test(String(m.category ?? '') + ' ' + String(m.label ?? '')),
   );
+  const clock = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
   const step = tickStep(dur / zoom);
   const ticks: number[] = [];
   for (let t = 0; t <= dur + 0.001; t += step) ticks.push(t);
@@ -212,27 +220,42 @@ export default function UnifiedTimelineLanes({ audioTracks, peaks, markers: rawM
             );
           })}
 
-          {markers.length > 0 && (
-            <LaneRow label={looksLikeShots ? `Shots · ${markers.length}` : `Markers · ${markers.length}`} height={30} testId="lane-shots">
+          {/* Spans that tile the film are bands: Shots (untagged markers, as ever) and each named set (Scenes, ...)
+              on its own row, drawn the same way — numbered blocks with a gap at every boundary. */}
+          {markerBands.map(({ set, list }) => {
+            const named = set ? set.charAt(0).toUpperCase() + set.slice(1) : '';
+            const one = named.replace(/s$/, '');
+            const label = named ? `${named} · ${list.length}` : looksLikeShots ? `Shots · ${list.length}` : `Markers · ${list.length}`;
+            return (
+            <LaneRow key={set || 'shots'} label={label} height={30} testId={set ? `lane-band-${set}` : 'lane-shots'}>
               <div style={{ position: 'absolute', inset: 0 }}>
                 <div style={{ position: 'absolute', left: `${playheadPct}%`, top: 0, bottom: 0, width: 2, background: 'var(--color-text)', opacity: 0.5, zIndex: 2 }} />
-                {markers.map((m, i) => {
+                {list.map((m, i) => {
                   const left = pct(m.time);
                   const w = m.endTime && m.endTime > m.time ? Math.min(100 - left, ((m.endTime - m.time) / dur) * 100) : 0;
                   const isSpan = w > 0;
                   // Use the marker's own number (label, e.g. "0","1"…) so it matches the extracted
                   // shot_NN files — NOT a 1-based render index.
                   const shotNo = (m.label ?? String(i)).trim();
+                  const note = typeof m.note === 'string' ? m.note.replace(/_/g, ' ') : '';
+                  const title = set
+                    ? [`${one} ${shotNo}`, m.category && m.category.replace(/_/g, ' '), note,
+                      `${clock(m.time)}–${clock(m.endTime ?? m.time)}`].filter(Boolean).join(' · ')
+                    : `Shot ${shotNo}${m.category ? ` (${m.category})` : ''} @ ${m.time.toFixed(2)}s`;
+                  const color = set ? (i % 2 ? 'var(--color-primary)' : 'color-mix(in srgb, var(--color-primary) 62%, var(--color-text))') : shotColor(m, i);
                   return (
-                    <button key={m.id || i} title={`Shot ${shotNo}${m.category ? ` (${m.category})` : ''} @ ${m.time.toFixed(2)}s`} onClick={() => onSeek(m.time)}
-                      style={{ position: 'absolute', top: 4, bottom: 4, left: `${left}%`, width: isSpan ? `max(3px, calc(${w}% - 2px))` : 3, background: shotColor(m, i), border: isSpan ? '1px solid rgba(0,0,0,0.4)' : 'none', borderRadius: isSpan ? 'var(--radius-badge)' : '50% 50% 50% 0', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                      {isSpan && w * zoom > 3 && <span style={{ fontSize: 'var(--fs-3xs)', fontWeight: 700, color: '#fff', textShadow: '0 1px 1px rgba(0,0,0,0.55)', pointerEvents: 'none' }}>{shotNo}</span>}
+                    <button key={m.id || i} title={title} aria-label={title} onClick={() => onSeek(m.time)}
+                      style={{ position: 'absolute', top: 4, bottom: 4, left: `${left}%`, width: isSpan ? `max(3px, calc(${w}% - 2px))` : 3, background: color, border: isSpan ? '1px solid rgba(0,0,0,0.4)' : 'none', borderRadius: isSpan ? 'var(--radius-badge)' : '50% 50% 50% 0', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                      {isSpan && w * zoom > 3 && <span style={{ fontSize: 'var(--fs-3xs)', fontWeight: 700, color: '#fff', textShadow: '0 1px 1px rgba(0,0,0,0.55)', pointerEvents: 'none', whiteSpace: 'nowrap', padding: '0 3px' }}>
+                        {set && m.category && w * zoom > 9 ? `${shotNo} ${m.category.replace(/_/g, ' ')}` : shotNo}
+                      </span>}
                     </button>
                   );
                 })}
               </div>
             </LaneRow>
-          )}
+            );
+          })}
 
           {groupNames.map((g, gi) => {
             const color = `hsl(${SPEAKER_HUES[gi % SPEAKER_HUES.length]}, 62%, 52%)`;

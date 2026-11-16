@@ -218,9 +218,40 @@ export function actionMessage(actionId: string, startedAt: number, rec: ActionLi
   return { id: `${actionId}-x`, role: "action", content: "", timestamp: startedAt, turnId: actionId, action: rec } as StoredMessage;
 }
 
+const JSON_HEADERS = { "content-type": "application/json", "access-control-allow-origin": "*", "cache-control": "no-store" };
+
 function send(res: any, status: number, body: unknown) {
-  res.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*", "cache-control": "no-store" });
+  if (res.headersSent) { res.end(JSON.stringify(body)); return; } // already streaming (keepAlive): the status is 200
+  res.writeHead(status, JSON_HEADERS);
   res.end(JSON.stringify(body));
+}
+
+/** How long an action may run before the reply starts streaming, and how often it then sends a byte. */
+export const KEEPALIVE_AFTER_MS = 20_000;
+export const KEEPALIVE_EVERY_MS = 15_000;
+
+/**
+ * Keep a long action's request alive. CloudFront (and the ALB) give up on an origin that sends nothing for 60 s,
+ * and the UI then took the 504 for "it failed" and handed the action to the agent — which cut every clip AGAIN
+ * while the first run finished anyway (staging 2026-11-15: five copies of one 3-clip cut). Past
+ * {@link KEEPALIVE_AFTER_MS} the reply commits to 200 and sends a space every {@link KEEPALIVE_EVERY_MS}: JSON
+ * allows leading whitespace, so the body still parses, and its `ok` / `ran` fields carry the outcome.
+ */
+function keepAlive(res: any): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = () => {
+    try {
+      if (!res.headersSent) res.writeHead(200, JSON_HEADERS);
+      res.write?.(" ");
+    } catch { /* the client went away: nothing to keep alive */ }
+    timer = setTimeout(tick, KEEPALIVE_EVERY_MS);
+  };
+  timer = setTimeout(tick, KEEPALIVE_AFTER_MS);
+  const stop = () => { if (timer) clearTimeout(timer); timer = undefined; };
+  // However the reply ends (sent, the client gone, an error the route's catch answers), the ticking stops.
+  res.on?.("finish", stop);
+  res.on?.("close", stop);
+  return stop;
 }
 
 async function readBody(req: any): Promise<string | null> {
@@ -269,14 +300,16 @@ export async function handleMediaActions(req: any, res: any, deps: MediaActionsD
   const source = assetId ? await deps.readAssetSource(pid, assetId).catch(() => null) : null;
   if (!assetId || !source) { send(res, 422, { ok: false, error: "the source is not a file of this chat's project" }); return; }
   const kind = String(source.row.kind ?? "");
-  if (kind !== "video") { send(res, 422, { ok: false, error: `${r.op} needs a video (this is ${kind || "unknown"})` }); return; }
+  // A clip of an audio file is a trim (a voice chunk, a stem); Frame and Crop need a picture.
+  const takes = kind === "video" || (kind === "audio" && r.op === "clip");
+  if (!takes) { send(res, 422, { ok: false, error: `${r.op} needs a video (this is ${kind || "unknown"})` }); return; }
   const sourceName = typeof source.row.displayName === "string" ? source.row.displayName : source.sourceUri.split("/").pop() ?? "video";
 
   // 3. The main runtime, under the chat's runtime session (its warm microVM and sandbox). No model turn.
   const payload: Record<string, unknown> = {
     __media_action: {
       action_id: actionId, op: r.op,
-      source: { url: source.url, s3uri: source.sourceUri, name: sourceName, asset_id: assetId },
+      source: { url: source.url, s3uri: source.sourceUri, name: sourceName, asset_id: assetId, kind },
       ...(r.points ? { points: r.points } : {}),
       ...(r.ranges ? { ranges: r.ranges } : {}),
       ...(r.box ? { box: r.box } : {}),
@@ -287,6 +320,7 @@ export async function handleMediaActions(req: any, res: any, deps: MediaActionsD
   };
   let frame: Record<string, unknown> | null = null;
   let error = "";
+  const stopKeepAlive = keepAlive(res);
   try {
     const out = await deps.invokeRuntime(r.sessionId, payload);
     frame = out.status >= 200 && out.status < 300 ? resultFrameIn(out.body) : null;
@@ -327,14 +361,16 @@ export async function handleMediaActions(req: any, res: any, deps: MediaActionsD
       await deps.recordAction(r.sessionId, actionMessage(r.batch.id, at, merged))
         .catch((e: any) => console.error("[media-actions] transcript write failed:", e?.message ?? e));
     }
-    if (!ok) { send(res, 502, { ok: false, error, actionId, record: merged }); return; }
-    send(res, 200, { ok: true, actionId, outputs, elapsedMs, record: merged });
+    stopKeepAlive();
+    if (!ok) { send(res, 502, { ok: false, ran: true, error, actionId, record: merged }); return; }
+    send(res, 200, { ok: true, ran: true, actionId, outputs, elapsedMs, record: merged });
     return;
   }
   if (deps.recordAction) {
     await deps.recordAction(r.sessionId, actionMessage(actionId, startedAt, record))
       .catch((e: any) => console.error("[media-actions] transcript write failed:", e?.message ?? e));
   }
-  if (!ok) { send(res, 502, { ok: false, error, actionId, record }); return; }
-  send(res, 200, { ok: true, actionId, outputs, elapsedMs, record });
+  stopKeepAlive();
+  if (!ok) { send(res, 502, { ok: false, ran: true, error, actionId, record }); return; }
+  send(res, 200, { ok: true, ran: true, actionId, outputs, elapsedMs, record });
 }

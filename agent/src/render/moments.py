@@ -82,6 +82,7 @@ class Moment:
     text_truncated: bool
     highlight_terms: list[str]
     citation: Optional[str]          # basis "cited" only: the text of the Moment's first Verified_Citation
+    found_by: tuple = ()             # which searches matched it: "meaning" (vector) / "keyword" (full text)
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ def to_moment(sh: "SessionHit", a: "ResolvedAsset", citation: Optional[str] = No
         text_truncated=text_truncated,
         highlight_terms=highlight_terms(hit.get("highlights")),
         citation=citation,
+        found_by=found_by(hit),
     )
 
 
@@ -267,6 +269,19 @@ def subtitle_for(items: list[Moment]) -> str:
     return _SUBTITLE_CITED if cited else _SUBTITLE_SEARCHED
 
 
+def found_by(hit: dict) -> tuple:
+    """Which of hybrid search's two searches matched a Hit, from its ``match_sources`` (``ann:<field>`` is the
+    vector search, by MEANING; ``fts:<field>`` the full-text one, by KEYWORD). Lab 2 teaches that the two
+    combine; the card shows which found each moment. Unknown sources are ignored."""
+    srcs = [str(s).lower() for s in (hit.get("match_sources") or []) if isinstance(s, str)]
+    out = []
+    if any(s.startswith(("ann", "knn", "vector")) for s in srcs):
+        out.append("meaning")
+    if any(s.startswith(("fts", "bm25", "keyword", "text")) for s in srcs):
+        out.append("keyword")
+    return tuple(out)
+
+
 def matched_text(hit: dict) -> tuple[str, bool]:
     """Req 3.9. The matched text of a Hit and whether it was truncated.
 
@@ -356,6 +371,7 @@ def build_moments_manifest(
                 "text_truncated": moment.text_truncated,
                 "highlight_terms": list(moment.highlight_terms),
                 "citation": moment.citation,
+                **({"found_by": list(moment.found_by)} if moment.found_by else {}),
             }
         )
 

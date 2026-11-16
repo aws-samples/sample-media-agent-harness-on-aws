@@ -32,6 +32,7 @@ def _run_discover(ids):
         {"inferenceProfileSummaries": _fake_profiles(ids)}
     ]
     client.get_paginator.return_value = paginator
+    client.list_foundation_models.side_effect = RuntimeError("no grant")  # lifecycles unreadable: no lifecycle filter
     with patch.object(catalog.boto3, "client", return_value=client):
         return {m["id"]: m for m in catalog.discover_models(region="us-west-2")}
 
@@ -47,7 +48,7 @@ def test_supports_effort_is_tagged_true_for_capable_models():
 def test_supports_effort_is_tagged_false_for_incapable_models():
     # opus-4-5 and sonnet-4-5 are the trap: close ids that 400 on the field.
     ids = ["us.anthropic.claude-opus-4-5", "us.anthropic.claude-sonnet-4-5",
-           "us.amazon.nova-pro-v1:0"]
+           "us.anthropic.claude-haiku-4-5-20251001-v1:0"]  # incapable and on the supported list
     out = _run_discover(ids)
     for pid in ids:
         assert out[pid]["supportsEffort"] is False, pid

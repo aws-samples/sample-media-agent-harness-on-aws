@@ -6,6 +6,15 @@ import {
   type JobNotification,
 } from '../services/notifications';
 
+/** When a notification arrived, so rows of the same job type (a re-run, a re-taken tour) tell apart. */
+export function notifiedAgo(ts: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - ts) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
 /**
  * CompletionNotifications — the passive completion surface.
  *
@@ -173,10 +182,10 @@ export default function CompletionNotifications({ onOpen }: Props) {
                     <span style={{ flex: 1, minWidth: 0 }}>
                       <span style={itemTitleStyle}>{n.message}</span>
                       {n.kind === 'failure' && n.error && (
-                        <span style={itemSubStyle}>{n.error.slice(0, 80)}</span>
+                        <span style={itemSubStyle}>{notifiedAgo(n.ts)} · {n.error.slice(0, 80)}</span>
                       )}
                       {n.kind === 'success' && (
-                        <span style={itemSubStyle}>{n.renderable ? 'View results' : 'Open session'}</span>
+                        <span style={itemSubStyle}>{n.renderable ? 'View results' : 'Open session'} · {notifiedAgo(n.ts)}</span>
                       )}
                     </span>
                     {!n.seen && <span style={unreadPipStyle} aria-hidden="true" />}

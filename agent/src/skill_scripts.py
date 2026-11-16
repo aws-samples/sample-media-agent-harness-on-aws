@@ -262,7 +262,11 @@ def writer_code(files: dict[str, bytes]) -> str:
             f"for _p, _d in _a.literal_eval(_b.b64decode('{payload}').decode()).items():\n"
             "    _o.makedirs(_o.path.dirname(_p) or '.', exist_ok=True)\n"
             "    open(_p, 'wb').write(_b.b64decode(_d))\n"
-            "    _o.chmod(_p, 0o755)\n")
+            "    _o.chmod(_p, 0o755)\n"
+            # Importable from anywhere: a cell that `os.chdir`s away still finds `import trim_plan` (c7d66001).
+            "import sys as _s\n"
+            f"for _p in sorted({{_o.path.abspath(_o.path.dirname(_k)) for _k in {sorted(k for k in files if k.endswith('.py'))!r}}}):\n"
+            "    _s.path.insert(0, _p) if _p not in _s.path else None\n")
 
 
 def fingerprint(files: dict[str, bytes]) -> str:

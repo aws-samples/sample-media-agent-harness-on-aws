@@ -32,7 +32,7 @@ function moment(over: Partial<MomentItem> = {}): MomentItem {
   };
 }
 
-const ready: CardUrl = { phase: 'ready', url: 'https://cdn/u1', obtainedAt: 0 };
+const ready: CardUrl = { phase: 'ready', url: 'https://cdn/u1', obtainedAt: 0, poster: 'https://cdn/r1.jpg' };
 
 function renderCard(over: Partial<MomentCardProps> = {}) {
   const props: MomentCardProps = {
@@ -66,9 +66,9 @@ describe('MomentCard', () => {
     expect(within(card).getByTestId('card-badge-left')).toHaveTextContent('01:14–01:36');
     expect(within(card).getByTestId('card-badge')).toHaveTextContent('22s');
     // The source's frame at the moment's start is the picture; nothing plays on the card.
-    const v = card.querySelector('video')!;
-    expect(v.getAttribute('src')).toBe('https://cdn/u1#t=74');
-    expect(v).not.toHaveAttribute('controls');
+    // The picture is the video's hero still; no card mounts a player (Firefox stalled on 24 at once).
+    expect(card.querySelector('video')).toBeNull();
+    expect(card.querySelector('img')!.getAttribute('src')).toBe('https://cdn/r1.jpg');
     // Literal markup (Req 3.10): the matched text is text, the hit a <mark>.
     const text = screen.getByTestId('moment-text-m1');
     expect(text.textContent).toBe('the <b>chase</b> scene');
@@ -202,10 +202,10 @@ describe('MomentCard', () => {
   it('routes the picture load into the URL hook: metadata → ok, error → refresh at the start', () => {
     const { props } = renderCard();
     expect(props.onLoadStart).toHaveBeenCalledWith({ time: 74, playing: false });
-    const v = screen.getByTestId('moment-card-m1').querySelector('video')!;
-    fireEvent.loadedMetadata(v);
+    const img = screen.getByTestId('moment-card-m1').querySelector('img')!;
+    fireEvent.load(img);
     expect(props.onLoadOk).toHaveBeenCalled();
-    fireEvent.error(v);
+    fireEvent.error(img);
     expect(props.onLoadError).toHaveBeenCalledWith({ time: 74, playing: false });
   });
 

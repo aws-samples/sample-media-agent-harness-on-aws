@@ -9,7 +9,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from model.factory import supports_prompt_caching
-from model.catalog import _LEGACY, _EXCLUDE
+from model.catalog import supported
 
 
 class TestCachingSupport:
@@ -47,8 +47,9 @@ class TestCachingSupport:
 
 
 class TestLegacyFilter:
+    # The supported list (models.json `picker`) replaced the legacy/keyword lists: dropped = not supported.
     def _dropped(self, profile_id: str) -> bool:
-        return any(t in profile_id.lower() for t in _LEGACY)
+        return not supported(profile_id)
 
     def test_superseded_generations_are_dropped(self):
         for pid in ("us.anthropic.claude-3-haiku-20240307-v1:0",
@@ -66,15 +67,15 @@ class TestLegacyFilter:
                     "global.anthropic.claude-sonnet-5",
                     "us.anthropic.claude-opus-5",
                     "global.anthropic.claude-sonnet-4-6",
-                    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-                    "us.amazon.nova-premier-v1:0",
-                    "us.meta.llama4-scout-17b-instruct-v1:0"):
+                    "us.anthropic.claude-haiku-4-5-20251001-v1:0"):
             assert not self._dropped(pid), pid
+        # Llama 4 caps output at 8,192 tokens, under the harness's 16K budget: every turn failed (IND403).
+        assert self._dropped("us.meta.llama4-scout-17b-instruct-v1:0")
 
     def test_claude_4_and_5_are_not_caught_by_the_3_x_patterns(self):
         """`claude-3-` must not match `claude-3-5`-style or 4.x/5 ids."""
         assert not self._dropped("us.anthropic.claude-opus-4-6-v1")
         assert not self._dropped("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
-    def test_image_filter_still_independent(self):
-        assert "stable" in _EXCLUDE and "inpaint" in _EXCLUDE
+    def test_image_models_are_not_offered(self):
+        assert self._dropped("us.stability.sd3-5-large-v1:0") and self._dropped("us.stability.stable-image-inpaint-v1:0")

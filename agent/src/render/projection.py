@@ -260,8 +260,13 @@ def declaration_applies(data: Any, declaration: dict) -> bool:
     return False
 
 
-def project_markers(data: Any, spec: str) -> list[dict]:
-    """-> [{time, endTime?, label, category}] for `video-markers` / manifest markers."""
+def project_markers(data: Any, spec: str, lane_set: str = "") -> list[dict]:
+    """-> [{time, endTime?, label, category?, note?, laneSet?}] for `video-markers` / manifest markers.
+
+    Spans that tile the film (shots, scenes) are markers: each SET is its own band row on the timeline, so
+    ``lane_set`` stamps it and prefixes the id (shot 5 and scene 5 must not merge). ``note=<field>`` is shown
+    on hover (a scene's boundary reason).
+    """
     path, f = parse_spec(spec)
     scale = _scale_for(f)
     if not scale:
@@ -284,13 +289,22 @@ def project_markers(data: Any, spec: str) -> list[dict]:
         m["label"] = label if label else f"{i + 1}"
         if cat is not None:
             m["category"] = str(cat)
-        m["id"] = f"m-{label or i}"
+        note = item.get(f.get("note", "__none__"))
+        if note is not None and str(note):
+            m["note"] = str(note)
+        m["id"] = f"{lane_set}-{label or i}" if lane_set else f"m-{label or i}"
+        if lane_set:
+            m["laneSet"] = lane_set
         out.append(m)
     return out
 
 
-def project_segments(data: Any, spec: str) -> list[dict]:
-    """-> [{id, name, start, end, group?}] for interactive segment rows / lanes."""
+def project_segments(data: Any, spec: str, lane_set: str = "") -> list[dict]:
+    """-> [{id, name, start, end, group?, laneSet?}] for interactive segment rows / lanes.
+
+    ``group=<field>`` names each segment's row from the item; ``lane=<Name>`` puts them all on ONE named row
+    (scenes, chapters). ``lane_set`` stamps the declaration's lane set on every segment.
+    """
     path, f = parse_spec(spec)
     scale = _scale_for(f)
     if not scale:
@@ -304,16 +318,19 @@ def project_segments(data: Any, spec: str) -> list[dict]:
         s, e = s * scale, e * scale
         if e <= s:
             continue
-        group = item.get(f.get("group", "__none__"))
+        group = f["lane"] if f.get("lane") else item.get(f.get("group", "__none__"))
         name = item.get(f.get("name", "__none__"))
         seg: dict[str, Any] = {
-            "id": f"s-{i}",
+            # Prefixed by the set: views of one file merge by segment id, and two analyses' positional ids collide.
+            "id": f"{lane_set}-{i}" if lane_set else f"s-{i}",
             "name": str(name) if name is not None else (str(group) if group is not None else f"segment {i + 1}"),
             "start": round(s, 3),
             "end": round(e, 3),
         }
         if group is not None:
             seg["group"] = str(group)
+        if lane_set:
+            seg["laneSet"] = lane_set
         out.append(seg)
     return out
 
@@ -336,7 +353,7 @@ def _scale_for(fields: dict[str, str]) -> float:
     return scale if scale else 1.0
 
 
-def project_lanes(data: Any, spec: str) -> list[dict]:
+def project_lanes(data: Any, spec: str, lane_set: str = "") -> list[dict]:
     """Entities that each own a list of spans -> segments grouped by entity.
 
     `lanes: people[] name=name spans=appearances start=begin_ms end=end_ms units=ms`
@@ -374,11 +391,12 @@ def project_lanes(data: Any, spec: str) -> list[dict]:
             if e <= s:
                 continue
             out.append({
-                "id": f"l-{ei}-{si}",
+                "id": f"{lane_set}-{ei}-{si}" if lane_set else f"l-{ei}-{si}",
                 "name": group,
                 "group": group,
                 "start": round(s, 3),
                 "end": round(e, 3),
+                **({"laneSet": lane_set} if lane_set else {}),
             })
     return out
 

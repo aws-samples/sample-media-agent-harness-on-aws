@@ -7,6 +7,54 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [1.3.0] — one tab per file, frame-exact edits, recasts that finish, a tour that holds up
+
+### Added
+- **One tab per file in the Renderer.** Every view of the same file (its timeline, its shots, a clip, a search) is a
+  version of ONE tab, switched with ‹ vN of M ›; × closes them all. Tabs are named after their file, never "Video" or
+  "Render Output". A single video opens in the video view, and a video that is already open is not opened again.
+- **Keyframe snapping.** Dragging a range on a timeline snaps to the file's keyframes, so a clip that starts on one is
+  a stream copy: instant and exact. An agent-made timeline snaps too.
+- **Agent edits reach the open timeline.** A speaker relabel or "show scenes" in chat updates the video's timeline;
+  scenes are a band like Shots, and a new set replaces the old one instead of piling up.
+- **Frame-exact reassembly.** `video-processing/scripts/reassemble_shots.py` puts replaced shots (recast, restyle)
+  back over the original dialogue: each shot keeps exactly its source frames, at the source's frame rate and size,
+  and the script verifies the frame count and the sound sync before it returns.
+- **Model fallback.** When the default model is out of capacity the turn falls back on its own (the same model on
+  its `us.` profile, then the configured fallbacks), and a transient model error retries the call, not the turn.
+- **Live progress.** A long tool call shows what it is doing and for how long; a running plan shows its step count,
+  the step it is on and its elapsed time.
+
+### Changed
+- **Recasts run one shot per job.** A shot over 15 s is split, a shot under the model's minimum is held on its last
+  frame and trimmed back, and the prompt says whether to change only the face or the whole person (the agent asks).
+  The scene is reassembled with the script above.
+- **The model picker offers only models the harness runs on** (Claude 4 and later, Nova 2, GPT), and only while
+  Bedrock lists them as active.
+- **"Capabilities" is called Settings**, with one Settings entry in the rail and the menu.
+- **Clips are fast again**: a clip on a keyframe is a stream copy; otherwise one capped re-encode, and an audio trim
+  is sample-exact.
+
+### Fixed
+- **Recasts that never finished.** A plan whose recast steps are created as it runs got no delegation grant, so every
+  step found the user's fal tools "awaiting user token"; it now gets one. A step waits for every job its inputs
+  started, not just the first, so an assembly no longer runs on clips that are still rendering. A job whose input
+  the provider refused is retried once with the reason, and a step that reports `"status": "error"` is marked
+  failed instead of passing silently.
+- **Plan steps that could not do their work.** `ffmpeg` and `ffprobe` are on PATH in every sandbox; a step can read
+  its own plan's outputs; it reads our links by key instead of downloading them (a link it builds itself is never
+  signed); it is told where skill scripts are and never searches the filesystem for them; and a step whose skill
+  names a script runs that script.
+- **Analysis views.** A face view ends with the media instead of a second past it, and a recognized person's name is
+  on their lane and boxes, not "Person 1".
+- **The guided tour** holds up for a first-time user: it waits on the real job, goes back with a reason when a step
+  fails, re-opens the demo video when re-taken, and counts 13 stops.
+- **Projects.** The file picker finds a file by its name without the extension; a copy of a job output resolves to
+  the asset it came from; a deleted chat is gone everywhere.
+- **Moments and media.** Galleries mount no video players until one is played (fixes playback in Firefox), "Play all
+  in sequence" plays, and each card says which search found it.
+- **Replies** no longer echo a tool call's parameters.
+
 ## [1.2.3] — multi-step turns no longer fail on new AWS accounts
 
 ### Fixed

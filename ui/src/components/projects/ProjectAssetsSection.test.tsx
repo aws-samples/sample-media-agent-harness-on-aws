@@ -66,6 +66,7 @@ import ProjectAssetsSection, {
   ASSETS_VIEW_KEY,
   UPLOAD_BUTTON_NAME,
   deleteAssetMessage,
+  resetFolderListCacheForTests,
 } from './ProjectAssetsSection';
 import { __resetProjectTabsForTests } from './tabSlots';
 import { ASSET_POLL_MS } from './useProjectAssets';
@@ -121,6 +122,7 @@ const openUploadMenu = () => fireEvent.click(screen.getByRole('button', { name: 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetFolderListCacheForTests();
   __resetProjectTabsForTests();
   __resetUploadQueueForTests();
   mocks.listAssets.mockResolvedValue({ ok: true, value: { assets: [] } });
@@ -689,6 +691,38 @@ describe('folders', () => {
     expect(ids()).toEqual(['video:r1', 'video:r2', 'video:d2', 'video:g']);
     fireEvent.click(day1);
     expect(ids()).toContain('video:d1a');
+  });
+
+  it('a picked folder is fetched at once — only typed words wait for a pause', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    serveAssets(FOLDERED);
+    renderSection();
+    await flush();
+    mocks.searchAssets.mockClear();
+    const node = screen.getAllByTestId('folder-tree-node').find((n) => n.getAttribute('data-folder') === 'Footage/Day 1')!;
+    fireEvent.click(within(node).getAllByRole('button').find((b) => b.getAttribute('aria-hidden') !== 'true')!);
+    await act(async () => { vi.advanceTimersByTime(1); });
+    await flush();
+    expect(mocks.searchAssets).toHaveBeenCalledWith('p1', expect.objectContaining({ folder: 'Footage/Day 1' }));
+    expect(ids()).toEqual(['video:d1a', 'video:d1b']);
+  });
+
+  it('reopening a project paints its last folder tree at once, then refreshes it', async () => {
+    serveAssets(FOLDERED);
+    const first = renderSection();
+    await flush();
+    expect(screen.getAllByTestId('folder-tree-node')).toHaveLength(5);
+    first.unmount();
+    // The next read is slow: the remembered tree is there before it answers.
+    let answer: (v: unknown) => void = () => undefined;
+    mocks.listFolders.mockImplementation(() => new Promise((r) => { answer = r; }));
+    renderSection();
+    expect(screen.getAllByTestId('folder-tree-node').map((n) => n.getAttribute('data-folder'))).toEqual([
+      'Footage', 'Footage/Day 1', 'Footage/Day 2', 'Generated', 'Generated/Trailer · 2026-10-07',
+    ]);
+    await act(async () => { answer({ ok: true, value: { truncated: false, folders: [{ folder: 'Footage', count: 9 }], rootCount: 0 } }); });
+    await flush();
+    expect(screen.getAllByTestId('folder-tree-node').map((n) => n.getAttribute('data-folder'))).toEqual(['Footage']);
   });
 
   it('the folder tree lists every folder (Chats last) and a picked folder loads its own files from the server', async () => {

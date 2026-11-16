@@ -39,6 +39,8 @@ export interface MomentCardProps {
   sessionId: string;
   /** This card's URL phase/url, from the gallery's {@link useMomentUrls}. */
   cardUrl: CardUrl;
+  /** A video moment's own picture (the frame of the shot it starts in), from the gallery's useMomentFrames. */
+  frameUrl?: string | null;
 
   // --- Load-event routing back into useMomentUrls (the gallery binds the moment id). ---
   /** The card's mount: may trigger the load's one refresh. */
@@ -191,11 +193,13 @@ export default function MomentCard(props: MomentCardProps): React.ReactElement {
       kind={kind === 'audio' ? 'audio' : kind === 'image' ? 'image' : 'video'}
       title={name}
       titleTip={tooltip}
+      // Which of hybrid search's searches found it (Lab 2: meaning and keyword combine).
+      meta={moment.found_by?.length ? `Found by ${moment.found_by.join(' + ')}` : undefined}
       description={description}
       location={<FileLocation projectId={moment.ref.project_id} assetId={moment.ref.asset_id} />}
-      thumb={kind === 'image' ? readyUrl : null}
-      videoSrc={kind === 'video' && !overlay ? readyUrl : null}
-      posterAt={startSec}
+      // A video shows its hero still, never its source: that is the whole file, and one player per card
+      // starved the browser's connections (Firefox). Playback is the gallery's one Preview player.
+      thumb={kind === 'image' ? readyUrl : kind === 'video' && cardUrl.phase === 'ready' ? props.frameUrl ?? cardUrl.poster ?? null : null}
       contain
       badgeLeft={kind !== 'image' ? tc : undefined}
       badge={kind !== 'image' ? formatSpan(moment.end_ms - moment.start_ms) : undefined}

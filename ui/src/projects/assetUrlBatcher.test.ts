@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./api', () => ({ getAssetUrls: vi.fn() }));
 
 import { getAssetUrls, type AssetUrlEntry, type AssetUrlsResponse, type ProjectsResult } from './api';
-import { request, MAX_IDS_PER_CALL } from './assetUrlBatcher';
+import { request, requestFrames, MAX_IDS_PER_CALL } from './assetUrlBatcher';
 
 const mockGet = getAssetUrls as unknown as ReturnType<typeof vi.fn>;
 
@@ -26,6 +26,24 @@ function okFor(ids: string[]): ProjectsResult<AssetUrlsResponse> {
 
 beforeEach(() => {
   mockGet.mockReset();
+});
+
+// A moment's own picture rides the cards' URL request: one gallery page is still one call (IND403 per-moment frames).
+describe('assetUrlBatcher.requestFrames', () => {
+  it('coalesces frame asks into the same call as the asset ids, and answers each ask', async () => {
+    mockGet.mockImplementation(async (_pid: string, ids: string[]) => ({
+      ok: true, value: { urls: Object.fromEntries(ids.map((id) => [id, entry(`url:${id}`)])), errors: {},
+        frames: { 'video:a@1200': { url: 'https://s3/f.jpg', expiresAt: 1 } } },
+    }));
+    const [urls, frames] = await Promise.all([
+      request('p1', ['video:a']),
+      requestFrames('p1', [{ asset_id: 'video:a', at_ms: 1200 }, { asset_id: 'video:a', at_ms: 9000 }]),
+    ]);
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledWith('p1', ['video:a'], [{ asset_id: 'video:a', at_ms: 1200 }, { asset_id: 'video:a', at_ms: 9000 }]);
+    expect(urls.get('video:a')?.ok).toBe(true);
+    expect([...frames]).toEqual([['video:a@1200', 'https://s3/f.jpg']]);
+  });
 });
 
 describe('assetUrlBatcher.request', () => {
@@ -51,7 +69,7 @@ describe('assetUrlBatcher.request', () => {
     mockGet.mockImplementation(async (_pid: string, ids: string[]) => okFor(ids));
 
     await request('p1', ['a', 'a', 'a']);
-    expect(mockGet).toHaveBeenCalledWith('p1', ['a']);
+    expect(mockGet).toHaveBeenCalledWith('p1', ['a'], []);
 
     mockGet.mockClear();
     const many = Array.from({ length: MAX_IDS_PER_CALL + 50 }, (_, i) => `id${i}`);
@@ -68,7 +86,7 @@ describe('assetUrlBatcher.request', () => {
 
     mockGet.mockImplementation(async (_pid: string, ids: string[]) => okFor(ids));
     const r = await request('p1', ['', 'a']);
-    expect(mockGet).toHaveBeenCalledWith('p1', ['a']);
+    expect(mockGet).toHaveBeenCalledWith('p1', ['a'], []);
     expect(r.has('')).toBe(false);
     expect(r.get('a')).toEqual({ ok: true, entry: entry('url:a') });
   });

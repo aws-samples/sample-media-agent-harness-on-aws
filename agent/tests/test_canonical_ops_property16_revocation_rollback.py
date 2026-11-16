@@ -188,7 +188,7 @@ class InMemoryAssetIndex:
         pk, sk = self._scope_keys(asset, owner_user_id)
         item["PK"] = pk
         item["SK"] = sk
-        if item.get("recordType") == "published" and asset.version is not None:
+        if asset.version is not None:
             gsi1pk, gsi1sk = make_gsi1_keys(asset.asset_id, asset.version)
             item["GSI1PK"] = gsi1pk
             item["GSI1SK"] = gsi1sk

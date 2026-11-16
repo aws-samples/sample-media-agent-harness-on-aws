@@ -44,16 +44,16 @@ import {
   momentsBatchEntries, type MomentBatchCard,
 } from './momentText';
 import { useMomentUrls } from '../../../projects/useMomentUrls';
+import { useMomentFrames } from '../../../projects/useMomentFrames';
 import { getActiveSessionId } from '../../../services/activeSession';
 import { requestMomentClipAutoOpen } from '../../../services/momentClipAutoOpen';
 import { getSessionProject } from '../../../projects/sessionProjectStore';
 import SearchIcon from '../../icons/SearchIcon';
-import ChevronRightIcon from '../../icons/ChevronRightIcon';
-import { SEARCH_KINDS, useMomentsTabSearch, type MomentsTabSearch } from './momentsTabSearch';
-import { ImageQueryValue, MatchedBadges, RecentSearches, SearchByImageButton } from './MomentsQueryBar';
+import { SEARCH_KINDS, momentsVersionManifest, useMomentsTabSearch, type MomentsTabSearch } from './momentsTabSearch';
+import { ImageQueryValue, MatchedBadges, SearchByImageButton } from './MomentsQueryBar';
+import { requestOpenView } from '../openView';
 import DocumentMomentCard from './DocumentMomentCard';
 import { isSearchKind, type PlayableKind } from '../../../shared/searchKinds';
-import type { RenderViewState } from '../../../shared/renderViewState';
 
 const PALETTE = ['#7dd3fc', '#c4b5fd', '#f9a8d4', '#86efac', '#fde68a', '#fca5a5'];
 
@@ -116,6 +116,8 @@ export function readMoments(data: ClipGalleryData): MomentsBlock | null {
         ? m.highlight_terms.filter((x): x is string => typeof x === 'string')
         : [],
       citation: typeof m.citation === 'string' ? m.citation : null,
+      ...(Array.isArray(m.matched_by) ? { matched_by: m.matched_by.filter((x): x is number => Number.isInteger(x)) } : {}),
+      ...(Array.isArray(m.found_by) ? { found_by: m.found_by.filter((x): x is string => x === 'meaning' || x === 'keyword') } : {}),
     });
   }
   return { ...block, project_id: projectId, items };
@@ -209,30 +211,34 @@ export default function ClipGallery(props: RendererProps<ClipGalleryData>) {
 // ───────────────────────────────────────────────────────────────────────── Moments mode
 
 function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProps<ClipGalleryData> & { moments: MomentsBlock }) {
-  // The tab's own search (history + position persist in the manifest's viewState; results re-fetch).
-  const persist = data as { viewState?: RenderViewState; onViewStateChange?: (vs: RenderViewState) => void };
-  const search = useMomentsTabSearch(moments, persist.viewState, persist.onViewStateChange);
-  const searching = search.index > 0;
+  // Session + project context the cards' Expand and Find_Similar are scoped to. The renderer props
+  // carry no session id, so read the on-screen session the same way the auto-render does.
+  const sessionId = getActiveSessionId();
+
+  // The tab's own search: its results open as this tab's next version (named by the query), never in place.
+  const search = useMomentsTabSearch(moments, (entry, found) => {
+    const label = data.title || 'Moments';
+    requestOpenView({ sessionId, label,
+      manifest: momentsVersionManifest(data, moments, entry, found, `view-${crypto.randomUUID?.() ?? Date.now().toString(36)}`, new Date().toISOString()) });
+  });
 
   // Paged: a turn can carry up to 200 Moments, so the grid opens with one page and "Load more" adds the
   // next. Only shown cards exist, so only they mint URLs and only they join Play all.
   const [shown, setShown] = useState(MOMENTS_PAGE);
-  const allItems = search.result.status === 'ok' ? search.result.items : EMPTY_MOMENTS;
+  const allItems = search.items;
   const items = allItems.slice(0, shown);
   const remaining = allItems.length - items.length;
   const visibleBlock = React.useMemo(
-    () => ({ ...moments, ...(searching ? { basis: 'searched' as const, cited_count: 0 } : {}), items }),
+    () => ({ ...moments, items }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [moments, shown, allItems, searching],
+    [moments, shown, allItems],
   );
-
-  // Session + project context the cards' Expand and Find_Similar are scoped to. The renderer props
-  // carry no session id, so read the on-screen session the same way the auto-render does.
-  const sessionId = getActiveSessionId();
   const activeProjectId = getSessionProject(sessionId)?.activeProjectId ?? null;
 
   // View-time presigned URLs for every card (minted on mount, refreshed per card; Req 3.26–3.28).
   const urls = useMomentUrls(visibleBlock);
+  // Each video card's own picture: the frame its moment starts in (else the file's hero still).
+  const frames = useMomentFrames(items);
 
   // Save to folder: pick moments, then file each as a bookmark (its asset + its range) in a project folder.
   const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set());
@@ -284,7 +290,7 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
   }, [preview, showPreview, stopAll]);
   const previewMoment = preview ? allItems.find((x) => x.id === preview.id) ?? null : null;
 
-  // Find similar searches IN this tab (a new history entry with the card's image), not in a chat turn.
+  // Find similar searches from this tab (its results are the tab's next version), not in a chat turn.
   const onFindSimilar = useCallback((moment: MomentItem) => {
     if (!isPlayableMoment(moment)) return;
     const image = search.imageOfMoment(moment);
@@ -355,11 +361,7 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
   const howMany = allItems.length > MOMENTS_PAGE
     ? `Showing ${items.length} of ${allItems.length}${moments.truncated ? ' (top results)' : ''}`
     : `${allItems.length} ${allItems.length === 1 ? 'moment' : 'moments'}`;
-  const subtitle = !searching
-    ? (data.subtitle || howMany)
-    : search.result.status === 'loading' ? 'Searching…'
-      : search.result.status === 'error' ? 'Search failed'
-        : `${howMany} for your search`;
+  const subtitle = data.subtitle || howMany;
   const columns = Math.max(1, Math.min(3, Math.max(1, items.length)));
 
   return (
@@ -369,8 +371,8 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
         <div style={{ flex: '1 0 220px', minWidth: 0 }}>
           <h3 style={{ margin: 0, fontSize: 16, color: t.colors.textPrimary }}>{title}</h3>
           <p style={{ margin: '4px 0 0', fontSize: 12, color: t.colors.textSecondary }}
-            data-testid={!data.subtitle && !searching && allItems.length > MOMENTS_PAGE ? 'moments-count' : undefined}>{subtitle}</p>
-          {data.subtitle && !searching && allItems.length > MOMENTS_PAGE && (
+            data-testid={!data.subtitle && allItems.length > MOMENTS_PAGE ? 'moments-count' : undefined}>{subtitle}</p>
+          {data.subtitle && allItems.length > MOMENTS_PAGE && (
             <p data-testid="moments-count" style={{ margin: '2px 0 0', fontSize: 11, color: t.colors.textTertiary }}>{howMany}</p>
           )}
         </div>
@@ -414,22 +416,22 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
           )}
         </div>
       )}
-      {searching && (search.result.status === 'loading' || search.result.status === 'preparing') ? (
-        <div data-testid="moments-search-loading" style={{ padding: 28, textAlign: 'center', color: t.colors.textSecondary, fontSize: 12 }}>
-          {search.result.status === 'preparing' ? 'Preparing the image for search… this takes a moment for a new picture.' : 'Searching the project…'}
+      {/* A search on its way to becoming the next version: said here, above this tab's own cards. */}
+      {search.pending && (
+        <div data-testid={search.pending.status === 'error' ? 'moments-search-error' : 'moments-search-loading'}
+          role="status" style={{ margin: '0 0 12px', color: t.colors.textSecondary, fontSize: 12 }}>
+          {search.pending.status === 'preparing' ? 'Preparing the image for search… this takes a moment for a new picture.'
+            : search.pending.status === 'loading' ? 'Searching the project…'
+              : <>{search.pending.message}{' '}<button type="button" onClick={search.retry} style={linkButtonStyle(t)}>Try again</button></>}
         </div>
-      ) : searching && search.result.status === 'error' ? (
-        <div data-testid="moments-search-error" style={{ padding: 24, textAlign: 'center', color: t.colors.textSecondary, fontSize: 12 }}>
-          {search.result.message}{' '}
-          <button type="button" onClick={search.retry} style={linkButtonStyle(t)}>Try again</button>
-        </div>
-      ) : items.length === 0 ? (
+      )}
+      {items.length === 0 ? (
         <div data-testid="clip-gallery-empty" style={{ padding: 24, textAlign: 'center', color: t.colors.textSecondary, fontSize: 12 }}>
-          {searching
-            ? search.entry?.images
-              ? <>No moments look like {search.entry.images.length > 1 ? 'these images' : 'this image'}. Try another picture{search.entry?.kinds ? ', or clear the type filter' : ''}.</>
-              : <>No moments match <span style={{ color: t.colors.textPrimary }}>“{search.entry?.q}”</span>. Try other words{search.entry?.kinds ? ', or clear the type filter' : ''}.</>
-            : 'No moments to review.'}
+          {moments.basis === 'searched' && search.queryImages.length
+            ? <>No moments look like this image. Try another picture{search.kinds.length ? ', or clear the type filter' : ''}.</>
+            : moments.basis === 'searched' && moments.cited_count === 0 && moments.query
+              ? <>No moments match <span style={{ color: t.colors.textPrimary }}>“{moments.query}”</span>. Try other words{search.kinds.length ? ', or clear the type filter' : ''}.</>
+              : 'No moments to review.'}
         </div>
       ) : (
         <ul data-testid="moments-grid" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid',
@@ -450,6 +452,7 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
               theme={t}
               sessionId={sessionId}
               cardUrl={urls.state(m.id)}
+              frameUrl={frames[m.id] ?? null}
               onLoadStart={(resume) => urls.onLoadStart(m.id, resume)}
               onLoadOk={() => urls.onLoadOk(m.id)}
               onLoadError={(resume) => urls.onLoadError(m.id, resume)}
@@ -460,8 +463,8 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
               turnInProgress={false}
               activeProjectId={null}
               onFindSimilar={onFindSimilar}
-              badges={search.entry?.images
-                ? <MatchedBadges images={search.entry.images} matchedBy={m.matched_by} projectId={moments.project_id} /> : undefined}
+              badges={search.queryImages.length
+                ? <MatchedBadges images={search.queryImages} matchedBy={m.matched_by} projectId={moments.project_id} /> : undefined}
               onClip={onInteraction ? onClip : undefined}
               onSaveToFolder={m.ref?.asset_id ? (x) => { setPicked(new Set([x.id])); void openSave(x.ref.project_id); } : undefined}
               selected={picked.has(m.id)}
@@ -507,7 +510,6 @@ function MomentsGallery({ data, theme: t, onInteraction, moments }: RendererProp
   );
 }
 
-const EMPTY_MOMENTS: MomentItem[] = [];
 
 const KIND_LABEL: Record<string, string> = { video: 'Video', image: 'Image', audio: 'Audio', document: 'Document' };
 
@@ -516,15 +518,13 @@ function isPlayableMoment(m: MomentItem): m is MomentItem & { kind: PlayableKind
 }
 
 /**
- * The tab's search row: history arrows, the query box (pre-filled with the turn's query), Search, and the
- * type chips. Quiet by design — one raised field, everything else muted until hovered or active.
+ * The tab's search row: the query box (pre-filled with the query that found this tab's cards), Search, and the
+ * type chips. Quiet by design — one raised field, everything else muted until hovered or active. Earlier searches
+ * are the tab's versions (the panel's ‹ vN of M ›), so the row has no history control of its own.
  */
 function MomentsSearchBar({ search, theme: t, projectId, sessionId, selectedImage }: {
   search: MomentsTabSearch; theme: RendererProps['theme']; projectId: string; sessionId: string; selectedImage: MomentsQueryImage | null;
 }) {
-  const position = search.index === 0 ? 'Agent results' : `Search ${search.index}`;
-  // History controls appear once there is history to move through; until then the bar is just the field.
-  const hasHistory = search.canBack || search.canForward;
   const imageMode = search.images.length > 0;
   const inputRef = useRef<HTMLInputElement>(null);
   const focusWords = useRef(false);
@@ -541,23 +541,13 @@ function MomentsSearchBar({ search, theme: t, projectId, sessionId, selectedImag
         onSubmit={(e) => { e.preventDefault(); search.submit(); }}
         style={{ display: 'flex', alignItems: 'center', gap: 8 }}
       >
-        {hasHistory && <div style={{ display: 'inline-flex', gap: 2 }} title={position}>
-          <button type="button" aria-label="Previous search" data-testid="moments-search-back"
-            disabled={!search.canBack} onClick={search.back} style={navButtonStyle(t, search.canBack)}>
-            <ChevronRightIcon size={14} style={{ transform: 'rotate(180deg)' }} />
-          </button>
-          <button type="button" aria-label="Next search" data-testid="moments-search-forward"
-            disabled={!search.canForward} onClick={search.forward} style={navButtonStyle(t, search.canForward)}>
-            <ChevronRightIcon size={14} />
-          </button>
-        </div>}
         {/* Words OR an image, never both: M2C searches one kind per call, so the field holds exactly one
             (mock search-and-actions.html §1). Image mode has no text input to type into. */}
         <div style={{ ...searchFieldStyle(t), gap: 6, padding: '3px 6px 3px 10px' }} data-testid="moments-search-field"
           data-mode={imageMode ? 'image' : 'words'} title={imageMode ? undefined : 'Narrow with @File.mp4, #topic or #utterance'}>
           {imageMode ? (
             <ImageQueryValue search={search} projectId={projectId} sessionId={sessionId} selectedImage={selectedImage} theme={t}
-              onWords={toWords} recent={<RecentSearches search={search} projectId={projectId} theme={t} />} />
+              onWords={toWords} />
           ) : (
             <>
               <SearchIcon size={14} style={{ color: t.colors.textTertiary, flexShrink: 0 }} />
@@ -576,8 +566,6 @@ function MomentsSearchBar({ search, theme: t, projectId, sessionId, selectedImag
                 }}
               />
               <SearchByImageButton search={search} projectId={projectId} sessionId={sessionId} selectedImage={selectedImage} theme={t} />
-              <span aria-hidden="true" style={{ width: 1, height: 20, background: t.colors.border, flexShrink: 0 }} />
-              <RecentSearches search={search} projectId={projectId} theme={t} />
             </>
           )}
         </div>
@@ -612,15 +600,6 @@ function searchFieldStyle(t: RendererProps['theme']): React.CSSProperties {
     flex: 1, display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, padding: '7px 10px',
     background: t.colors.background, border: `1px solid ${t.colors.border}`, borderRadius: t.radius.button,
     cursor: 'text',
-  };
-}
-
-function navButtonStyle(t: RendererProps['theme'], enabled: boolean): React.CSSProperties {
-  return {
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 30,
-    background: 'transparent', border: `1px solid ${enabled ? t.colors.border : 'transparent'}`,
-    borderRadius: t.radius.button, color: enabled ? t.colors.textPrimary : t.colors.textTertiary,
-    cursor: enabled ? 'pointer' : 'default', opacity: enabled ? 1 : 0.45, padding: 0,
   };
 }
 
@@ -735,6 +714,8 @@ function LegacyClipGallery({ data, theme: t, onInteraction }: RendererProps<Clip
   const croppedIds = clips.map(c => c.id).filter(id => crops[id] && clipById.get(id)?.kind === 'video');
   const nCropped = croppedIds.length;
 
+  // The whole set, so a Trim / Clip / Crop of some of it comes back as this gallery's next version (not a separate tab).
+  const wholeSet = clips.map(c => ({ clipId: c.id, label: c.label, src: c.src, kind: c.kind }));
   const emitBatch = () => {
     if (nMarked === 0) return;
     const entries = markedIds.map(id => {
@@ -742,7 +723,7 @@ function LegacyClipGallery({ data, theme: t, onInteraction }: RendererProps<Clip
       return { clipId: id, label: c.label, src: c.src, in: m.in, out: m.out };
     });
     const prompt = buildBatchTrimPrompt(verb, entries.map(e => ({ label: e.label, in: e.in, out: e.out, src: e.src })));
-    const payload: BatchClipActionData = { verb, prompt, clips: entries };
+    const payload: BatchClipActionData = { verb, prompt, clips: entries, set: wholeSet };
     onInteraction?.({ type: 'action', target: `${verb}-batch`, data: payload, timestamp: Date.now() });
   };
 
@@ -769,7 +750,7 @@ function LegacyClipGallery({ data, theme: t, onInteraction }: RendererProps<Clip
       return { clipId: id, label: c.label, src: c.src, box: crops[id] };
     });
     const prompt = buildBatchCropPrompt(entries.map(e => ({ label: e.label, box: e.box })));
-    const payload: BatchClipActionData = { verb: 'crop', prompt, clips: entries };
+    const payload: BatchClipActionData = { verb: 'crop', prompt, clips: entries, set: wholeSet };
     onInteraction?.({ type: 'action', target: 'crop-batch', data: payload, timestamp: Date.now() });
   };
 

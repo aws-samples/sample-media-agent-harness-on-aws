@@ -234,3 +234,13 @@ describe('mergeServerRenders — stable tab identity (lineage spec R8)', () => {
     expect(merged.map(e => e.key)).toEqual(['artifacts/s/render/b.json']);
   });
 });
+
+describe('mergeServerRenders — every tab keeps what it is about (design A: one tab per subject)', () => {
+  it("uses the server's subjectIds, else derives them from the inline manifest", () => {
+    const merged = mergeServerRenders([], [
+      { key: 'composite:loc:x', createdAt: '2026-11-14T00:00:01Z', composite: true, subjectIds: ['loc:s3://b/x.mp4'], manifest: { template: 'nle-timeline' } },
+      { key: 'artifacts/s/render/v.json', createdAt: '2026-11-14T00:00:02Z', manifest: { template: 'asset-player', ref: { asset_id: 'video:1' } } },
+    ]);
+    expect(merged.map((e) => e.subjectIds)).toEqual([['loc:s3://b/x.mp4'], ['asset:video:1']]);
+  });
+});

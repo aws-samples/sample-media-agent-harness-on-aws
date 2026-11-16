@@ -99,12 +99,11 @@ describe('ArtifactLink', () => {
     expect(authFetch).not.toHaveBeenCalled();
   });
 
-  it('a video card shows its first frame from the resolved URL, and Preview plays it', async () => {
+  it('a video card mounts no player (its picture is a hero still); Preview plays the resolved URL', async () => {
     render(<ArtifactLink href="https://x.cloudfront.net/artifacts/clip.mp4" />);
-    await waitFor(() => expect(card().querySelector('video')).toHaveAttribute('src', `${presigner.urlFor('artifacts/clip.mp4')}#t=0.1`));
-    // Regression (session 360cebcf): no crossOrigin. Plain playback needs no CORS, and a non-CORS host
-    // (fal, or the unresolved fallback) would be refused.
-    expect(card().querySelector('video')).not.toHaveAttribute('crossorigin');
+    // No project file behind it here, so the card shows the kind tile; a player per card starved Firefox (IND403).
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview clip.mp4' })).toBeInTheDocument());
+    expect(card().querySelector('video')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Preview clip.mp4' }));
     const video = screen.getByTestId('asset-preview-video');
     expect(video).toHaveAttribute('src', presigner.urlFor('artifacts/clip.mp4'));

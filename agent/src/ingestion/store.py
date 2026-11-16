@@ -43,7 +43,8 @@ def _name_rank(row: Mapping[str, Any], needle: str) -> int:
     """Relevance of a row to a folded name query, lower is better: 0 exact Display_Name, 1 prefix, 2 substring,
     3 matched only via its folder path. Twin of the proxy's `nameScore` (ui/server/projects/ingestionRoutes.ts)."""
     name = schema.fold_name(str(row.get("displayName") or ""))
-    if name == needle:
+    # A name typed without its extension is still the exact name (the original `.mp4` before its `_clip_*` copies).
+    if name == needle or re.sub(r"\.[^./]{1,8}$", "", name) == needle:
         return 0
     if name.startswith(needle):
         return 1

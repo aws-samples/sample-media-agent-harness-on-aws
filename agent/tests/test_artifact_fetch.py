@@ -681,3 +681,75 @@ def test_presigned_urls_use_the_regional_host(monkeypatch):
     monkeypatch.setattr(af, "_S3_CLIENT", None)
     assert url.startswith("https://my-bucket.s3.us-west-2.amazonaws.com/artifacts/a.mp4?")
     assert "X-Amz-Credential=" in url
+
+
+# --- Our copy of another system's output is handed to tools as the ORIGINAL (staging 0f31776c: a scene enrichment was
+# given the workspace copy of shots.json and failed "must be on the proxy bucket").
+
+class _HeadS3:
+    def __init__(self, objects):
+        self.objects, self.heads = objects, []
+
+    def head_object(self, Bucket, Key):
+        self.heads.append(f"{Bucket}/{Key}")
+        if f"{Bucket}/{Key}" not in self.objects:
+            err = Exception("404")
+            err.response = {"Error": {"Code": "404"}}
+            raise err
+        return {"Metadata": self.objects[f"{Bucket}/{Key}"]}
+
+
+COPY = "projects/p1/sessions/s1/output/72b9/shots.json"
+ORIGIN = "s3://m2c-proxy/micro-workflow/shot-segmentation/72b9/embeddings/shots.json"
+
+
+def _origin_env(monkeypatch, objects):
+    monkeypatch.setenv("SKILLS_S3_BUCKET", "ours")
+    af._ORIGIN_CACHE.clear()
+    fake = _HeadS3(objects)
+    monkeypatch.setattr(af, "_client", lambda: fake)
+    return fake
+
+
+def test_an_s3_uri_of_our_copy_becomes_its_original_anywhere_in_the_input(monkeypatch):
+    _origin_env(monkeypatch, {f"ours/{COPY}": {"origin": ORIGIN}, ORIGIN[5:]: {}})
+    args = {"shot_segmentation_s3uri": f"s3://ours/{COPY}", "use_batch": False, "more": [f"s3://ours/{COPY}"]}
+    out, changed = af.origin_refs_in(args)
+    assert changed and out == {"shot_segmentation_s3uri": ORIGIN, "use_batch": False, "more": [ORIGIN]}
+    assert args["shot_segmentation_s3uri"] == f"s3://ours/{COPY}"  # the caller's input is never mutated
+
+
+def test_an_https_link_to_the_copy_is_left_alone_so_a_web_fetching_tool_still_can(monkeypatch):
+    fake = _origin_env(monkeypatch, {f"ours/{COPY}": {"origin": ORIGIN}, ORIGIN[5:]: {}})
+    assert af.origin_refs_in({"image_url": f"https://cdn.example/{COPY}"}) == ({"image_url": f"https://cdn.example/{COPY}"}, False)
+    assert fake.heads == []
+
+
+def test_no_origin_or_an_original_that_is_gone_keeps_the_copy(monkeypatch):
+    _origin_env(monkeypatch, {f"ours/{COPY}": {"origin": ORIGIN}, "ours/projects/p1/x.wav": {}})
+    assert af.origin_refs_in(f"s3://ours/{COPY}") == (f"s3://ours/{COPY}", False)          # the original was cleaned up
+    assert af.origin_refs_in("s3://ours/projects/p1/x.wav") == ("s3://ours/projects/p1/x.wav", False)  # ours, no origin
+    assert af.origin_refs_in("s3://elsewhere/k.json") == ("s3://elsewhere/k.json", False)  # not ours: untouched
+
+
+def test_an_original_we_may_not_read_still_stands_and_each_copy_is_looked_up_once(monkeypatch):
+    class _Denied(_HeadS3):
+        def head_object(self, Bucket, Key):
+            if Bucket == "m2c-proxy":
+                self.heads.append(f"{Bucket}/{Key}")
+                err = Exception("403"); err.response = {"Error": {"Code": "403"}}
+                raise err
+            return super().head_object(Bucket, Key)
+    monkeypatch.setenv("SKILLS_S3_BUCKET", "ours")
+    af._ORIGIN_CACHE.clear()
+    fake = _Denied({f"ours/{COPY}": {"origin": ORIGIN}})
+    monkeypatch.setattr(af, "_client", lambda: fake)
+    assert af.origin_refs_in(f"s3://ours/{COPY}")[0] == ORIGIN   # the producer's own tools read it with their role
+    af.origin_refs_in(f"s3://ours/{COPY}")
+    assert fake.heads.count(f"ours/{COPY}") == 1
+
+
+def test_every_gateway_tool_call_swaps_copies_for_originals_before_presigning():
+    src = (Path(__file__).resolve().parents[1] / "src" / "jobs" / "strands_tool_wrap.py").read_text()
+    body = src[src.index("async def _base_stream_once("):]
+    assert body.index("await _origin_refs_inputs(tool_use)") < body.index("await _presign_own_artifact_inputs(tool_use)")

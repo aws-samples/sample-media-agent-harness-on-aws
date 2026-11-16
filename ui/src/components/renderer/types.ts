@@ -103,6 +103,8 @@ export interface MomentItem {
   citation: string | null;
   /** A tab search by several images ("match any"): the indexes of the query images that found this moment. */
   matched_by?: number[];
+  /** Which of hybrid search's searches matched it: "meaning" (vector) and/or "keyword" (full text). */
+  found_by?: string[];
 }
 
 /** One query image of a Moments search (design 2026-10-18 §2): an image asset, or a frame of a project video. */
@@ -128,6 +130,8 @@ export interface MomentsBlock {
   query?: string;
   /** The turn's typed query: an image search arrives as its image chip(s). Absent on older manifests. */
   queryRef?: MomentsQuery;
+  /** The type chips pressed when this view's search ran (a tab search's version); absent = every kind. */
+  kinds?: Array<MomentItem['kind']>;
 }
 
 export interface ClipGalleryData {
@@ -154,6 +158,11 @@ export interface BatchClipActionData {
    *  verb needs are set. Moment cards also carry the Hit's `ref` and `kind` so the agent can
    *  resolve the asset without a URL. */
   clips: { clipId: string; label: string; src: string; in?: number; out?: number; at?: number; box?: CropBox; ref?: { project_id: string; asset_id: string; frame_s3_key: string | null }; kind?: 'video' | 'image' | 'audio' }[];
+  /** The whole gallery the action was launched on, in order: trimming some of a set returns the set's NEXT VERSION
+   *  (the trimmed items in place of their originals), in the same tab. */
+  set?: { clipId: string; label: string; src: string; kind?: 'video' | 'image' | 'audio' }[];
+  /** The tab the action was launched from (SessionRendererPanel adds it): what it is about, and its name. */
+  origin?: { subjectIds: string[]; label?: string };
 }
 
 export interface RenderHistoryEntry {
@@ -205,4 +214,11 @@ export interface RenderHistoryEntry {
    * rather than dropping it, and the first list that names its key replaces it in place.
    */
   clientOnly?: boolean;
+  /**
+   * What this view is about (`shared/renderSubject.viewSubjectIds`): the file it shows, else a gallery's title.
+   * The panel shows every view sharing a subject as ONE tab with versions. Absent = its own subject.
+   */
+  subjectIds?: string[];
+  /** What tells this version apart from the others of its tab (`viewVersionNote`: a search's query). */
+  note?: string;
 }

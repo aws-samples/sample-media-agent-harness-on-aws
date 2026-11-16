@@ -282,6 +282,12 @@ def _content_dicts(result: Any) -> list[dict]:
     return dicts
 
 
+def _is_key_field(name: Any) -> bool:
+    """A field whose value is an object key (or a container of keys): ``key``, ``*_key``, ``*Key``, ``*_keys``."""
+    n = str(name or "").lower()
+    return n in ("key", "keys") or n.endswith(("_key", "_keys", "key", "keys"))
+
+
 def extract_output_uris(result: Any) -> list[str]:
     """Extract renderable ``s3://`` URIs from any tool result — tool-agnostic.
 
@@ -297,8 +303,9 @@ def extract_output_uris(result: Any) -> list[str]:
        anywhere in their response.
 
     3. **Bucket + key reconstruction** — find any key whose name contains
-       "bucket" (value = bucket name) paired with string values elsewhere in
-       the same dict that end in a renderable extension. Handles legacy M2C
+       "bucket" (value = bucket name) paired with KEY fields (``*_key``,
+       ``*_keys``) elsewhere in the same dict that end in a renderable
+       extension. A name is never a key. Handles legacy M2C
        shapes (``output_s3_prefix`` + ``*_key`` fields, ``output_bucket`` +
        ``output_keys`` dict) and any future tool that follows a similar
        bucket-plus-relative-keys pattern.
@@ -401,22 +408,22 @@ def extract_output_uris(result: Any) -> list[str]:
         if not bucket:
             continue
 
-        # Collect renderable keys from ANYWHERE in this dict's subtree (full
-        # depth, not just one level) so a bucket declared on a parent still
-        # reaches a relative key nested inside a list-of-dicts. This resolves the
-        # TTS shape (out_bucket sibling + outputs[].wav_key) generically — any
-        # tool that pairs a bucket with nested *_key values works, with no
-        # field-name hardcoding. Renderability + operational filtering still gate
-        # every add, so the deeper walk cannot pull in scratch.
-        def _collect_subtree(node: Any) -> None:
+        # Collect renderable KEYS from anywhere in this dict's subtree (full depth, so a bucket declared on a
+        # parent still reaches a relative key nested inside a list-of-dicts: the TTS shape, out_bucket +
+        # outputs[].wav_key). Only a value its field DECLARES a key (`*_key`, `*_keys`, `key`, or anything under
+        # a `*_keys` container) is an object key. Any other string is a name: a review's
+        # `videos[].name = "Meridian.mp4"` became `s3://<bucket>/Meridian.mp4`, an object that does not exist,
+        # and opened a dead 10:00 video row (redesign 2026-11-11; the same fabrication as "rice_field_6s · 10:00").
+        def _collect_subtree(node: Any, under_key: bool = False) -> None:
             if isinstance(node, str):
-                _add_with_bucket(bucket, node)
+                if under_key:
+                    _add_with_bucket(bucket, node)
             elif isinstance(node, dict):
-                for v in node.values():
-                    _collect_subtree(v)
+                for k, v in node.items():
+                    _collect_subtree(v, under_key or _is_key_field(k))
             elif isinstance(node, (list, tuple)):
                 for v in node:
-                    _collect_subtree(v)
+                    _collect_subtree(v, under_key)
         _collect_subtree(d)
 
     return out
@@ -780,6 +787,32 @@ def _job_id_from_tool_use(tool_use: Any) -> Optional[str]:
     return None
 
 
+_RUN_PREFIX_RE = re.compile(r"/micro-workflow/([a-z0-9-]+)/([0-9a-f]{8}-[0-9a-f-]{27})(?:/|$)")
+_EXEC_ARN_RE = re.compile(r"^(arn:aws:states:[^:]+:\d+:execution:)([^:]+):[0-9a-f-]{36}$")
+
+
+def upstream_job_ids(item: dict) -> list:
+    """The jobs a CHAINED job ran on: its inputs that are another M2C run's output (``…/micro-workflow/<tool>/<exec>``).
+
+    Shot metadata enrichment is handed a shot-segmentation RUN, not the video, so its own record names no source
+    media and its scenes rendered in a tab of their own. That run's job (same M2C stack: its state machine is this
+    job's with the tool name swapped) did record the video, so its source is this job's source too.
+    """
+    m = _EXEC_ARN_RE.match(str(item.get("jobId") or ""))
+    own_tool = str(item.get("statusTool") or "").split("___", 1)[0]
+    if not m or not own_tool or not m.group(2).endswith(own_tool):
+        return []
+    head, stack = m.group(1), m.group(2)[: -len(own_tool)]
+    out: list = []
+    for uri in item.get("lineageInputs") or []:
+        u = _RUN_PREFIX_RE.search(str(uri))
+        if u and u.group(1) != own_tool:
+            jid = f"{head}{stack}{u.group(1)}:{u.group(2)}"
+            if jid not in out:
+                out.append(jid)
+    return out
+
+
 def _default_job_source_lookup(job_id: str) -> list:
     """Read the recorded source media for a job from the Job Registry (best-effort).
 
@@ -796,10 +829,19 @@ def _default_job_source_lookup(job_id: str) -> list:
     try:
         import boto3
         region = os.environ.get("AWS_REGION") or os.environ.get("REGION") or "us-west-2"
-        item = boto3.resource("dynamodb", region_name=region).Table(table).get_item(
-            Key={"jobId": job_id}
-        ).get("Item")
-        return list(item.get("sourceMedia", []) or []) if item else []
+        tbl = boto3.resource("dynamodb", region_name=region).Table(table)
+        item = tbl.get_item(Key={"jobId": job_id}).get("Item")
+        if not item:
+            return []
+        own = list(item.get("sourceMedia", []) or [])
+        if own:
+            return own
+        # A chained job (it ran on another run's output) shows on the video that upstream run ran on.
+        for up in upstream_job_ids(item)[:3]:
+            got = (tbl.get_item(Key={"jobId": up}).get("Item") or {}).get("sourceMedia") or []
+            if got:
+                return list(got)
+        return []
     except Exception:  # noqa: BLE001 - never fail a render over a source lookup
         return []
 
@@ -1164,6 +1206,7 @@ NON_ARTIFACT_TOOLS = frozenset({
     "readd_asset",
     "show_asset",
     "use_asset",  # returns the file's reference for another tool, not media to render
+    "update_timeline",   # writes its own lane manifest into the video's tab; nothing to harvest
     "browse_project",
     "organize_project",  # files are moved / bookmarked, nothing new is produced to render
     "list_projects",     # names the user's projects; nothing to render

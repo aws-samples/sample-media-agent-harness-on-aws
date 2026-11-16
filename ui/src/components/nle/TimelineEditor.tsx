@@ -34,7 +34,18 @@ import ChevronDownIcon from '../icons/ChevronDownIcon';
 const IN_COLOR = '#3FBF77';
 const OUT_COLOR = '#E05D52';
 const POINT_COLOR = '#E8A24C';
-const SNAP_SECONDS = 0.4;
+/** How close (on screen) a drag must come to a snap target — a shot boundary, a keyframe — to land on it. In pixels,
+ *  as in any editor: a fixed 0.4 s was under one pixel on a 9-minute timeline, so nothing ever snapped zoomed out,
+ *  while zoomed in the same pixels are a few frames and a mark can still go anywhere. */
+const SNAP_PX = 8;
+
+/** The snap target nearest `t` within `SNAP_PX` on a track `trackPx` wide showing `dur` seconds, else `t` itself. */
+export function snapTime(t: number, targets: readonly number[] | undefined, trackPx: number, dur: number): number {
+  if (!targets || targets.length === 0 || trackPx <= 0 || dur <= 0) return t;
+  let best = t, bestD = (SNAP_PX / trackPx) * dur;
+  for (const s of targets) { const d = Math.abs(s - t); if (d < bestD) { bestD = d; best = s; } }
+  return best;
+}
 const DRAG_THRESHOLD_PX = 4;
 const MENU_WIDTH = 184;
 
@@ -174,13 +185,6 @@ export default function TimelineEditor({ engine, state, duration, src, theme: t,
   const dur = duration > 0 ? duration : 0;
   const pct = (s: number) => (dur > 0 ? Math.max(0, Math.min(100, (s / dur) * 100)) : 0);
 
-  const snap = useCallback((tv: number): number => {
-    if (!snapTimes || snapTimes.length === 0) return tv;
-    let best = tv, bestD = SNAP_SECONDS;
-    for (const s of snapTimes) { const d = Math.abs(s - tv); if (d < bestD) { bestD = d; best = s; } }
-    return best;
-  }, [snapTimes]);
-
   const timeFromClientX = useCallback((clientX: number): number => {
     const el = trackRef.current;
     if (!el) return 0;
@@ -188,8 +192,8 @@ export default function TimelineEditor({ engine, state, duration, src, theme: t,
     if (r.width <= 0) return 0;
     const ratio = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
     // Shot snapping first, then onto the frame under the pointer, so a mark is the frame the timecode names.
-    return snapToFrame(snap(ratio * dur), fps);
-  }, [dur, snap, fps]);
+    return snapToFrame(snapTime(ratio * dur, snapTimes, r.width, dur), fps);
+  }, [dur, snapTimes, fps]);
 
   // Global pointer move/up: handle-edge drags AND ruler range-create drags keep
   // tracking off the element.

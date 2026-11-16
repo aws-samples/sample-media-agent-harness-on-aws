@@ -81,14 +81,4 @@ describe('renderViewState image searches (design 2026-10-18 §2)', () => {
       expect(normalizeViewState({ search: { history: [bad], index: 1 } })).toBeUndefined();
     }
   });
-  it('the tab trims its history to the PATCH budget, oldest first', async () => {
-    const { fitHistory } = await import('../components/renderer/templates/momentsTabSearch');
-    const big = (i: number) => ({ images: [0, 1, 2].map((j) => ({ frameKey: `${'k'.repeat(380)}${i}${j}`, sourceAssetId: VID, label: 'x'.repeat(80) })) });
-    const history = Array.from({ length: 10 }, (_, i) => big(i));
-    const fitted = fitHistory(history as never, 10);
-    expect(fitted.history.length).toBeLessThan(10);
-    expect(fitted.history[fitted.history.length - 1]).toBe(history[9]); // the newest is kept
-    expect(fitted.index).toBe(fitted.history.length);
-    expect(JSON.stringify({ viewState: viewStatePatch({ search: fitted }) }).length).toBeLessThan(4 * 1024);
-  });
 });

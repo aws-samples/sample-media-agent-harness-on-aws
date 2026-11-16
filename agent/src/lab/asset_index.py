@@ -23,7 +23,7 @@ SK encoding (one of)::
 
 GSI ``byPublishedId``::
 
-    GSI1PK = "PUB#" + publishedId    (only on recordType == "published")
+    GSI1PK = "PUB#" + publishedId    (only on a version: ``version`` present)
     GSI1SK = "v" + zpad(version)
 
 Connection-error semantics are preserved from the prior implementation:
@@ -239,7 +239,7 @@ def make_gsi1_keys(published_id: str, version: int) -> tuple[str, str]:
     """Render the (GSI1PK, GSI1SK) pair for a versioned published row.
 
     GSI1 is sparse — it is populated only on rows with
-    ``recordType=published`` and a positive ``version``. Drafts and the
+    a positive ``version``. Drafts and the
     flat tool-collection rows omit both attributes so they do not project
     into GSI1.
     """
@@ -437,7 +437,6 @@ class AssetIndex:
         # into GSI1. Tool-collections (no version) and drafts are excluded.
         if (
             asset.category != "tool-collection"
-            and item.get("recordType") == "published"
             and asset.version is not None
         ):
             gsi1pk, gsi1sk = make_gsi1_keys(asset.asset_id, asset.version)

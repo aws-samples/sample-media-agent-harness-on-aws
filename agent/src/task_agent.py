@@ -28,7 +28,7 @@ import boto3
 from strands import Agent, AgentSkills, Skill, tool
 from strands.models import BedrockModel
 import runtime_config_bootstrap  # noqa: F401,E402  — hydrate env before first-party imports (V2 1536B cap)
-from model.factory import build_model
+from model.factory import build_model, with_fallbacks
 from model.defaults import model_for
 from model import guardrail as _model_guardrail
 # Host-exec tools (shell, file_read, load_tool, ...) are NEVER bound: they ran with the runtime role
@@ -603,12 +603,17 @@ def _s3_context_guidance(session_id: str = "", project_id: Optional[str] = None)
     out = _artifact_output_prefix(session_id, project_id)
     _pfx = S3_PREFIX.rstrip("/")  # the configured prefix name (default "artifacts"); never hardcode it
     url_hint = f" Its permanent URL is `https://{ARTIFACTS_DOMAIN}/{out}<filename>`." if ARTIFACTS_DOMAIN else ""
+    # A link the cell's own code assembles (`CDN + prefix + name`) is never presigned by the harness, and the CDN is
+    # private: staging c7d66001's assemble step got 403 on every input that way. By key is the one read that works.
+    read_hint = (f" Our links `https://{ARTIFACTS_DOMAIN}/<key>` are NOT public: in code_interpreter read `<key>` "
+                 f"from `{S3_BUCKET}` with boto3 instead of downloading the link (a link your code puts together "
+                 f"is never signed and answers 403).") if ARTIFACTS_DOMAIN else ""
     return (
         f"S3 CONTEXT: the workspace bucket is `{S3_BUCKET}` in region `{REGION}` — create your boto3 "
         f"S3 client with `region_name='{REGION}'` (the bucket is regional; a client with a different "
         f"default region can fail the write with PermanentRedirect). To produce a file, write it from "
         f"code_interpreter with boto3 DIRECTLY to `s3://{S3_BUCKET}/{out}<filename>`, passing the "
-        f"correct ContentType for the file (e.g. `application/pdf`, `image/png`).{url_hint} That "
+        f"correct ContentType for the file (e.g. `application/pdf`, `image/png`).{url_hint}{read_hint} That "
         f"path is the managed, session-scoped OUTPUT location and is served as-is — do NOT write to "
         f"a flat `{_pfx}/<filename>` key. `{out.rstrip('/')}` is a KEY PREFIX in `{S3_BUCKET}`, NOT "
         f"a bucket — never write to a bucket literally named `{_pfx}` and never invent bucket names; "
@@ -617,7 +622,10 @@ def _s3_context_guidance(session_id: str = "", project_id: Optional[str] = None)
         f"durable.) Create the boto3 client inside the SAME code_interpreter cell that uses it: the "
         f"sandbox's S3 credentials are scoped to this session and rotate, so a client kept from an "
         f"earlier cell can fail with ExpiredToken/AccessDenied, and a write outside the OUTPUT prefix "
-        f"above is denied."
+        f"above is denied. SANDBOX: `ffmpeg` and `ffprobe` are on PATH. A skill script your instructions name "
+        f"(`scripts/<file>`, e.g. `scripts/trim_plan.py`) is written into the sandbox's working directory the "
+        f"moment your code names that path, and is then importable by module name (`import trim_plan`) — never "
+        f"search the filesystem for one: a recursive search from `/` walks `/proc` and never returns."
     )
 
 
@@ -1631,12 +1639,26 @@ def _declared_error(structured_value) -> str:
     a definitive failure signal (not fuzzy NLP): honoring it marks the node failed so the plan
     status is honest and P2's error-aware retry can act, instead of reporting SUCCEEDED over a
     step that plainly said it failed.
+
+    The other shape the agent uses is a top-level ``"status": "error"`` (or ``"failed"``), with the reasons in
+    ``errors``: staging c7d66001's assemble step returned ``{"status": "error", "final_url": null, "errors":
+    [...]}`` and was stored completed, so the plan SUCCEEDED over a reel that was never made.
     """
     if isinstance(structured_value, dict):
         err = structured_value.get("error")
         if err and str(err).strip():
             return str(err)
+        if str(structured_value.get("status") or "").strip().lower() in _DECLARED_FAILURE_STATUSES:
+            errors = structured_value.get("errors")
+            if isinstance(errors, list) and errors:
+                return "; ".join(str(e) for e in errors)
+            if isinstance(errors, str) and errors.strip():
+                return errors
+            return f"status: {structured_value.get('status')}"
     return ""
+
+
+_DECLARED_FAILURE_STATUSES = ("error", "failed", "failure")
 
 
 _NODE_ERROR_MAX_CHARS = 2000
@@ -2204,7 +2226,7 @@ async def _execute_plan_node(payload: dict):
         _node_turn_outputs.open_turn()
     try:
         node_agent = Agent(
-            model=node_model,
+            model=with_fallbacks(node_model),
             tools=resolved_tools,
             plugins=node_plugins,
             **({"hooks": _node_lineage_hooks} if _node_lineage_hooks else {}),
@@ -2829,7 +2851,7 @@ async def _fetch_plan_node_results(payload: dict):
         max_tokens=NODE_MAX_OUTPUT_TOKENS,
     )
     node_agent = Agent(
-        model=node_model,
+        model=with_fallbacks(node_model),
         tools=resolved_tools,
         system_prompt=(
             "You are fetching results for a completed async job. "
@@ -3367,12 +3389,15 @@ async def invoke(payload, context):
     # (principal-bearing) invocations; internal invocations pass None and
     # retain the pre-task-12.2 stateless behavior. Load/store is therefore
     # confined to the EXT# key derived from (agent_id, issuer, sub).
+    from model import retry as _model_retry  # a transient model error retries the call, not the node
+
     _agent_kwargs = dict(
-        model=model,
+        model=with_fallbacks(model),
         system_prompt=system_prompt,
         tools=tools,
         plugins=plugins,
         hooks=_hook_providers,
+        retry_strategy=_model_retry.retry_strategy(),
     )
     if external_session_manager is not None:
         _agent_kwargs["session_manager"] = external_session_manager

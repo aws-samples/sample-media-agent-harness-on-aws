@@ -67,12 +67,16 @@ export type ApiSessionDecision =
 export function decideApiSession(
   sessionId: string,
   actorId: string | undefined,
-  row: { actorId?: unknown; locked?: unknown } | undefined,
+  row: { actorId?: unknown; locked?: unknown; active?: unknown } | undefined,
 ): ApiSessionDecision {
   if (row) {
     const owner = typeof row.actorId === "string" ? row.actorId : "";
     if (!actorId || owner !== actorId) {
       return { kind: "reject", status: 403, code: "session_not_owned", message: "Session belongs to another user" };
+    }
+    // A deleted chat is gone everywhere: its row is soft-deleted (`active = 0`, a TTL), and no turn continues it.
+    if (row.active === 0) {
+      return { kind: "reject", status: 410, code: "session_deleted", message: "This chat was deleted" };
     }
     return { kind: "ok", locked: !!row.locked };
   }

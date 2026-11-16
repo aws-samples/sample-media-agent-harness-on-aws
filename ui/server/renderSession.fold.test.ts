@@ -108,3 +108,43 @@ describe("composeRenderTabs — two locations of one job output (session 981a44e
     ])).toEqual(["asset:video:1", "asset:video:2"]);
   });
 });
+
+describe("composeRenderTabs — every tab says what it is about (subjectIds), so the UI groups views by subject", () => {
+  // IND403 dry run: Clip opened the clip as a player tab; its shot segmentation then opened a SECOND tab on the
+  // same video. The server keeps both views and names the file each one shows; the panel shows them as ONE tab
+  // with two versions (renderSubject.groupBySubject).
+  const CLIP = "s3://ingest/projects/p1/sessions/s1/output/0-demo_clip_0022-0237_x.mp4";
+  const view = item("artifacts/s1/render/view-1.json",
+    { id: "view-1", template: "asset-player", ref: { project_id: "p1", asset_id: "video:c1" }, sourceLocation: CLIP },
+    "2026-11-14T19:32:44.000Z", "0-demo_clip_0022-0237_x.mp4");
+  const shots = item("artifacts/s1/render/arn_shots.json",
+    { id: "arn_shots", template: "nle-timeline", sourceLocation: CLIP, sourceKey: "s1/0-demo_clip_0022-0237_x.mp4",
+      tracks: [{ id: "v", type: "video", src: "https://x/clip.mp4" }], markers: [{ id: "m1", time: 1 }] },
+    "2026-11-14T19:35:24.000Z", "Shot Segmentation");
+  const speakers = item("artifacts/s1/render/arn_spk.json",
+    { id: "arn_spk", template: "nle-timeline", sourceLocation: CLIP, tracks: [{ id: "v", type: "video", src: "https://x/clip.mp4" }], segments: [{ id: "s-0", start: 0, end: 1 }] },
+    "2026-11-14T19:36:00.000Z", "Speakers");
+
+  it("a player view and a timeline of one file: both views stay, and both name the file", () => {
+    const tabs = composeRenderTabs([view, shots]) as any[];
+    expect(tabs.map((t) => t.key)).toEqual(["artifacts/s1/render/view-1.json", "artifacts/s1/render/arn_shots.json"]);
+    expect(tabs[0].subjectIds).toEqual(["asset:video:c1", `loc:${CLIP}`]);
+    expect(tabs[1].subjectIds).toContain(`loc:${CLIP}`);
+  });
+  it("two analyses of one file still compose into one timeline (lanes, not versions), which names the file", () => {
+    const tabs = composeRenderTabs([view, shots, speakers]) as any[];
+    expect(tabs).toHaveLength(2);
+    const timeline = tabs.find((t) => t.composite);
+    expect(timeline.memberKeys).toEqual(["artifacts/s1/render/arn_shots.json", "artifacts/s1/render/arn_spk.json"]);
+    expect(timeline.subjectIds).toContain(`loc:${CLIP}`);
+  });
+  it("a gallery that shows no single file is about its title; a bare file name is never an identity", () => {
+    const gallery = item("artifacts/s1/render/gallery-1.json", { id: "gallery-1", template: "clip-gallery", title: "Voice audition", galleryClips: [{ id: "c1", src: "https://x/a.mp3" }] },
+      "2026-11-14T19:40:00.000Z", "Voice audition");
+    const bare = item("artifacts/s1/render/arn_b.json", { id: "arn_b", template: "data-table", sourceKey: "0-demo.mp4", rows: [{}] },
+      "2026-11-14T19:41:00.000Z", "Table");
+    const tabs = composeRenderTabs([gallery, bare]) as any[];
+    expect(tabs[0].subjectIds).toEqual(["title:Voice audition"]);
+    expect(tabs[1].subjectIds).toEqual([]);
+  });
+});

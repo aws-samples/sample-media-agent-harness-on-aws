@@ -109,6 +109,18 @@ for (const env of ["staging", "prod", "sandbox", "customer"]) {
     `${env}: the scoped sandbox role exists (on by default)`);
   assert.ok(json.includes("SANDBOX_SCOPED_ROLE_ARN"), `${env}: its ARN reaches the runtimes`);
 
-  console.log(`${env}: origin lock + /dispatch gone + sandbox role B2 — ok`);
+  // ---- local dev login: loopback callbacks on staging only, never prod or a customer install ----------------------
+  const clients = res(t, "AWS::Cognito::UserPoolClient").filter(([, r]) => r.Properties.CallbackURLs);
+  assert.ok(clients.length >= 1, `${env}: the UI app client has callback URLs`);
+  const urls = clients.flatMap(([, r]) => [...r.Properties.CallbackURLs, ...(r.Properties.LogoutURLs || [])].map((u: any) => JSON.stringify(u)));
+  const loopback = urls.filter((u) => /localhost|127\.0\.0\.1/.test(u));
+  if (env === "staging") {
+    assert.ok(loopback.some((u) => u.includes("http://127.0.0.1:3000/auth/callback")), `${env}: local dev login is on`);
+    assert.ok(loopback.every((u) => /^"http:\/\/(127\.0\.0\.1|localhost):3000\/(auth\/callback)?"$/.test(u)), `${env}: loopback port 3000 only: ${loopback}`);
+  } else if (env === "prod" || env === "customer") {
+    assert.deepEqual(loopback, [], `${env}: no loopback callback or logout URL`);
+  }
+
+  console.log(`${env}: origin lock + /dispatch gone + sandbox role B2 + login callbacks — ok`);
 }
 console.log("security-origin-lock.synth: all assertions passed");

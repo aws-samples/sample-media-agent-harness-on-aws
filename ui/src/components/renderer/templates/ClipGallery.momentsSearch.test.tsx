@@ -1,12 +1,11 @@
 // @vitest-environment jsdom
 //
-// The Moments tab's own search (2026-10-11): the box is pre-filled with the turn's query, a search
-// replaces the cards in place, back/forward step through the tab's history (entry 0 = the agent's
-// results), the history persists in viewState (queries only) and a reopened tab re-runs its query.
+// The Moments tab's own search (2026-10-11; versions 2026-11-15): the box is pre-filled with the query that found
+// the cards, and a search's results open as the tab's next version (the panel's ‹ vN of M ›), never in place.
 // Same mocks as ClipGallery.moments.test.tsx, plus the search API.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom';
-import { within, render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { cleanup, within, render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import React from 'react';
 
 import ClipGallery from './ClipGallery';
@@ -103,45 +102,44 @@ beforeEach(() => {
 });
 
 describe('Moments tab search', () => {
-  it('pre-fills the box with the turn query and shows the agent results first', () => {
+  // Each search's results open as the next VERSION of this tab (IND403: the tab's own ‹ › history and clock menu were a
+  // second "previous results" control beside the version switcher).
+  const opened: Array<{ sessionId: string; label: string; manifest: Record<string, any> }> = [];
+  const onOpen = (e: Event) => opened.push((e as CustomEvent).detail);
+  beforeEach(() => { opened.length = 0; window.addEventListener('lab:open-view', onOpen); });
+  afterEach(() => window.removeEventListener('lab:open-view', onOpen));
+
+  it('pre-fills the box with the query that found the cards; no history control of its own', () => {
     renderGallery(momentsData([item('m1', 'video'), item('m2', 'video')]));
     expect(screen.getByTestId('moments-search-input')).toHaveValue('night drive');
     expect(cardIds()).toEqual(['mc-m1', 'mc-m2']);
-    // Nothing to go back to yet: no history arrows, no position, no Search button on screen (Enter searches).
     expect(screen.queryByTestId('moments-search-back')).toBeNull();
-    expect(screen.queryByTestId('moments-search-position')).toBeNull();
+    expect(screen.queryByTestId('moments-search-forward')).toBeNull();
+    expect(screen.queryByTestId('moments-recent')).toBeNull();
   });
 
-  it('a search replaces the cards in place; back and forward move through the history', async () => {
+  it("a search opens its results as the tab's next version, named by its query; the tab itself is unchanged", async () => {
     h.searchMoments.mockResolvedValue(ok([wire('s1'), wire('s2'), wire('s3')]));
-    const onViewStateChange = vi.fn();
-    renderGallery(momentsData([item('m1', 'video')], { onViewStateChange }));
+    renderGallery(momentsData([item('m1', 'video')]));
     fireEvent.change(screen.getByTestId('moments-search-input'), { target: { value: 'rain on windshield' } });
     fireEvent.click(screen.getByTestId('moments-search-submit'));
     expect(screen.getByTestId('moments-search-loading')).toBeInTheDocument();
-    await waitFor(() => expect(cardIds()).toHaveLength(3));
+    await waitFor(() => expect(opened).toHaveLength(1));
     expect(h.searchMoments).toHaveBeenCalledWith('p1', 'rain on windshield');
-    expect(cardIds().every((id) => /^mc-t\d+-s\d$/.test(id!))).toBe(true); // a per-search id prefix
-    expect(screen.getByText('3 moments for your search')).toBeInTheDocument();
-    expect(onViewStateChange).toHaveBeenLastCalledWith({ search: { history: [{ q: 'rain on windshield' }], index: 1 } });
-    // No "Search 1" label under the field (mock search-and-actions.html §1): the clock's list marks where you are.
-    expect(screen.queryByTestId('moments-search-position')).toBeNull();
-    expect(screen.queryByText('Search 1')).toBeNull();
-
-    fireEvent.click(screen.getByTestId('moments-search-back'));
+    const { manifest, label, sessionId } = opened[0];
+    expect(sessionId).toBe('sess-1');
+    expect(label).toBe('Moments');
+    expect(manifest).toMatchObject({ template: 'clip-gallery', title: 'Moments', subjectIds: ['title:Moments'] });
+    expect(manifest.galleryMoments).toMatchObject({ project_id: 'p1', basis: 'searched', query: 'rain on windshield',
+      queryRef: { type: 'text', q: 'rain on windshield' } });
+    expect(manifest.galleryMoments.items.map((m: MomentItem) => m.id).every((id: string) => /^t\d+-s\d$/.test(id))).toBe(true);
     expect(cardIds()).toEqual(['mc-m1']);
-    expect(screen.getByTestId('moments-search-input')).toHaveValue('night drive');
-    expect(onViewStateChange).toHaveBeenLastCalledWith({ search: { history: [{ q: 'rain on windshield' }], index: 0 } });
-
-    fireEvent.click(screen.getByTestId('moments-search-forward'));
-    expect(cardIds()).toHaveLength(3); // cached: no second request
-    expect(h.searchMoments).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId('moments-search-input')).toHaveValue('rain on windshield');
+    expect(screen.queryByTestId('moments-search-loading')).toBeNull();
   });
 
   // Staging 2026-10-11: clicking a chip changed nothing -- the chips were only sent with the NEXT search, and never
   // applied to the agent's own results. They now filter the cards on screen, instantly and without a re-fetch.
-  it('kind chips filter the cards on screen -- the agent results too -- without re-searching', async () => {
+  it('kind chips filter the cards on screen without re-searching', async () => {
     renderGallery(momentsData([item('m1', 'video'), item('m2', 'image'), item('m3', 'audio')]));
     expect(cardIds()).toHaveLength(3);
     fireEvent.click(screen.getByTestId('moments-kind-image'));
@@ -155,59 +153,40 @@ describe('Moments tab search', () => {
     expect(h.searchMoments).not.toHaveBeenCalled();
   });
 
-  it('a search fetches every kind; the chips filter its cards', async () => {
+  it('a search fetches every kind, and its version opens with the same chips pressed', async () => {
     h.searchMoments.mockResolvedValue(ok([{ ...item('s1', 'video'), id: 's1' }, { ...item('s2', 'image'), id: 's2' }]));
     renderGallery(momentsData([item('m1', 'video')]));
     fireEvent.click(screen.getByTestId('moments-kind-image'));
     fireEvent.click(screen.getByTestId('moments-search-submit'));
-    await waitFor(() => expect(h.searchMoments).toHaveBeenCalledWith('p1', 'night drive'));
-    await waitFor(() => expect(cardIds()).toHaveLength(1));
-    fireEvent.click(screen.getByTestId('moments-kind-image'));
-    await waitFor(() => expect(cardIds()).toHaveLength(2));
-    expect(h.searchMoments).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(h.searchMoments).toHaveBeenCalledWith('p1', 'night drive');
+    expect(opened[0].manifest.galleryMoments.items).toHaveLength(2);
+    expect(opened[0].manifest.galleryMoments.kinds).toEqual(['image']);
+    cleanup();
+    renderGallery(opened[0].manifest as unknown as ClipGalleryData);
+    expect(screen.getByTestId('moments-search-input')).toHaveValue('night drive');
+    expect(screen.getByTestId('moments-kind-image')).toHaveAttribute('aria-pressed', 'true');
+    expect(cardIds()).toHaveLength(1);
   });
 
-  it('a reopened tab restores its history and re-runs the search on screen', async () => {
-    h.searchMoments.mockResolvedValue(ok([wire('s1'), wire('s2')]));
-    const viewState = { search: { history: [{ q: 'kawhi dunk', kinds: ['video'] }], index: 1 } };
-    renderGallery(momentsData([item('m1', 'video')], { viewState }));
-    expect(screen.getByTestId('moments-search-input')).toHaveValue('kawhi dunk');
-    expect(screen.getByTestId('moments-kind-video')).toHaveAttribute('aria-pressed', 'true');
-    await waitFor(() => expect(cardIds()).toHaveLength(2));
-    expect(h.searchMoments).toHaveBeenCalledWith('p1', 'kawhi dunk');
-    expect(screen.getByTestId('moments-search-back')).not.toBeDisabled();
+  it('a version that found nothing says so, by its query', () => {
+    const data = momentsData([], {});
+    (data.galleryMoments as MomentsBlock).cited_count = 0;
+    (data.galleryMoments as MomentsBlock).query = 'kawhi dunk';
+    renderGallery(data);
+    expect(screen.getByTestId('clip-gallery-empty')).toHaveTextContent('No moments match “kawhi dunk”');
   });
 
-  it('shows empty and error states, and retries', async () => {
-    h.searchMoments.mockResolvedValueOnce(ok([]));
+  it('shows a failed search above the cards, and retries it', async () => {
+    h.searchMoments.mockResolvedValueOnce({ ok: false, kind: 'error', status: 502, code: 'search_failed', message: 'The search did not complete. Try again.' });
     renderGallery(momentsData([item('m1', 'video')]));
     fireEvent.click(screen.getByTestId('moments-search-submit'));
-    await waitFor(() => expect(screen.getByTestId('clip-gallery-empty')).toHaveTextContent('No moments match'));
-
-    h.searchMoments.mockResolvedValueOnce({ ok: false, kind: 'error', status: 502, code: 'search_failed', message: 'The search did not complete. Try again.' });
-    fireEvent.change(screen.getByTestId('moments-search-input'), { target: { value: 'other' } });
-    fireEvent.click(screen.getByTestId('moments-search-submit'));
-    await waitFor(() => expect(screen.getByTestId('moments-search-error')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('moments-search-error')).toHaveTextContent('The search did not complete.'));
+    expect(cardIds()).toEqual(['mc-m1']);
     h.searchMoments.mockResolvedValueOnce(ok([wire('s1')]));
     await act(async () => { fireEvent.click(screen.getByText('Try again')); });
-    await waitFor(() => expect(cardIds()).toHaveLength(1));
-  });
-
-  it('a new search from the middle of the history drops what was ahead', async () => {
-    h.searchMoments.mockImplementation(async (_p: string, q: string) => ok([wire(q === 'a' ? 'sa' : q === 'b' ? 'sb' : 'sc')]));
-    const onViewStateChange = vi.fn();
-    renderGallery(momentsData([item('m1', 'video')], { onViewStateChange }));
-    const search = async (q: string) => {
-      fireEvent.change(screen.getByTestId('moments-search-input'), { target: { value: q } });
-      fireEvent.click(screen.getByTestId('moments-search-submit'));
-      await waitFor(() => expect(screen.queryByTestId('moments-search-loading')).toBeNull());
-    };
-    await search('a');
-    await search('b');
-    fireEvent.click(screen.getByTestId('moments-search-back')); // on 'a'
-    await search('c');
-    expect(onViewStateChange).toHaveBeenLastCalledWith({ search: { history: [{ q: 'a' }, { q: 'c' }], index: 2 } });
-    expect(screen.getByTestId('moments-search-forward')).toBeDisabled();
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(screen.queryByTestId('moments-search-error')).toBeNull();
   });
 });
 

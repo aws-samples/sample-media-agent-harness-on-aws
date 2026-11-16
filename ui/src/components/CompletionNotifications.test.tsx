@@ -103,3 +103,14 @@ describe('CompletionNotifications', () => {
     expect(screen.getByLabelText('Notifications')).toBeTruthy();
   });
 });
+
+describe('notifiedAgo — bell rows of the same job type tell apart by when they arrived', () => {
+  it('just now, minutes, hours, days', async () => {
+    const { notifiedAgo } = await import('./CompletionNotifications');
+    const now = 1_000_000_000_000;
+    expect(notifiedAgo(now - 5_000, now)).toBe('just now');
+    expect(notifiedAgo(now - 4 * 60_000, now)).toBe('4m ago');
+    expect(notifiedAgo(now - 3 * 3_600_000, now)).toBe('3h ago');
+    expect(notifiedAgo(now - 2 * 86_400_000, now)).toBe('2d ago');
+  });
+});

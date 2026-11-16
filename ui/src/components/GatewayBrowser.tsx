@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import ClampedText from './ui/ClampedText';
 import {
   RefreshButton,
   SectionHeader,
@@ -305,8 +306,9 @@ export default function GatewayBrowser({ externalSearch }: { externalSearch?: st
             )}
           </div>
           {tool.description && (
-            /* Clamped by CSS rather than sliced at 80 chars, which cut mid-word. */
-            <div style={toolDescStyle} title={tool.description}>{tool.description}</div>
+            /* Two lines and "more", like every other inventory row: one line with an ellipsis left the rest
+               readable only through a hover tooltip (IND403 dry run: "cannot read text"). */
+            <div style={toolDescStyle}><ClampedText lines={2} style={{ fontSize: 'var(--fs-2xs)' }}>{tool.description}</ClampedText></div>
           )}
         </div>
       ))}
@@ -435,13 +437,9 @@ const toolVersionStyle: React.CSSProperties = {
 };
 
 const toolDescStyle: React.CSSProperties = {
-  fontSize: 'var(--fs-2xs)',
   color: theme.colors.textSecondary,
   marginTop: 2,
   lineHeight: 1.3,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
 };
 
 

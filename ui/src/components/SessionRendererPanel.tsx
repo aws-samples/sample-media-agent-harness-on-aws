@@ -19,6 +19,7 @@ import RenderingAnimation from './renderer/RenderingAnimation';
 import { frameSandboxFor, isMalformedReference } from './renderer/templates/artifactSrc';
 import type { RenderBlock, RenderHistoryEntry, InteractionEvent, RendererProps } from './renderer/types';
 import { renderTabKey } from './renderer/renderTabKey';
+import { groupBySubject, viewSubjectIds } from '../shared/renderSubject';
 import { useMoveToFolder, type MoveTarget } from './chat/MoveToFolderButton';
 import { FileLocation } from './projects/FileLocation';
 import { ChatAssetContext } from './chat/InlineAssetImage';
@@ -78,9 +79,27 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
     if (currentFailed && neighbour !== undefined) onNavigate(neighbour);
   }, [currentFailed, neighbour, onNavigate]);
   const current = shownIndex >= 0 ? history[shownIndex] : undefined;
-  const total = visibleIdx.length;
-  const position = Math.max(0, visibleIdx.indexOf(shownIndex));
   const currentSig = current ? tabSignature(current) : '';
+  // ONE TAB PER SUBJECT (design A, new-ui-design/right-panel-tabs.html): every view of the same file — its player,
+  // its timeline, a re-run gallery — is a VERSION of one tab, oldest first. The views themselves stay a flat list,
+  // so every producer, focus and persistence rule keeps working on it unchanged; only the strip groups them.
+  const tabs = useMemo(
+    () => groupBySubject(visibleIdx, (i) => entrySubjectIds(history[i])).map((g) => g.map((n) => visibleIdx[n])),
+    [visibleIdx, history],
+  );
+  const currentTab = tabs.findIndex((t) => t.includes(shownIndex));
+  const versions = currentTab >= 0 ? tabs[currentTab] : [];
+  const versionPos = versions.indexOf(shownIndex);
+  // The version each tab last showed, so going back to a tab returns to it (default: its newest).
+  const lastShown = useRef(new Map<string, string>());
+  if (current && versions.length > 1) lastShown.current.set(renderTabKey(history[versions[0]]), renderTabKey(current));
+  const open = (i: number) => {
+    onNavigate(i);
+    const e = history[i];
+    // Navigation to a rendered view is always allowed; dispatching a render for an un-rendered one is WORK —
+    // blocked on a locked (frozen) session.
+    if (e && e.blocks.length === 0 && e.status !== 'composing' && !locked) onRenderTab?.(renderTabKey(e));
+  };
   const reportFailure = useCallback((reason: string) => {
     if (!currentSig) return;
     // eslint-disable-next-line no-console
@@ -135,7 +154,11 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
   const handleInteraction = (raw: InteractionEvent) => {
     // Templates were handed presigned URLs; map them back to stable identifiers so an expiring URL
     // never reaches the copy button, chat history, a new tab, or an agent prompt.
-    const e = unresolveArtifactUrls(raw);
+    let e = unresolveArtifactUrls(raw);
+    // An action names the tab it came from, so what it makes can come back as that tab's next version.
+    if (e.type === 'action' && current) {
+      e = { ...e, data: { ...(e.data as object), origin: { subjectIds: entrySubjectIds(current), label: prettyTabLabel(current.label || current.blocks[0]?.title, shownIndex) } } };
+    }
     if (e.type === 'select') {
       const url = (e.data as { url?: unknown } | undefined)?.url;
       if (typeof url === 'string' && /^https?:\/\//.test(url)) setActiveGallerySrc(url);
@@ -204,15 +227,19 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 0 10px', borderBottom: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
         <style>{TAB_MOTION_CSS}</style>
         <div style={{ display: 'flex', gap: 4, overflowX: 'auto', flex: 1 }} role="tablist">
-          {history.map((entry, idx) => {
-            if (failed[tabSignature(entry)]) return null;
-            const isActive = idx === shownIndex;
-            const label = prettyTabLabel(entry.label || entry.blocks[0]?.title, idx);
+          {tabs.map((members, t) => {
+            const first = history[members[0]];
+            const isActive = t === currentTab;
+            const picked = lastShown.current.get(renderTabKey(first));
+            const target = isActive ? shownIndex
+              : members.find((i) => renderTabKey(history[i]) === picked) ?? members[members.length - 1];
+            const entry = history[target];
+            const label = prettyTabLabel(first.label || first.blocks[0]?.title, members[0]);
             const composing = entry.status === 'composing';
             const unrendered = entry.blocks.length === 0;
             return (
               <div
-                key={`${entry.jobId ?? 'entry'}-${idx}`}
+                key={`${renderTabKey(first)}-${members[0]}`}
                 className="mh-render-tab"
                 style={{
                   display: 'inline-flex', alignItems: 'center', flexShrink: 0,
@@ -224,13 +251,8 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
                   role="tab"
                   aria-selected={isActive}
                   aria-label={label}
-                  title={composing ? `${label} — composing…` : unrendered ? (locked ? `${label} — session locked` : `${label} — click to render`) : label}
-                  onClick={() => {
-                    onNavigate(idx);
-                    // Navigation to a rendered tab is always allowed; dispatching a render for an
-                    // un-rendered tab is WORK — blocked on a locked (frozen) session.
-                    if (unrendered && !composing && !locked) onRenderTab?.(renderTabKey(entry));
-                  }}
+                  title={composing ? `${label} — composing…` : unrendered ? (locked ? `${label} — session locked` : `${label} — click to render`) : members.length > 1 ? `${label} — ${members.length} versions` : label}
+                  onClick={() => open(target)}
                   style={{
                     padding: '5px 6px 5px 12px',
                     border: 'none',
@@ -243,15 +265,17 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
                   }}
                 >
                   {shortTabLabel(label)}
+                  {members.length > 1 && <span data-testid="tab-version-count" aria-hidden="true" style={versionCountStyle}>{members.length}</span>}
                   {composing
                     ? <span aria-label="composing" title="composing" style={{ marginLeft: 6, color: theme.colors.primary, fontSize: 'var(--fs-3xs)' }}>●</span>
                     : unrendered && <span aria-hidden="true" style={{ marginLeft: 5, opacity: 0.5 }}>○</span>}
                 </button>
                 {onRemoveTab && (
                   <button
-                    onClick={(e) => { e.stopPropagation(); if (!locked) onRemoveTab(renderTabKey(entry)); }}
+                    // Closing a tab closes the subject: every version of it.
+                    onClick={(e) => { e.stopPropagation(); if (!locked) for (const i of members) onRemoveTab(renderTabKey(history[i])); }}
                     disabled={locked}
-                    title={locked ? 'Session locked' : 'Remove this tab'}
+                    title={locked ? 'Session locked' : members.length > 1 ? `Remove this tab and its ${members.length} versions` : 'Remove this tab'}
                     aria-label={`Remove ${label} tab`}
                     style={{
                       ...tabCloseStyle,
@@ -275,8 +299,22 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
             overflow:hidden clip the lanes below); minHeight:100% still lets the composing animation
             fill the panel when content is short. */}
         <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 14, minHeight: '100%', boxSizing: 'border-box' }}>
+        {(versions.length > 1 || current.blocks.length > 0) && (
+        <div data-testid="tab-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, flexWrap: 'wrap', marginBottom: -4 }}>
+        {versions.length > 1 && (
+          <div data-testid="version-switcher" style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, fontSize: theme.typography.sizes.meta, color: theme.colors.textSecondary }}>
+            <button type="button" aria-label="Previous version" disabled={versionPos <= 0} onClick={() => open(versions[versionPos - 1])} style={versionStepStyle}>‹</button>
+            <select aria-label="Version" value={shownIndex} onChange={(e) => open(Number(e.target.value))} style={versionSelectStyle}>
+              {versions.map((i, n) => (
+                <option key={renderTabKey(history[i])} value={i}>{`v${n + 1} · ${versionLabel(history[i], i)}`}</option>
+              ))}
+            </select>
+            <span>of {versions.length}</span>
+            <button type="button" aria-label="Next version" disabled={versionPos >= versions.length - 1} onClick={() => open(versions[versionPos + 1])} style={versionStepStyle}>›</button>
+          </div>
+        )}
         {current.blocks.length > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, flexShrink: 0, marginBottom: -4 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
             <button
               data-testid="refresh-render"
               onClick={() => { if (!locked) setReloadTick((t) => t + 1); }}
@@ -315,6 +353,8 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
             )}
           </div>
         )}
+        </div>
+        )}
         {current.blocks.length === 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1, minHeight: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -345,7 +385,7 @@ export default function SessionRendererPanel({ history, currentIndex, onNavigate
       {/* Footer */}
       <div style={{ padding: '8px 14px', borderTop: `1px solid ${theme.colors.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0, gap: 10 }}>
         <span style={{ color: theme.colors.textSecondary, fontSize: theme.typography.sizes.meta }}>
-          Tab · {position + 1} of {total}
+          Tab · {currentTab + 1} of {tabs.length}
         </span>
       </div>
     </div>
@@ -490,6 +530,35 @@ function RenderBlockView({ block, onInteraction }: { block: RenderBlock; onInter
 }
 
 /** A tab's identity AND what it points at, so a re-rendered tab (new manifest) is not hidden by an old failure. */
+/** What a view is about: the ids the server stamped, else (a view this browser authored) its inline manifest's. */
+export function entrySubjectIds(entry: RenderHistoryEntry): string[] {
+  const ids = entry.subjectIds ?? viewSubjectIds((entry.blocks?.[0]?.data as { manifest?: unknown } | undefined)?.manifest);
+  // Its own identity too: a view about no file (an untitled gallery) can still have a next version.
+  return [...ids, `view:${renderTabKey(entry)}`];
+}
+
+/** A version's line in the switcher: what tells it apart (a search's query), else its own name; and when it was made. */
+function versionLabel(entry: RenderHistoryEntry, idx: number): string {
+  const name = entry.note || prettyTabLabel(entry.label || entry.blocks[0]?.title, idx);
+  const at = new Date(entry.timestamp);
+  return Number.isFinite(at.getTime()) ? `${name} · ${at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : name;
+}
+
+const versionCountStyle: React.CSSProperties = {
+  marginLeft: 6, padding: '0 5px', borderRadius: 8, fontSize: 'var(--fs-3xs)',
+  background: theme.colors.activeBg, color: theme.colors.textSecondary, fontWeight: theme.typography.weights.semibold,
+};
+const versionStepStyle: React.CSSProperties = {
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, padding: 0,
+  border: `1px solid ${theme.colors.borderStrong}`, background: theme.colors.surface, color: theme.colors.textSecondary,
+  borderRadius: theme.radius.button, cursor: 'pointer', fontSize: 'var(--fs-md)', lineHeight: 1,
+};
+const versionSelectStyle: React.CSSProperties = {
+  height: 26, border: `1px solid ${theme.colors.borderStrong}`, background: theme.colors.surface, color: theme.colors.textPrimary,
+  borderRadius: theme.radius.button, padding: '0 6px', fontSize: theme.typography.sizes.meta, minWidth: 0, maxWidth: 280,
+  textOverflow: 'ellipsis',
+};
+
 export function tabSignature(entry: RenderHistoryEntry): string {
   const targets = entry.blocks.map((b) => {
     const d = (b.data ?? {}) as { manifestUrl?: unknown; src?: unknown };

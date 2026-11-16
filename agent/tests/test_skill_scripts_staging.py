@@ -283,3 +283,26 @@ def test_a_second_inactive_error_is_returned_not_retried_forever(monkeypatch, sk
     events = _run(tool, _use({"type": "executeCode", "code": "print(1)", "language": "python"}))
     assert len(inner.seen) == 2
     assert [e.tool_result["status"] for e in events if isinstance(e, ToolResultEvent)] == ["error"]
+
+
+def test_a_staged_script_imports_after_the_cell_changes_directory(tmp_path, monkeypatch):
+    """c7d66001's split step `os.chdir`'d to a scratch dir and could no longer find the staged `scripts/trim_plan.py`;
+    the writer puts each staged script's directory on the kernel's sys.path, so `import trim_plan` works anywhere."""
+    import importlib
+    import os
+    import sys
+
+    import skill_scripts
+
+    code = skill_scripts.writer_code({"scripts/zz_staged_mod.py": b"VALUE = 7\n", "assets/data.txt": b"x"})
+    monkeypatch.chdir(tmp_path)
+    before = list(sys.path)
+    try:
+        exec(compile(code, "writer", "exec"), {})  # noqa: S102 - the harness's own writer program
+        os.chdir("/")
+        assert importlib.import_module("zz_staged_mod").VALUE == 7
+        assert str(tmp_path.resolve() / "scripts") in [os.path.realpath(p) for p in sys.path]
+        assert not any(p.endswith("assets") for p in sys.path[: len(sys.path) - len(before)])
+    finally:
+        sys.path[:] = before
+        sys.modules.pop("zz_staged_mod", None)

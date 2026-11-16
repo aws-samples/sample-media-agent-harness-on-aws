@@ -7,8 +7,8 @@ a hand-written cell that downloads ffmpeg and the source again (staging 2026-10-
 when a download stalled; the identical work is 9.6 s cold and ~1 s warm). There is no time cap: long or complex
 sandbox work still goes through ``code_interpreter`` unchanged.
 
-A clip is a stream copy (frame-accurate through the MP4 edit list, ~0.1 s of ffmpeg); frames are JPEGs at the
-exact timestamps. Outputs land in the session's output folder and become project assets like any session output.
+A clip starts on exactly the frame asked for: a stream copy when that frame is a keyframe (~0.1 s), else a fast
+re-encode capped at the source's bitrate; frames are JPEGs at the exact timestamps. Outputs land in the session's output folder and become project assets like any session output.
 """
 from __future__ import annotations
 
@@ -119,7 +119,10 @@ def extract_frames(source_url: str, times: list[float]) -> str:
 
 @tool
 def clip_video(source_url: str, ranges: list[list[float]]) -> str:
-    """Cut one or more clips of ONE video by time range — a stream copy (~0.1 s each), frame-accurate start.
+    """Cut one or more clips of ONE video by time range, each starting on exactly the frame asked for.
+
+    A clip that starts on a keyframe (a shot boundary usually does) is a stream copy (~0.1 s); any other is a
+    fast re-encode capped at the source's bitrate (seconds per minute of clip).
 
     Use this for "clip 0:23-0:30", "cut shots 2, 5 and 7 into separate clips". For a re-encode (resize,
     transcode, a different codec) or joining clips with transitions, use the media-processing tools instead.

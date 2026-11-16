@@ -9,6 +9,7 @@ deliverable: facegroup.json
 subsumes: facemetadata.json, face_clusters.json, identity_clusters.json, face_tracks.json
 boxes_by: people[] label=name faces=tracks[].faces[] box=box time=timestamp frame=frame_key
 lanes: people[] name=name spans=appearances start=begin_ms end=end_ms units=ms
+lane_set: people
 rows: people[] cols=name,gender,name_source,confidence,total_screen_time_sec,num_tracks
 summary: stats.num_people, stats.num_tracks, stats.faces_detected
 ---

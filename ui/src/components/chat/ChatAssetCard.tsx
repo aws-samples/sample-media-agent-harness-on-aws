@@ -15,6 +15,8 @@ import React, { useState } from 'react';
 import { AssetIcon } from './AssetIcons';
 import { MediaCard } from '../cards/MediaCard';
 import { useMoveToFolder, type MoveTarget } from './MoveToFolderButton';
+import { useHeroStill } from '../../projects/heroStill';
+import { useLocationAssets } from '../../projects/useLocationAssets';
 import type { PreviewKind } from './AssetPreviewModal';
 import './ChatAssets.css';
 
@@ -45,6 +47,11 @@ const fmtDur = (s: number) => {
 
 export function ChatAssetCard(p: ChatAssetCardProps) {
   const move = useMoveToFolder(p.moveTarget, p.name, true);
+  // A video's picture is its project file's hero still, the same as in the project grid; never a player.
+  const t = p.kind === 'video' ? p.moveTarget : undefined;
+  const byLocation = useLocationAssets(t && !t.assetId ? t.projectId : undefined, t?.location ? [t.location] : []);
+  const videoAssetId = t?.assetId ?? (t?.location ? byLocation?.[t.location] ?? undefined : undefined);
+  const { still: videoStill } = useHeroStill(t?.projectId, videoAssetId ?? undefined, 'video');
   // What the media itself tells us once it loads: size and length. Never guessed.
   const [dims, setDims] = useState<string | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
@@ -76,21 +83,19 @@ export function ChatAssetCard(p: ChatAssetCardProps) {
   const kindForCard = p.kind === 'document' ? 'document' : p.kind;
   return (
     <MediaCard as="span" testId="chat-asset-card" kind={kindForCard} title={p.name} meta={sub}
-      thumb={p.kind === 'image' && !p.needsConsent ? p.src : null}
+      thumb={p.kind === 'image' && !p.needsConsent ? p.src : p.kind === 'video' ? videoStill : null}
       // An image in chat keeps its own shape, scaled to the bubble's width: never cropped to 16:9.
       fitWidth={p.kind === 'image'}
-      videoSrc={p.kind === 'video' ? p.src : null}
-      badge={p.kind === 'video' && duration !== null ? fmtDur(duration) : undefined}
       pictureOverride={p.kind === 'image' && p.needsConsent ? (
         <span style={consentWrapStyle}>
           <button type="button" className="cap-consent" onClick={(e) => { e.stopPropagation(); p.onConsent?.(); }}>
             <AssetIcon kind="image" size={22} /> Load image
           </button>
         </span>
-      ) : (!p.src && (p.kind === 'image' || p.kind === 'video')) ? <span className="cap-skeleton" aria-label={`Loading ${p.name}`} /> : undefined}
+      ) : (!p.src && p.kind === 'image') ? <span className="cap-skeleton" aria-label={`Loading ${p.name}`} /> : undefined}
       onMediaMeta={(m) => {
-        if (m.width && m.height) setDims(`${m.width}×${m.height}`);
-        if (m.duration !== undefined) setDuration(m.duration);
+        // Only an image's picture is the file itself; a video's is its still, whose size is not the video's.
+        if (p.kind === 'image' && m.width && m.height) setDims(`${m.width}×${m.height}`);
       }}
       onPreview={p.needsConsent ? (p.onConsent ?? (() => {})) : (p.onPreview ?? (() => {}))}
       primary={p.onDownload ? { label: `Download ${p.name}`, icon: 'download', onClick: p.onDownload } : undefined}

@@ -443,3 +443,29 @@ def test_label_from_tool_uses_the_target_segment():
     assert pv._label_from_tool("shot-segmentation___segment_shots") == "Shot Segmentation"
     assert pv._label_from_tool(None) == ""
     assert pv._label_from_tool("") == ""
+
+
+def test_a_stated_duration_is_the_media_length_and_clamps_the_last_sample():
+    """8e2acba8: the last 1-second face sample (at 168.17 s) ended at 169.17 s on a 168.27 s clip, and the
+    timeline ran past the last frame. A stated duration is the media's length; appearances are clamped to it."""
+    sc = _sidecars()
+    data = next(v for v in sc.values() if isinstance(v, dict) and "duration_sec" in v)
+    data["duration_sec"] = 1.5  # shorter than the last sample's end
+    manifest = ra._build_video_annotations_manifest(
+        "https://cdn.example.com/meridian.mp4?sig=v", sc, [], ["https://cdn.example.com/facegroup.json"], "m-2")
+    assert manifest is not None and manifest["duration"] == 1.5
+    for a in manifest.get("annotations") or []:
+        assert a["end"] <= 1.5
+
+
+def test_a_recognized_persons_name_rides_on_its_boxes():
+    """The people lanes and the box label read the annotation; 8e2acba8 showed "Person 1" for Kevin Kilner."""
+    sc = _sidecars()
+    data = next(v for v in sc.values() if isinstance(v, dict) and "people" in v)
+    data["people"][0]["name_source"] = "celebrity"
+    data["people"][1]["named"] = False  # an unrecognized face keeps the friendly "Person N"
+    manifest = ra._build_video_annotations_manifest(
+        "https://cdn.example.com/meridian.mp4?sig=v", sc, [], ["https://cdn.example.com/facegroup.json"], "m-3")
+    named = [a for a in manifest["annotations"] if a["entityId"] == "entity-0"]
+    assert named and all(a.get("name") == "Recognized Person" for a in named)
+    assert all("name" not in a for a in manifest["annotations"] if a["entityId"] == "entity-1")

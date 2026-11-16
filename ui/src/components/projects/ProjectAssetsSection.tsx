@@ -164,6 +164,20 @@ export function groupByFolder(assets: readonly AssetView[]): FolderGroup[] {
 }
 
 /** The Delete confirmation's message for one asset. */
+/**
+ * The last folder list read per project, in memory for this tab (never storage: it is re-read on every open, so a
+ * stale copy only lives until that read answers). Bounded to the most recent projects.
+ */
+const folderListCache = new Map<string, { folders: FolderCount[]; rootCount?: number }>();
+const FOLDER_LIST_CACHE_MAX = 20;
+function rememberFolderList(projectId: string, list: { folders: FolderCount[]; rootCount?: number }): void {
+  folderListCache.delete(projectId);
+  folderListCache.set(projectId, list);
+  while (folderListCache.size > FOLDER_LIST_CACHE_MAX) folderListCache.delete(folderListCache.keys().next().value as string);
+}
+/** Test seam: forget every remembered folder list. */
+export function resetFolderListCacheForTests(): void { folderListCache.clear(); }
+
 /** What Delete folder says will happen: nothing is deleted; the contents move up to the parent. */
 export function deleteFolderMessage(folder: string, tree: readonly FolderNode[]): string {
   const find = (ns: readonly FolderNode[]): FolderNode | undefined => {
@@ -249,6 +263,8 @@ export default function ProjectAssetsSection(props: ProjectAssetsSectionProps) {
       return;
     }
     let live = true;
+    // Only typed words wait for a pause; opening a folder or picking a type is one click and is fetched at once (the
+    // shared 250 ms made every folder open wait for nothing).
     const t = setTimeout(() => {
       // A new query always starts at page one (no cursor); its ranked order is deterministic, so paging
       // over it is stable.
@@ -258,7 +274,7 @@ export default function ProjectAssetsSection(props: ProjectAssetsSectionProps) {
         else if (r.kind === 'not_found') onNotFound();
         else setSearchError(r.kind === 'error' ? r.message : 'Search failed; try again.');
       });
-    }, 250);
+    }, query.trim() ? 250 : 0);
     return () => { live = false; clearTimeout(t); };
   }, [project.id, query, serverKind, serverFolder, searching, searchSeq, onNotFound]);
   // Load the next ranked page and append it; the cursor pins the exact (q, kind) so a page always extends
@@ -320,8 +336,10 @@ export default function ProjectAssetsSection(props: ProjectAssetsSectionProps) {
   };
   // Browse-only (the Renderer's Browse tab) docks the same tree READ-ONLY: navigate and collapse, nothing more.
   const showTree = roomForTree && !treeCollapsed;
-  const [folderCounts, setFolderCounts] = useState<FolderCount[]>([]);
-  const [rootCount, setRootCount] = useState<number | undefined>(undefined);
+  // Painted at once from the last list this tab read for the project, then refreshed: reopening the panel or the
+  // project no longer starts from an empty tree while the whole project is counted again.
+  const [folderCounts, setFolderCounts] = useState<FolderCount[]>(() => folderListCache.get(project.id)?.folders ?? []);
+  const [rootCount, setRootCount] = useState<number | undefined>(() => folderListCache.get(project.id)?.rootCount);
   // Empty folders made here (New folder) exist only on this device until something is moved in — remembered per
   // project, so a reload or a remount never loses one (the user made it to move files INTO).
   const [pendingFolders, setPendingFoldersState] = useState<string[]>(() => readPendingFolders(project.id));
@@ -341,10 +359,18 @@ export default function ProjectAssetsSection(props: ProjectAssetsSectionProps) {
   useEffect(() => {
     let live = true;
     void listFolders(project.id).then((r) => {
-      if (live && r.ok) { setFolderCounts(r.value.folders); setRootCount(r.value.rootCount); }
+      if (!r.ok) return;
+      rememberFolderList(project.id, { folders: r.value.folders, rootCount: r.value.rootCount });
+      if (live) { setFolderCounts(r.value.folders); setRootCount(r.value.rootCount); }
     });
     return () => { live = false; };
   }, [project.id, browseOnly, foldersSeq, finishedUploads]);
+  // A project switch on a mounted section shows that project's last-known tree, never the previous project's.
+  useEffect(() => {
+    const cached = folderListCache.get(project.id);
+    setFolderCounts(cached?.folders ?? []);
+    setRootCount(cached?.rootCount);
+  }, [project.id]);
   const folderTree = useMemo(() => buildFolderTree(folderCounts, pendingFolders), [folderCounts, pendingFolders]);
   // The open folder's subfolders, as tiles above its files (a folder whose files are all in subfolders is not
   // "empty"). Not at All files or Top level, where they would only repeat the tree.

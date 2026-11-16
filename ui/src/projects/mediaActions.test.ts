@@ -65,6 +65,30 @@ describe('runDirectTimelineAction', () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it('a second identical Clip while the first still runs joins it: one request, one result, one tab', async () => {
+    // IND403 dry run: Clip took 10-16 s the first time, the button gave no sign, and a second click cut a copy.
+    let finish: (r: Response) => void = () => undefined;
+    h.authFetch.mockReturnValue(new Promise<Response>((r) => { finish = r; }));
+    const openOutputs = vi.fn();
+    const first = runDirectTimelineAction(body, { fallback: vi.fn(), openOutputs });
+    const second = runDirectTimelineAction({ ...body, actionId: 'a2' }, { fallback: vi.fn(), openOutputs });
+    finish(json(200, { ok: true, outputs: [out], elapsedMs: 12000 }));
+    expect(await second).toBe(await first);
+    expect(h.authFetch).toHaveBeenCalledTimes(1);
+    expect(openOutputs).toHaveBeenCalledTimes(1);
+  });
+
+  it('a different range, or the same one after the first finished, runs on its own', async () => {
+    h.authFetch.mockResolvedValue(json(200, { ok: true, outputs: [out], elapsedMs: 900 }));
+    const opts = { fallback: vi.fn(), openOutputs: vi.fn() };
+    await Promise.all([
+      runDirectTimelineAction(body, opts),
+      runDirectTimelineAction({ ...body, actionId: 'a3', ranges: [{ inMs: 40000, outMs: 50000 }] }, opts),
+    ]);
+    await runDirectTimelineAction({ ...body, actionId: 'a4' }, opts);
+    expect(h.authFetch).toHaveBeenCalledTimes(3);
+  });
+
   it('a refusal before running removes the line and takes the chat path', async () => {
     h.authFetch.mockResolvedValue(json(422, { ok: false, error: 'the source is not a file of this chat\'s project' }));
     const lines = captureLines();
@@ -75,11 +99,11 @@ describe('runDirectTimelineAction', () => {
     expect(fallback).toHaveBeenCalledTimes(1);
   });
 
-  it('a network error is a refusal too (falls back)', async () => {
+  it('a network error is NOT a refusal: it may have run, so it is never handed to the agent (Retry instead)', async () => {
     h.authFetch.mockRejectedValue(new Error('offline'));
     const fallback = vi.fn();
     await runDirectTimelineAction(body, { fallback, openOutputs: vi.fn() });
-    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   it('a failed run keeps a failed line, hands the request to the agent, and can be retried in place', async () => {
@@ -213,14 +237,14 @@ describe('a gallery batch runs directly (Crop all / Clip all marked / Extract fr
     { label: 'Segment 3', src: SRC, box: { x: 0.1, y: 0, w: 0.3, h: 1 } },
   ] };
 
-  it('maps each verb to a batch; refuses an audio trim or a bad entry', async () => {
+  it('maps each verb to a batch (an audio trim is a clip); refuses a bad entry', async () => {
     const m = await import('./mediaActions');
     expect(m.directBatchRequest(crops, SID, 'b1')).toMatchObject({ op: 'crop', actionId: 'b1',
       items: [{ label: 'Segment 1', source: { location: SRC }, box: { x: 0.2 } }, {}, {}] });
     expect(m.directBatchRequest({ verb: 'clip', clips: [{ src: SRC, in: 1.5, out: 4 }] }, SID, 'b')!.items[0].ranges)
       .toEqual([{ inMs: 1500, outMs: 4000 }]);
     expect(m.directBatchRequest({ verb: 'extract', clips: [{ src: SRC, in: 2, at: 2.5 }] }, SID, 'b')!.items[0].points).toEqual([2500]);
-    expect(m.directBatchRequest({ verb: 'trim', clips: [{ src: SRC, in: 1, out: 2 }] }, SID, 'b')).toBeNull();
+    expect(m.directBatchRequest({ verb: 'trim', clips: [{ src: SRC, in: 1, out: 2 }] }, SID, 'b')).toMatchObject({ op: 'clip', items: [{ ranges: [{ inMs: 1000, outMs: 2000 }] }] });
     expect(m.directBatchRequest({ verb: 'crop', clips: [{ src: SRC }] }, SID, 'b')).toBeNull();
   });
 
@@ -286,5 +310,60 @@ describe('crop of a marked range (QA 2026-10-20: a 0:40-0:50 range was ignored a
     expect(m.actionRequestText({ op: 'crop', status: 'done', sourceName: 'x.mp4', aspect: '1:1', ranges: [{ inMs: 40000, outMs: 50000 }] }))
       .toBe('Crop 00:40–00:50 of x.mp4 to 1:1');
     expect(m.directMediaRequest({ verb: 'crop', src: SRC, box: { x: 0, y: 0, w: 1, h: 1 } }, SID, 'c2')).not.toHaveProperty('ranges');
+  });
+});
+
+describe('an action whose answer never came back is not cut a second time (staging 2026-11-15)', () => {
+  const body: MediaActionBody = { op: 'clip', ranges: [{ inMs: 0, outMs: 140941 }], source: { location: SRC }, sessionId: SID, actionId: 'slow-1' };
+  it("an edge timeout's HTML page: the line fails with Retry, and the agent is NOT asked to do it again", async () => {
+    h.authFetch.mockResolvedValue({ ok: false, status: 504, json: async () => { throw new SyntaxError('Unexpected token <'); } } as unknown as Response);
+    const lines = captureLines();
+    const fallback = vi.fn();
+    const r = await runDirectTimelineAction(body, { fallback, openOutputs: vi.fn() });
+    lines.stop();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ ok: false, unknown: true });
+    expect(lines.seen.slice(-1)[0]?.message.action).toMatchObject({ status: 'failed' });
+    expect(String((lines.seen.slice(-1)[0]?.message.action as { error?: string } | undefined)?.error)).toMatch(/may still have finished/);
+  });
+  it('a dropped connection: the same', async () => {
+    h.authFetch.mockRejectedValue(new TypeError('network error'));
+    const fallback = vi.fn();
+    expect(await runDirectTimelineAction({ ...body, actionId: 'slow-2' }, { fallback, openOutputs: vi.fn() })).toMatchObject({ unknown: true });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+  it("a long action's streamed reply (200) that failed still says it ran, from its body", async () => {
+    h.authFetch.mockResolvedValue(json(200, { ok: false, ran: true, error: 'moov atom not found' }));
+    const fallback = vi.fn();
+    expect(await runDirectTimelineAction({ ...body, actionId: 'slow-3' }, { fallback, openOutputs: vi.fn() })).toMatchObject({ ok: false, ran: true });
+    expect(fallback).toHaveBeenCalledTimes(1); // ran and failed: the agent may still fix it, as before
+  });
+});
+
+describe("trimming some of a gallery returns the gallery's next version (staging 2026-11-15: one Trim opened seven tabs)", () => {
+  const set = [1, 2, 3].map((n) => ({ clipId: `c${n}`, label: `Chunk ${n}`, src: `https://cdn/chunk_${n}.wav`, kind: 'audio' as const }));
+  const origin = { subjectIds: ['loc:s3://b/chunk_1.wav', 'view:artifacts/s/render/g1.json'], label: 'Olive chunks' };
+  it('the same set in order, each trimmed item in place of its original, about the gallery it revises', async () => {
+    const m = await import('./mediaActions');
+    const record = { op: 'clip' as const, status: 'done' as const, sourceName: '2 files', items: [
+      { outputs: [{ kind: 'audio' as const, name: 'chunk_1_trim.wav', url: 'https://cdn/chunk_1_trim.wav', key: 'k1', s3uri: 's3://b/k1' }] },
+      { error: 'ffmpeg failed' }, // chunk 3's trim failed: it keeps its original
+    ] };
+    const d = m.setVersionDetail({ set, clips: [{ clipId: 'c1' }, { clipId: 'c3' }], origin }, record as never, SID, 'trim');
+    expect(d).toMatchObject({ kind: 'audio', label: 'Olive chunks · trimmed', subjectIds: origin.subjectIds });
+    expect(d.items.map((i) => [i.name, i.url])).toEqual([
+      ['Chunk 1 · trimmed', 'https://cdn/chunk_1_trim.wav'], ['Chunk 2', 'https://cdn/chunk_2.wav'], ['Chunk 3', 'https://cdn/chunk_3.wav']]);
+    const manifest = m.resultGalleryManifest(d, 'view-x', '2026-11-15T00:00:00Z') as { subjectIds?: string[]; clips?: { kind: string }[] };
+    expect(manifest.subjectIds).toEqual(origin.subjectIds);
+    expect(manifest.clips?.every((c) => c.kind === 'audio')).toBe(true);
+  });
+  it('a Crop all of some of a video gallery is its next version too, named "cropped"', async () => {
+    const m = await import('./mediaActions');
+    const vids = [1, 2].map((n) => ({ clipId: `v${n}`, label: `Shot ${n}`, src: `https://cdn/shot_${n}.mp4`, kind: 'video' as const }));
+    const record = { op: 'crop' as const, status: 'done' as const, sourceName: 'x', items: [
+      { outputs: [{ kind: 'video' as const, name: 'shot_2_crop.mp4', url: 'https://cdn/shot_2_crop.mp4', key: 'k', s3uri: 's3://b/k' }] }] };
+    const d = m.setVersionDetail({ set: vids, clips: [{ clipId: 'v2' }], origin: { subjectIds: ['view:g'], label: 'Shots' } }, record as never, SID, 'crop');
+    expect(d.label).toBe('Shots · cropped');
+    expect(d.items.map((i) => i.name)).toEqual(['Shot 1', 'Shot 2 · cropped']);
   });
 });

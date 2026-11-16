@@ -280,6 +280,16 @@ export function markSessionProjectFixed(sessionId: string): void {
   if (prev) put(sessionId, prev);
 }
 
+/**
+ * Move a chat whose only turn handed off (the agent's `switch_project` / `create_project` on its first turn) into
+ * that project. That turn did nothing in its own project, so it does not fix it: the proxy's gate applies the same
+ * rule (`handoffTo`). Refused (or failed) → the caller opens a new chat instead.
+ */
+export async function moveHandedOffChat(sessionId: string, projectId: string, projectName: string): Promise<ProjectsResult<void>> {
+  fixed.delete(sessionId);
+  return selectActiveProject(sessionId, projectId, projectName);
+}
+
 /** The session's row now exists (its create returned): later changes are written with `PATCH /sessions/:id`. */
 export function markSessionPersisted(sessionId: string): void {
   unpersisted.delete(sessionId);

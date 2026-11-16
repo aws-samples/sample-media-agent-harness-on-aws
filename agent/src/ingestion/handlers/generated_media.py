@@ -51,6 +51,7 @@ from projects.access import check_access
 from projects.ids import is_project_id
 
 from .. import generated as gen
+from .. import locate
 from ..lineage_capture import LineageCapture, plan_entries, shot_index, shot_ranges
 from ..lineage_edges import LineageEdges
 from ..folders import SESSIONS_ROOT, date_from, session_folder
@@ -308,14 +309,8 @@ class GeneratedMedia:
         if loc is None:
             return None
         bucket, key = loc
-        if bucket == self.deps.bucket:
-            aid = gen.asset_id_in_project_key(key, pid)
-            if aid:
-                return aid
-        aid = self.store.asset_id_for_location(pid, bucket, key)
-        if aid is None and self.edges_on:
-            aid = LineageEdges(self.deps.table).alias_of(pid, bucket, key)
-        return aid
+        return locate.asset_for_location(self.store, pid, bucket, key, ingest_bucket=self.deps.bucket, s3=self.deps.s3,
+                                         edges=LineageEdges(self.deps.table) if self.edges_on else None)
 
     def derived_from(self, pid: str, inputs: Iterable[str]) -> list[str]:
         return list(dict.fromkeys(a for a in (self.asset_for_location(pid, u) for u in inputs) if a))
@@ -479,7 +474,7 @@ class GeneratedMedia:
         """Write the edges of everything this message registered (or found registered), AFTER all of it is an
         asset, so an output made from another output of the same message resolves its parent. Best effort per
         edge (``ingestion.lineage_capture``); a failure here never fails the registration."""
-        cap = LineageCapture(self.deps.table, self.store, self.deps.bucket, m2c_bucket=self.deps.m2c_bucket)
+        cap = LineageCapture(self.deps.table, self.store, self.deps.bucket, m2c_bucket=self.deps.m2c_bucket, s3=self.deps.s3)
         try:
             for aid, url in self._aliases:
                 # The durable copy of an M2C output (`<session output>/<execution>/<name>`): later steps are handed

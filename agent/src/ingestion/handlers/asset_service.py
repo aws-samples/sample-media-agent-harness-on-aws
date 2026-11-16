@@ -38,6 +38,9 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import unquote
 
 from projects import schema
+
+from .. import locate
+from ..lineage_edges import LineageEdges
 from projects.access import AccessCheckIncomplete, check_access
 from projects.ids import is_project_id
 
@@ -96,6 +99,7 @@ _COMMANDS = (
     "rename_folder",
     "create_folder",
     "resolve_locations",
+    "keyframes",
     "create_bookmarks",
     "remove_bookmarks",
     "import_status",
@@ -109,10 +113,10 @@ _RESOLVE_PAGE_MAX = 100
 _MOVE_MAX = 100
 _RENAME_PAGE_MAX = 500
 # Only an uploaded or generated asset's bytes are the Harness's to delete (never an s3-location source).
-_M2C_REF_PREFIX = "artifacts/m2c/"
 # A session's copy of a job output: ``<session output prefix><execution id>/<path>`` in either layout.
-_JOB_OUTPUT_COPY_RE = re.compile(
-    r"^(?:projects/p[0-9a-f]{32}/sessions/[^/]+|artifacts/[^/]+)/output/(?P<exec>[A-Za-z0-9-]{8,80})/(?P<rel>[^?#]+)$")
+# Keyframe times per source object (the `keyframes` command): an object's bytes never change.
+_KEYFRAME_CACHE: dict[str, Optional[list]] = {}
+
 _OWNED_SOURCES = frozenset({"upload", "generated"})
 # A `session` asset is registered in place (asset-lineage design §2): its bytes are a session output, and
 # only a key under a session's `output/` is ever deleted with it. An `m2c` asset is never deleted: M2C
@@ -231,6 +235,8 @@ class AssetService:
                 return _ok(self._create_folder(pid, actor, args))
             if command == "resolve_locations":
                 return _ok(self._resolve_locations(pid, args))
+            if command == "keyframes":
+                return _ok(self._keyframes(pid, args))
             if command == "create_bookmarks":
                 return _ok(self._create_bookmarks(pid, actor, args))
             if command == "remove_bookmarks":
@@ -882,10 +888,9 @@ class AssetService:
         """``{locations: {<location>: assetId | null}}`` for chat/Renderer URLs of this Project's assets.
 
         Accepts what the chat shows: an ``s3://`` uri, an artifacts-CDN URL or bare key (``projects/…``,
-        ``artifacts/…``, including an ``artifacts/m2c/<bucket>/<key>`` M2C reference), or a presigned S3 URL. An
-        asset key (``projects/<pid>/<assetId>/…``) names its id directly; anything else is looked up by its SRC
-        guard, the one record that maps a location to the asset registered there."""
-        from ..generated import asset_id_in_project_key, parse_location
+        ``artifacts/…``, including an ``artifacts/m2c/<bucket>/<key>`` M2C reference), or a presigned S3 URL, each
+        answered by the one resolver every path uses (:func:`ingestion.locate.asset_for_location`)."""
+        from ..generated import parse_location
 
         locs = args.get("locations")
         if not isinstance(locs, list) or not all(isinstance(x, str) for x in locs):
@@ -893,53 +898,45 @@ class AssetService:
         if len(locs) > _MOVE_MAX:
             raise ServiceError(400, "too_many_ids", f"At most {_MOVE_MAX} locations per call")
         out: dict[str, Optional[str]] = {}
+        edges = LineageEdges(self._store.table)
         for loc in dict.fromkeys(locs):
             out[loc] = None
             parsed = parse_location(loc, self._ingest_bucket or "")
             if not parsed:
                 continue
             bucket, key = parsed
-            if key.startswith(_M2C_REF_PREFIX):  # artifacts/m2c/<bucket>/<key>: the object M2C wrote, in place
-                bucket, _, key = key[len(_M2C_REF_PREFIX):].partition("/")
-                if not bucket or not key:
-                    continue
-            aid = (asset_id_in_project_key(key, pid) or self._store.asset_id_for_location(pid, bucket, key)
-                   or self._job_output_copy_asset(pid, key))
+            aid = locate.asset_for_location(self._store, pid, bucket, key, ingest_bucket=self._ingest_bucket or "",
+                                            s3=self._s3, edges=edges)
             row = self._store.get_asset(pid, aid) if aid else None
             if row is not None and row.get("status") != "removed":
                 out[loc] = aid
         return {"locations": out}
 
-    def _job_output_copy_asset(self, pid: str, key: str) -> Optional[str]:
-        """The asset a session's COPY of an M2C job output stands for, or ``None``.
+    def _keyframes(self, pid: str, args: dict) -> dict:
+        """``{keyframes: [seconds] | null}`` of a video asset, read from its MP4/MOV index in a few byte ranges
+        (projects.keyframes — the same reader the clip action's copy decision uses). The timeline snaps a dragged
+        range onto them, so a cut placed by eye starts on a keyframe and is a stream copy. ``null`` = not a video, or
+        an index we do not read: the timeline just does not snap. Cached per source object (its bytes never change)."""
+        from projects.keyframes import read_keyframes
 
-        When a job settles, its outputs are copied into the session's output prefix under the execution id
-        (``<session output>/<execution id>/<file>``, the polling worker / plan chainer importers) so their links
-        do not expire, while the asset stays registered where M2C wrote it. A Renderer tab or chat link of the
-        copy therefore matched no SRC guard and showed no location. The JOB record names the original's prefix
-        (``outputPrefix``) and its ``outputs``: the copy resolves to the output at ``<prefix><file>``, else to
-        the one output with the same file name.
-        """
-        m = _JOB_OUTPUT_COPY_RE.match(key or "")
-        if not m:
-            return None
-        execution_id, rel = m.group("exec"), m.group("rel")
-        job = self._store.job_for_execution(pid, execution_id)
-        if not job:
-            return None
-        prefix = str(job.get("outputPrefix") or "")
-        if prefix.startswith("s3://") and "/" in prefix[5:]:
-            p_bucket, _, p_key = prefix[5:].partition("/")
-            aid = self._store.asset_id_for_location(pid, p_bucket, f"{p_key}{rel}")
-            if aid:
-                return aid
-        name = rel.rsplit("/", 1)[-1]
-        matches = []
-        for out_id in list(job.get("outputs") or [])[:200]:
-            row = self._store.get_asset(pid, out_id) if schema.is_asset_id(out_id) else None
-            if row and str(row.get("sourceUri") or "").rsplit("/", 1)[-1] == name:
-                matches.append(out_id)
-        return matches[0] if len(matches) == 1 else None
+        aid = args.get("asset_id")
+        row = self._store.get_asset(pid, aid) if isinstance(aid, str) and schema.is_asset_id(aid) else None
+        if row is None or row.get("status") == "removed":
+            raise ServiceError(404, "not_found", "No such asset")
+        uri = str(row.get("sourceUri") or "")
+        if row.get("kind") != "video" or not uri.startswith("s3://") or "/" not in uri[5:]:
+            return {"keyframes": None}
+        if uri not in _KEYFRAME_CACHE:
+            bucket, _, key = uri[5:].partition("/")
+            try:
+                size = int(self._s3.head_object(Bucket=bucket, Key=key)["ContentLength"])
+                times = read_keyframes(lambda a, b: self._s3.get_object(Bucket=bucket, Key=key, Range=f"bytes={a}-{b}")["Body"].read(), size)
+            except Exception:  # noqa: BLE001 - transient or unreadable: not cached, asked again next time
+                return {"keyframes": None}
+            if len(_KEYFRAME_CACHE) >= 500:
+                _KEYFRAME_CACHE.pop(next(iter(_KEYFRAME_CACHE)))
+            _KEYFRAME_CACHE[uri] = times
+        return {"keyframes": _KEYFRAME_CACHE[uri]}
 
     # ------------------------------------------------------------------ capabilities
     def _capabilities(self) -> dict:

@@ -116,7 +116,7 @@ interface SessionSidebarProps {
   /** Opens the Improve surface — a Capabilities tab in the Settings modal. */
   onOpenImprove?: () => void;
   /** Dot when open suggestions are waiting: on the Improve row when expanded, and on the
-   *  Capabilities rail icon when collapsed (the rail has no per-tab icons). */
+   *  Settings rail icon when collapsed (the rail has no per-tab icons). */
   improveBadge?: boolean;
   onDeleteSession?: (id: string) => void;
   /** Persist a new title for a session (DDB + local state). */
@@ -205,7 +205,7 @@ const SessionSidebar = forwardRef<SessionSidebarHandle, SessionSidebarProps>(fun
   onSelectRun, activeRunId, centerMode = 'chat',
   onOpenProjects, onNewProject, projectsEnabled = false, activeProjectId, onSelectProject,
 }, ref) {
-  // The lower Capabilities shortcuts: collapsed until opened, and remembered.
+  // The lower Settings shortcuts: collapsed until opened, and remembered.
   const [lowerOpen, setLowerOpen] = useState<boolean>(() => {
     try { return localStorage.getItem('sidebar-settings-shortcuts') === 'open'; } catch { return false; }
   });
@@ -432,24 +432,22 @@ const SessionSidebar = forwardRef<SessionSidebarHandle, SessionSidebarProps>(fun
           <SkillIcon />
         </button>
         {/* Spacer pushes the lower group to the bottom so it matches the
-            expanded view, where Capabilities lives in the lower menu (above the
+            expanded view, where Settings lives in the lower menu (above the
             user row) rather than up with the primary nav. */}
         <div style={{ flex: 1 }} />
 
-        {/* Bottom: capabilities + settings */}
-        {/* The rail has no per-tab icons — Capabilities opens the Settings modal and you
-            pick the tab there. Improve follows General/Model/Tools/Hooks, so it has no icon
-            of its own; its badge rides here instead, or it would be invisible when collapsed. */}
-        <button onClick={() => onOpenSettings('capabilities')} style={{ ...railIconBtnStyle, position: 'relative' as const }} title="Capabilities" aria-label="Capabilities">
-          <CapabilitiesIcon />
-          {improveBadge && <span style={badgeDotStyle} />}
-        </button>
-        <button onClick={() => onOpenSettings()} style={railIconBtnStyle} title="Settings" aria-label="Settings">
+        {/* Bottom: Settings. The rail has no per-tab icons — Settings opens the modal and you pick
+            the tab there. (A separate "Capabilities" button opened the same window on the same tab:
+            IND403 asked why it was not just called Settings.) Improve follows General/Model/Tools/Hooks,
+            so it has no icon of its own; its badge rides here instead, or it would be invisible when
+            collapsed. */}
+        <button onClick={() => onOpenSettings()} style={{ ...railIconBtnStyle, position: 'relative' as const }} title="Settings" aria-label="Settings">
           <SettingsIcon />
+          {improveBadge && <span style={badgeDotStyle} />}
         </button>
 
         {/* User — mirrors the expanded lower user row so the collapsed rail shows the SAME
-            bottom items (identity + click-to-sign-out), not just Capabilities/Settings. */}
+            bottom items (identity + click-to-sign-out), not just Settings. */}
         <button
           type="button"
           data-testid="rail-user"
@@ -950,11 +948,11 @@ const SessionSidebar = forwardRef<SessionSidebarHandle, SessionSidebarProps>(fun
 
       {/* Lower menu */}
       <div style={lowerMenuStyle} data-tour="settings">
-        {/* Collapsed by default (remembered): every entry below is also a tab of the Settings that Capabilities
+        {/* Collapsed by default (remembered): every entry below is also a tab of the Settings this heading
             opens, so the list is a shortcut, not the only way in — and it was half the sidebar. */}
         <div style={{ display: 'flex', alignItems: 'center' }}>
-          <button onClick={() => onOpenSettings('capabilities')} style={{ ...lowerHeadStyle, flex: 1, position: 'relative' as const }}>
-            <GridIcon /> <span>Capabilities</span>
+          <button onClick={() => onOpenSettings()} style={{ ...lowerHeadStyle, flex: 1, position: 'relative' as const }}>
+            <SettingsIcon /> <span>Settings</span>
             {!lowerOpen && improveBadge && <span style={{ ...badgeDotStyle, top: '50%', right: 10, marginTop: -3.5 }} />}
           </button>
           <button type="button" onClick={toggleLower} aria-expanded={lowerOpen} data-testid="sidebar-lower-toggle"
@@ -1202,8 +1200,7 @@ function SessionsIcon() {
 }
 
 // A book/manual glyph: a skill is authored knowledge the agent loads. NOT
-// ConnectionsIcon (means Agents in this same sidebar) and not GridIcon (means
-// Capabilities in the lower menu).
+// ConnectionsIcon (means Agents in this same sidebar) and not SettingsIcon.
 function SkillIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1216,7 +1213,7 @@ function SkillIcon() {
 // A folder glyph: a Project is a collection the user owns and shares. The shared
 // `FolderIcon`, so the nav entry, the inventory rows, the composer chip, and the
 // Projects surface all draw the same glyph. Distinct from every other sidebar glyph —
-// NOT ConnectionsIcon (Agents), GridIcon (Capabilities), SkillIcon (Skills),
+// NOT ConnectionsIcon (Agents), SettingsIcon (Settings), SkillIcon (Skills),
 // WorkflowIcon (Workflow), or AgentIcon (Chat).
 function ProjectsIcon() {
   return <FolderIcon />;
@@ -1231,14 +1228,6 @@ function WorkflowIcon() {
   );
 }
 
-function CapabilitiesIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <circle cx="8" cy="5" r="3" />
-      <path d="M3 14c0-2.8 2.2-5 5-5s5 2.2 5 5" />
-    </svg>
-  );
-}
 
 function SettingsIcon() {
   return (
@@ -1831,18 +1820,10 @@ function AgentIcon() {
   );
 }
 
-function GridIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-      <rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" />
-      <rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" />
-    </svg>
-  );
-}
 
 // A rising trend line. Distinct from every glyph already in use here: AgentIcon (star)
 // means Chat, WorkflowIcon means Workflow, ConnectionsIcon means Agents, SkillIcon means
-// Skills, and GridIcon means Capabilities in the lower menu.
+// Skills, and SettingsIcon means Settings in the lower menu.
 function ImproveIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

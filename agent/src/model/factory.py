@@ -595,7 +595,43 @@ def max_tokens_for(override: Optional[int] = None, model_id: Optional[str] = Non
     return requested
 
 
-def build_model(
+def build_model(model_id: str, **build_args: Any) -> BedrockModel:
+    """Build a BedrockModel with the harness defaults applied (:func:`_build_model`), remembering how, so
+    :func:`with_fallbacks` builds its backups exactly the same way."""
+    model = _build_model(model_id, **dict(build_args))
+    try:
+        model._harness_build_args = dict(build_args)
+    except Exception:  # noqa: BLE001 - a model that refuses attributes simply gets no fallback
+        pass
+    return model
+
+
+def with_fallbacks(model: Any) -> Any:
+    """What an Agent runs: ``model``, or a Strands ``ModelRouter`` over it and the backups ``models.json``
+    configures for its id (``fallbacks``), each built like ``model``. The router moves to the next backup only when
+    the model is unavailable after its retries (model/retry.py UnavailableFallback); a model with no backups, or a
+    Strands without routing, is returned as is. Pass the result as ``Agent(model=...)``; keep ``model`` for
+    anything that reads the model's own config."""
+    from model import defaults
+
+    try:
+        model_id = str(model.get_config().get("model_id") or "")
+    except Exception:  # noqa: BLE001
+        return model
+    backups = [b for b in dict.fromkeys(defaults.fallbacks_for(model_id)) if b != model_id]
+    build_args = getattr(model, "_harness_build_args", None)
+    if not backups or build_args is None:
+        return model
+    try:
+        from strands.models.routing import ModelRouter
+
+        from model.retry import UnavailableFallback
+    except ImportError:
+        return model
+    return ModelRouter([model, *(build_model(b, **build_args) for b in backups)], strategy=UnavailableFallback())
+
+
+def _build_model(
     model_id: str,
     *,
     boto_client_config: Any = None,

@@ -45,9 +45,9 @@ export function openActionOutputs(outputs: MediaActionOutput[], sessionId: strin
   // registers). Its URLs resolve like any manifest's.
   if (outputs.length > 1) {
     window.dispatchEvent(new CustomEvent<ResultGalleryDetail>(RESULT_GALLERY_EVENT, { detail: {
-      sessionId, kind: outputs.every((o) => o.kind === 'image') ? 'image' : 'video',
+      sessionId, kind: outputs.every((o) => o.kind === 'image') ? 'image' : outputs.every((o) => o.kind === 'audio') ? 'audio' : 'video',
       label: galleryLabel(op ?? (outputs[0].kind === 'image' ? 'frame' : 'clip'), outputs.length, sourceName),
-      items: outputs.map((o) => ({ url: o.url, name: o.name })) } }));
+      items: outputs.map((o) => ({ url: o.url, name: o.name, kind: o.kind })) } }));
     return Promise.resolve();
   }
   const resolve = deps.resolve ?? resolveLocations;
@@ -67,7 +67,8 @@ export function openActionOutputs(outputs: MediaActionOutput[], sessionId: strin
         const o = pending.get(loc);
         if (!o || !assetId) continue;
         pending.delete(loc);
-        void open({ ref: { project_id: pid, asset_id: assetId, frame_s3_key: null }, kind: o.kind, displayName: o.name, startMs: 0 },
+        void open({ ref: { project_id: pid, asset_id: assetId, frame_s3_key: null }, kind: o.kind, displayName: o.name, startMs: 0,
+          ...(o.s3uri ? { sourceLocation: o.s3uri } : {}) },
           sessionId).then((res) => { if (!res.ok) fallback(o); });
       }
     }

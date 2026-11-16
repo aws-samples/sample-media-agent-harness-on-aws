@@ -324,8 +324,7 @@ sg5: classify + report ─────────┘ (depends on: sg3, sg4, sg2
                         "detail": "<short>", "evidence": "<verbatim quote / description excerpt>",
                         "act": "<the shot's depicted[] act, verbatim>"|null,
                         "confidence": "verified"|"supporting"}],
-          "corroboration": [{"start": <s>, "end": <s>, "tone": "...", "topic": "..."}],
-          "not_assessed": ["<CATEGORY the evidence could not cover>"]}
+          "corroboration": [{"start": <s>, "end": <s>, "tone": "...", "topic": "..."}]}
 
      `category` is one of the EIGHT canonical categories under "Moderation
      categories" (VIOLENCE, HARM, LANGUAGE, SEXUAL, SUBSTANCE, FRIGHTENING,

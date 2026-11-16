@@ -279,7 +279,9 @@ def test_deprecate_non_current_version_only_updates_target():
         "SK": "skill#p-skill-1#v0000000001",
     }
     # SET status=deprecated and current=false on target.
-    assert update_op["ExpressionAttributeValues"][":deprecated"] == "deprecated"
+    assert update_op["ExpressionAttributeValues"][":true"] is True
+    assert "deprecated = :true" in update_op["UpdateExpression"]
+    assert "REMOVE #status" in update_op["UpdateExpression"]
     assert update_op["ExpressionAttributeValues"][":false"] is False
     assert "deprecated" in update_op["UpdateExpression"]
     assert "current" in update_op["UpdateExpression"]
@@ -322,9 +324,8 @@ def test_deprecate_current_with_other_non_deprecated_promotes_other():
 
     # Target row (v1) → deprecated, current=false.
     assert target_update["Key"]["SK"] == "skill#p-skill-1#v0000000001"
-    assert target_update["ExpressionAttributeValues"][":deprecated"] == (
-        "deprecated"
-    )
+    assert target_update["ExpressionAttributeValues"][":true"] is True
+    assert "deprecated = :true" in target_update["UpdateExpression"]
     assert target_update["ExpressionAttributeValues"][":false"] is False
 
     # Successor row (v2) → current=true with precondition current=:false.

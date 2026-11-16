@@ -216,7 +216,6 @@ class InMemoryAssetIndex:
         item["SK"] = sk
         if (
             asset.category != "tool-collection"
-            and item.get("recordType") == "published"
             and asset.version is not None
         ):
             gsi1pk, gsi1sk = make_gsi1_keys(asset.asset_id, asset.version)

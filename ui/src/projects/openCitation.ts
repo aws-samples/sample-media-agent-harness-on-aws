@@ -56,6 +56,10 @@ export interface OpenAssetTarget {
   /** The span to SELECT on the full asset's timeline, in seconds of the media's own clock (a Moment's
    *  current In/Out). Absent for a Citation: nothing is selected. */
   range?: { start: number; end: number };
+  /** The asset's canonical `s3://` location, when the opener knows it (a media action's own output). The tab
+   *  carries it as `sourceLocation`, so a later analysis of the same file (its shots, its speakers) folds into
+   *  THIS tab instead of opening a second one on the same video. */
+  sourceLocation?: string;
 }
 
 /**
@@ -88,6 +92,8 @@ export interface OpenAssetEventDetail {
   startMs: number;
   /** See {@link OpenAssetTarget.range}; present only when the opener passed one. */
   range?: { start: number; end: number };
+  /** See {@link OpenAssetTarget.sourceLocation}. */
+  sourceLocation?: string;
   sessionId: string;
   url: string;
 }
@@ -251,6 +257,7 @@ export async function openAssetAt(
     displayName: name,
     startMs: target.startMs,
     ...(target.range ? { range: { start: target.range.start, end: target.range.end } } : {}),
+    ...(target.sourceLocation ? { sourceLocation: target.sourceLocation } : {}),
     sessionId,
     url,
   };

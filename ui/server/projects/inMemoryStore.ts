@@ -144,7 +144,11 @@ export class InMemoryTransactStore implements TransactStore, IndexQueryStore {
         };
       }
     }
-    return { items: rows.map((i) => structuredClone(i)), ...(lastEvaluatedKey ? { lastEvaluatedKey } : {}) };
+    // A projection returns ONLY the named attributes, as DynamoDB does (no keys unless named).
+    const pick = (i: Item): Item => (opts.projection?.length
+      ? Object.fromEntries(opts.projection.filter((a) => a in i).map((a) => [a, structuredClone(i[a])])) as Item
+      : structuredClone(i));
+    return { items: rows.map(pick), ...(lastEvaluatedKey ? { lastEvaluatedKey } : {}) };
   }
 
   // ------------------------------------------------------------------------------- test helpers

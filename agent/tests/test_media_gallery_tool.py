@@ -214,3 +214,39 @@ def test_a_card_whose_waveform_cannot_be_read_still_plays(monkeypatch):
     manifest = {"galleryClips": [{"id": "c", "kind": "audio", "src": "https://cdn.example/a.mp3"}]}
     mg._add_waveforms(manifest)
     assert "peaks" not in manifest["galleryClips"][0]
+
+
+def test_one_video_opens_in_the_video_view_not_a_one_card_gallery(monkeypatch):
+    """c7d66001's final reel came up as a "Review & clip takes" gallery with one card."""
+    import render.artifacts as ra
+    from jobs import context as jc
+    from tools import media_gallery as mg
+    monkeypatch.setattr(jc, "current_session_id", lambda: "sess-1")
+    rendered, written = [], []
+    monkeypatch.setattr(ra, "dispatch_render", lambda urls, label=None, **k: (rendered.append((urls, label)), "k")[1])
+    monkeypatch.setattr(ra, "rendered_this_session", lambda url: False)
+    monkeypatch.setattr(ra, "write_session_manifest", lambda *a: written.append(a) or "key")
+    out = json.loads(mg.show_media_gallery(items=[{"url": "https://cdn/x/final.mp4", "label": "Final"}], title="Reel"))
+    assert out == {"status": "opened", "items": 1, "template": "video"}
+    assert rendered == [(["https://cdn/x/final.mp4"], "Reel")] and written == []
+    # Two videos, or one audio file, are still a gallery.
+    monkeypatch.setattr(ra, "_stabilize_manifest_media_urls", lambda *a: None)
+    out = json.loads(mg.show_media_gallery(items=[{"url": "https://cdn/a.mp4", "label": "A"},
+                                                  {"url": "https://cdn/b.mp4", "label": "B"}]))
+    assert out["template"] == "clip-gallery" and len(rendered) == 1
+
+
+
+def test_a_video_already_open_in_its_tab_is_not_reopened_as_a_gallery(monkeypatch):
+    """a3b0a2c1: the plan had rendered the final reel in a video tab; show_media_gallery's render was deduped and it
+    fell back to a one-card gallery, a second tab of the same video."""
+    import render.artifacts as ra
+    from jobs import context as jc
+    from tools import media_gallery as mg
+    monkeypatch.setattr(jc, "current_session_id", lambda: "sess-1")
+    written = []
+    monkeypatch.setattr(ra, "rendered_this_session", lambda url: True)
+    monkeypatch.setattr(ra, "dispatch_render", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no render")))
+    monkeypatch.setattr(ra, "write_session_manifest", lambda *a: written.append(a) or "key")
+    out = json.loads(mg.show_media_gallery(items=[{"url": "https://cdn/x/final.mp4", "label": "Final"}]))
+    assert out == {"status": "already_open", "items": 1, "template": "video"} and written == []

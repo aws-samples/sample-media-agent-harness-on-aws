@@ -219,7 +219,9 @@ def test_a_plain_clip_reencodes_by_default_and_fast_is_opt_in():
     from media_actions import _RUNNER, clip_cmd
     # The runner snaps + re-encodes by default, and only stream-copies behind the fast flag.
     assert "snap_clip(_j[\"in_ms\"], _j[\"out_ms\"], _fps)" in _RUNNER
-    assert 'bool(_j.get("fast")) and _copyable(_ffprobe, _local)' in _RUNNER
+    # ...stream-copying only where that is exact (the clip starts on a keyframe) or behind the fast flag.
+    assert 'elif bool(_j.get("fast")) and _can_copy:' in _RUNNER
+    assert "copy_start(_kfs, _in_t, _fps) if _can_copy else None" in _RUNNER and "file_keyframes(_local)" in _RUNNER
     default = clip_cmd("ffmpeg", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True)
     assert "-c:v" in default and "libx264" in default and "copy" not in default
     fast = clip_cmd("ffmpeg", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True, fast=True)
@@ -391,3 +393,72 @@ def test_probe_fps_parses_avg_then_r_frame_rate(monkeypatch):
 
     monkeypatch.setattr(mod.subprocess, "run", boom)
     assert mod.probe_fps("ffprobe", "x.mp4") is None   # best-effort: unknown, not an error
+
+
+# --- Clip speed (staging 2026-11-15): every clip had become a CRF-20 re-encode at 5.6x the source's bitrate, so three
+# two-minute cuts of a 49.5 MB video took ~66 s, ran past the 60 s edge timeout and were cut again by the agent.
+
+def test_copy_start_matches_a_keyframe_within_half_a_frame_and_returns_its_own_time():
+    kf = ["223.690357", "228.762095"]
+    assert ma.copy_start(kf, 228.7620954, 29.97) == 228.762095  # the snapped in-point IS that keyframe
+    assert ma.copy_start(kf, 228.775, 29.97) == 228.762095      # within half a frame (16.7 ms)
+    assert ma.copy_start(kf, 228.80, 29.97) is None             # a frame later: not a keyframe -> re-encode
+    assert ma.copy_start([], 0.0, 29.97) is None
+    assert ma.copy_start(["0.000000"], 0.0, None) == 0.0        # fps unknown: an exact match only
+    assert ma.copy_start(["x", None], 1.0, 30) is None
+
+
+def test_rate_cap_is_one_and_a_half_times_the_source_and_absent_when_unknown():
+    assert ma.rate_cap_kbps(418424) == 628
+    assert ma.rate_cap_kbps(0) is None and ma.rate_cap_kbps(None) is None and ma.rate_cap_kbps("n/a") is None
+
+
+def test_clip_cmd_caps_a_reencode_at_the_given_rate_and_never_caps_a_copy():
+    cmd = ma.clip_cmd("ff", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True, max_kbps=628)
+    assert cmd[cmd.index("-maxrate") + 1] == "628k" and cmd[cmd.index("-bufsize") + 1] == "1256k"
+    assert "-crf" in cmd
+    assert "-maxrate" not in ma.clip_cmd("ff", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True)
+    assert "-maxrate" not in ma.clip_cmd("ff", "in.mp4", "out.mp4", 1.0, 2.0, has_audio=True, fast=True, max_kbps=628)
+
+
+def test_the_sandbox_program_copies_from_a_keyframe_and_caps_the_rest():
+    act = ma.parse_action({"op": "clip", "action_id": "t1", "source": {"url": "https://x/s.mp4", "s3uri": "s3://b/s.mp4"},
+                           "ranges": [{"inMs": 0, "outMs": 1000}]})
+    code = ma.build_sandbox_code("", act, ma.plan_outputs(act, "out/"), bucket="b", domain="d", region="us-west-2")
+    compile(code, "sandbox", "exec")  # the helpers it injects are valid in the program
+    assert "def copy_start(" in code and "def rate_cap_kbps(" in code
+    # The keyframes come from the source's own index, by the ONE reader the timeline's snap targets use.
+    assert "def file_keyframes(" in code and "def keyframes_from_moov(" in code
+    assert "_kfs = file_keyframes(_local) or []" in code
+    # An open-GOP keyframe's copy carries frames from before the cut that only an edit list hides (10 of 24 sampled
+    # Meridian keyframes): a copy is kept only if its first frame is the same with and without the edit list.
+    assert "not _copy_is_clean(_ffmpeg, _dst)" in code and '"-ignore_editlist", "1"' in code
+
+
+# --- An audio file's Trim runs directly too (staging 2026-11-15: a gallery's "Trim all marked" became a 6-node plan,
+# ~2 min and 7 new tabs, because the direct path only took video).
+
+def _audio(src: str, ranges):
+    return ma.parse_action({"op": "clip", "action_id": "au1", "source": {"url": "https://x/" + src, "s3uri": "s3://b/" + src,
+                                                                         "name": src, "kind": "audio"}, "ranges": ranges})
+
+
+def test_an_audio_clip_is_a_trim_with_the_sources_own_kind_of_file():
+    jobs = ma.plan_outputs(_audio("chunk.wav", [{"inMs": 1250, "outMs": 4750}]), "out/")
+    assert jobs == [{"kind": "audio", "in_ms": 1250, "out_ms": 4750, "key": "out/chunk_trim_0001-0004_au10.wav"}]
+    assert ma.plan_outputs(_audio("voice.mp3", [{"inMs": 0, "outMs": 1000}]), "out/")[0]["key"].endswith(".m4a")
+
+
+def test_audio_trims_are_decoded_so_they_are_exact_to_the_sample_and_wav_keeps_its_pcm_format():
+    wav = ma.audio_clip_cmd("ff", "in.wav", "out.wav", 1.25, 3.5, "pcm_s24le")
+    assert wav[:7] == ["ff", "-y", "-ss", "1.250000", "-i", "in.wav", "-t"] and "-vn" in wav
+    assert wav[wav.index("-c:a") + 1] == "pcm_s24le" and "copy" not in wav  # a PCM copy cut at packet edges (+84 ms)
+    assert ma.audio_clip_cmd("ff", "in.wav", "out.wav", 0, 1, None)[-2] == "pcm_s16le"
+    m4a = ma.audio_clip_cmd("ff", "in.mp3", "out.m4a", 0, 1)
+    assert m4a[m4a.index("-c:a") + 1] == "aac"
+
+
+def test_only_a_trim_takes_an_audio_file():
+    with pytest.raises(ma.MediaActionError, match="needs a video"):
+        ma.parse_action({"op": "frame", "action_id": "au2", "source": {"url": "https://x/a.wav", "s3uri": "s3://b/a.wav", "kind": "audio"},
+                         "points": [1]})

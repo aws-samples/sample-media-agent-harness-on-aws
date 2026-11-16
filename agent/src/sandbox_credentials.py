@@ -175,18 +175,24 @@ def _stdout_of(resp: Any) -> str:
     return "\n".join(chunks)
 
 
-def install(invoke: Any, pid: Optional[str], sid: Optional[str]) -> dict:
+def install(invoke: Any, pid: Optional[str], sid: Optional[str], setup: str = "") -> dict:
     """Install scoped credentials for (``pid``, ``sid``) through ``invoke`` (the interpreter client's
     ``invoke``) and CONFIRM they landed. Returns the credentials; raises :class:`SandboxCredentialsError`
     on any failure — no session to scope to, STS refused, the sandbox call failed, or the program's
-    sentinel never came back (a file that may not exist must not be assumed to)."""
+    sentinel never came back (a file that may not exist must not be assumed to).
+
+    ``setup`` is more harness code for the same sandbox call (the ffmpeg launchers, :mod:`sandbox_ffmpeg`). It runs
+    AFTER the credentials are written, and a failure in it never fails the install."""
     if not isinstance(sid, str) or not sid:
         raise SandboxCredentialsError("no chat session is bound to this call, so the sandbox cannot be scoped")
     creds = credentials_for(pid, sid)
     if creds is None:
         raise SandboxCredentialsError("could not obtain session-scoped S3 credentials (STS refused or unavailable)")
     try:
-        resp = invoke("executeCode", {"code": injection_code(creds), "language": "python"})
+        code = injection_code(creds)
+        if setup:
+            code += "try:\n" + "".join(f"    {line}\n" for line in setup.splitlines()) + "except Exception:\n    pass\n"
+        resp = invoke("executeCode", {"code": code, "language": "python"})
     except Exception as exc:  # noqa: BLE001 - re-raised as the typed error, message kept (it names inactive sessions)
         raise SandboxCredentialsError(f"installing scoped credentials failed: {type(exc).__name__}: {exc}") from exc
     if INSTALLED_SENTINEL not in _stdout_of(resp):

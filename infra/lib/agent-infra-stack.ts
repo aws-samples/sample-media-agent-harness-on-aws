@@ -246,7 +246,7 @@ export class AgentInfraStack extends cdk.Stack {
     // second place to set a model is how the task agent once ran Opus 5 while its code said Sonnet 5.5.
     const modelDefaults = JSON.parse(
       require("fs").readFileSync(path.join(__dirname, "../../agent/src/model/models.json"), "utf-8"),
-    ) as { reasoning_effort: string; thinking_prefix_mismatch: "drop_block" | "error" | "off"; agents: Record<string, string> };
+    ) as { reasoning_effort: string; thinking_prefix_mismatch: "drop_block" | "error" | "off"; agents: Record<string, string>; picker?: string[] };
     const defaultModelId = modelDefaults.agents.orchestrator;
     if (!defaultModelId || !modelDefaults.reasoning_effort || !modelDefaults.thinking_prefix_mismatch) {
       throw new Error("agent/src/model/models.json needs agents.orchestrator, reasoning_effort and thinking_prefix_mismatch");
@@ -4081,7 +4081,8 @@ export class AgentInfraStack extends cdk.Stack {
 
     agentRuntime.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:ListInferenceProfiles"],
+        // ListFoundationModels: the model catalog offers only models Bedrock lists as ACTIVE (model/catalog.current).
+        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:ListInferenceProfiles", "bedrock:ListFoundationModels"],
         resources: ["*"],
       })
     );
@@ -4190,7 +4191,9 @@ export class AgentInfraStack extends cdk.Stack {
       const writePrefixes = [`projects/${pidTag}/sessions/${sidTag}/*`, `artifacts/${sidTag}/*`];
       // + the staged ffmpeg build: once these credentials are injected they are the cell's ONLY S3 access, and the
       // crop / reel / timeline-action paths download ffmpeg from `tools/ffmpeg/` with them (no public link serves it).
-      const readPrefixes = [`projects/${pidTag}/*`, "artifacts/*", "tools/ffmpeg/*"];
+      // + this session's plan outputs: the chainer hands a dependent step `s3://…/plans/<sid>/<plan>/<node>/output`
+      // ("read it with read_result_files (or boto3)"), and a cell that reads it with boto3 runs on these credentials.
+      const readPrefixes = [`projects/${pidTag}/*`, "artifacts/*", "tools/ffmpeg/*", `plans/${sidTag}/*`];
       sandboxScopedRole.addToPolicy(new iam.PolicyStatement({
         sid: "ReadProjectAndArtifacts",
         actions: ["s3:GetObject", "s3:GetObjectVersion"],
@@ -4396,7 +4399,7 @@ export class AgentInfraStack extends cdk.Stack {
     //                          <category>#<id>             (tool-collection flat)
     //                          <marker_key>                (migration markers)
     //
-    // GSI byPublishedId (sparse, only on recordType=published versioned rows):
+    // GSI byPublishedId (sparse, only on versioned rows, i.e. with a `version`):
     //   GSI1PK  HASH    "PUB#<publishedId>"
     //   GSI1SK  RANGE   "v<NNNNNNNNNN>"
     //   Projection: ALL — query_lineage decodes full asset rows from this index.
@@ -4424,7 +4427,7 @@ export class AgentInfraStack extends cdk.Stack {
 
     // GSI byPublishedId — used by query_lineage to enumerate every version
     // of a published lineage in one query. Sparse: writes only emit GSI1PK /
-    // GSI1SK on rows with recordType=published and a versioned category, so
+    // GSI1SK on rows with a `version` in a versioned category, so
     // drafts and flat tool-collection rows are not projected.
     labAssetIndexTable.addGlobalSecondaryIndex({
       indexName: "byPublishedId",
@@ -5125,7 +5128,8 @@ export class AgentInfraStack extends cdk.Stack {
     uiProxyTaskRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "ListInferenceProfiles",
-        actions: ["bedrock:ListInferenceProfiles"],
+        // ListFoundationModels: GET /models offers only models Bedrock lists as ACTIVE (not LEGACY or retired).
+        actions: ["bedrock:ListInferenceProfiles", "bedrock:ListFoundationModels"],
         resources: ["*"],
       })
     );
@@ -5396,6 +5400,8 @@ export class AgentInfraStack extends cdk.Stack {
             // Reported by GET /models so the SPA adopts the platform default
             // rather than guessing from list order.
             DEFAULT_MODEL_ID: defaultModelId,
+            // The supported-model list (models.json `picker`): GET /models offers only these.
+            MODEL_PICKER: JSON.stringify(modelDefaults.picker ?? []),
             // Surfaced to the frontend via GET /config so oidc-client-ts's
             // UserManager can be built from a runtime fetch instead of a
             // Vite build-time env var — the same ui/dist artifact then works
@@ -5585,8 +5591,9 @@ export class AgentInfraStack extends cdk.Stack {
         // (model=None, validation skipped) worked — which is why it went unnoticed.
         //
         // Same grant the ui-proxy task role and the agent runtimes already carry;
-        // resource `*` because ListInferenceProfiles is not resource-scoped.
-        actions: ["bedrock:ListInferenceProfiles"],
+        // resource `*` because ListInferenceProfiles is not resource-scoped. ListFoundationModels: the catalog
+        // offers only models Bedrock lists as ACTIVE (model/catalog.current).
+        actions: ["bedrock:ListInferenceProfiles", "bedrock:ListFoundationModels"],
         resources: ["*"],
       }),
     );
@@ -5991,8 +5998,12 @@ export class AgentInfraStack extends cdk.Stack {
     // swap `uiDistribution.distributionDomainName` for that domain here.
     const uiOrigin = `https://${uiDistribution.distributionDomainName}`;
     const cfnUserPoolClient = userPoolClient.node.defaultChild as cognito.CfnUserPoolClient;
-    cfnUserPoolClient.callbackUrLs = [`${uiOrigin}/auth/callback`];
-    cfnUserPoolClient.logoutUrLs = [`${uiOrigin}/`];
+    const localDevOrigins = props.envConfig?.localDevLogin ? ["http://127.0.0.1:3000", "http://localhost:3000"] : [];
+    if (localDevOrigins.length && ["prod", "customer"].includes(String(props.envConfig?.env))) {
+      throw new Error(`localDevLogin is for test envs only; refusing it for env=${props.envConfig?.env}`);
+    }
+    cfnUserPoolClient.callbackUrLs = [`${uiOrigin}/auth/callback`, ...localDevOrigins.map((o) => `${o}/auth/callback`)];
+    cfnUserPoolClient.logoutUrLs = [`${uiOrigin}/`, ...localDevOrigins.map((o) => `${o}/`)];
 
     // ---- Outputs ----
     new cdk.CfnOutput(this, "UiDistributionId", {

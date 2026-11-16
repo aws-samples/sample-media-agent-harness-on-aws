@@ -316,3 +316,37 @@ def test_resolve_locations_reads_a_presigned_url_of_an_asset_key(ctx):
     a = _asset(store, name="sam.png")
     url = f"https://{BUCKET}.s3.us-west-2.amazonaws.com/projects/{PID}/{a}/sam.png?X-Amz-Signature=abc&X-Amz-Expires=900"
     assert service.handle(_event("resolve_locations", {"locations": [url]}))["value"]["locations"] == {url: a}
+
+
+def test_our_copy_resolves_to_the_asset_its_origin_names(ctx):
+    # Staging 242794f0: a gallery of TTS chunks played our session COPIES; "Trim all marked" asked which project file
+    # each copy is, matched none, and was handed to the agent as a 7-node plan (seven tabs). The copy records where it
+    # came from (result_resolution.make_s3_importer), so it resolves to the asset registered there — even for a job
+    # run inside a plan, which has no JOB record for the older heuristic to read.
+    service, store, s3 = ctx
+    origin_key = "micro-workflow/tts-on-aws/output/ca3d/ca3d_0_0_c0.wav"
+    chunk = _asset(store, bucket="m2c-proxy", key=origin_key, name="ca3d_0_0_c0.wav", source="m2c")
+    copy_key = f"projects/{PID}/sessions/sess-1/output/ca3d/ca3d_0_0_c0.wav"
+    s3.put_object(Bucket=BUCKET, Key=copy_key, Body=b"RIFF", Metadata={"origin": f"s3://m2c-proxy/{origin_key}"})
+    s3.put_object(Bucket=BUCKET, Key=f"projects/{PID}/sessions/sess-1/output/x/plain.wav", Body=b"RIFF")
+    locs = [f"https://d1.cloudfront.net/{copy_key}", f"s3://{BUCKET}/{copy_key}",
+            f"https://d1.cloudfront.net/projects/{PID}/sessions/sess-1/output/x/plain.wav"]
+    reply = service.handle(_event("resolve_locations", {"locations": locs}))
+    assert reply["value"]["locations"] == {locs[0]: chunk, locs[1]: chunk, locs[2]: None}
+
+
+def test_keyframes_of_a_video_asset_from_its_index(ctx):
+    # The timeline's snap targets: read from the MP4 index in byte ranges by the ONE reader (projects.keyframes).
+    from pathlib import Path
+    service, store, s3 = ctx
+    svc._KEYFRAME_CACHE.clear()
+    data = (Path(__file__).parent / "fixtures" / "mp4" / "kf-tail.mp4").read_bytes()
+    key = f"projects/{PID}/v/kf.mp4"
+    s3.put_object(Bucket=BUCKET, Key=key, Body=data)
+    vid = _asset(store, key=key, name="kf.mp4")
+    reply = service.handle(_event("keyframes", {"asset_id": vid}))
+    assert reply["value"] == {"keyframes": [0.0, 0.8, 1.6, 2.4, 3.2]}
+    s3.delete_object(Bucket=BUCKET, Key=key)                     # cached: the object's bytes never change
+    assert service.handle(_event("keyframes", {"asset_id": vid}))["value"]["keyframes"] == [0.0, 0.8, 1.6, 2.4, 3.2]
+    gone = service.handle(_event("keyframes", {"asset_id": "video:00000000-0000-4000-8000-000000000000"}))
+    assert gone["ok"] is False and gone["status"] == 404

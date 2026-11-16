@@ -14,5 +14,5 @@ for item in resp["Items"][:5]:
     print(f"  {pk} / {sk}")
     print(f"    s3Prefix: {item.get('s3Prefix')}")
     print(f"    status: {item.get('status')}")
-    print(f"    recordType: {item.get('recordType')}")
+    print(f"    version: {item.get('version', '(working copy)')}")
     print(f"    deprecated: {item.get('deprecated')}")

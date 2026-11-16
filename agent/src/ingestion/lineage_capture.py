@@ -37,6 +37,7 @@ from projects import lineage_contract as lc
 from projects import schema
 
 from . import generated as gen
+from . import locate
 from .lineage_edges import LineageEdges, ddb_value
 
 log = logging.getLogger(__name__)
@@ -54,9 +55,10 @@ def _wait_hash(ref: str) -> str:
 
 
 class LineageCapture:
-    def __init__(self, table: Any, store: Any, ingest_bucket: str, *, m2c_bucket: str = ""):
+    def __init__(self, table: Any, store: Any, ingest_bucket: str, *, m2c_bucket: str = "", s3: Any = None):
         self.table = table
         self.store = store
+        self.s3 = s3  # lets the resolver follow our copy of another system's output to its original
         self.edges = LineageEdges(table)
         self.bucket = ingest_bucket
         self.m2c_bucket = m2c_bucket
@@ -82,11 +84,8 @@ class LineageCapture:
         loc = self.location(ref)
         if loc is not None:
             bucket, key = loc
-            if bucket == self.bucket:
-                aid = gen.asset_id_in_project_key(key, pid)
-                if aid:
-                    return aid, ""
-            aid = self.store.asset_id_for_location(pid, bucket, key) or self.edges.alias_of(pid, bucket, key)
+            aid = locate.asset_for_location(self.store, pid, bucket, key, ingest_bucket=self.bucket,
+                                            s3=self.s3, edges=self.edges)
             return (aid, "") if aid else (None, "untracked_location")
         if lc.normalize_origin_url(ref):
             aid = self.edges.asset_for_origin(pid, ref)

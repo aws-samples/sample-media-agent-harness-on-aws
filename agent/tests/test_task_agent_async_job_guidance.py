@@ -320,3 +320,26 @@ def test_external_call_is_session_scoped_too():
     resolved = _resolve_system_prompt(_external(system_prompt=PERSONA, session_id="ext-1"))
     assert "artifacts/ext-1/output/<filename>" in resolved
     assert "ASYNC JOBS:" in resolved
+
+
+def test_s3_context_says_our_links_are_read_by_key(monkeypatch):
+    """A link a cell assembles itself (CDN + prefix + name) is never presigned, and the CDN is private, so every
+    node is told to read our links by key (staging c7d66001: the assemble step got 403 on all of its inputs)."""
+    import task_agent
+
+    monkeypatch.setattr(task_agent, "ARTIFACTS_DOMAIN", "cdn.example")
+    monkeypatch.setattr(task_agent, "S3_BUCKET", "bkt")
+    g = task_agent._s3_context_guidance("sid-1")
+    assert "`https://cdn.example/<key>` are NOT public" in g and "read `<key>` from `bkt` with boto3" in g
+    monkeypatch.setattr(task_agent, "ARTIFACTS_DOMAIN", "")
+    assert "NOT public" not in task_agent._s3_context_guidance("sid-1")
+
+
+def test_s3_context_says_where_skill_scripts_are_and_never_to_search_for_them():
+    """A plan step has no skills, so twice in c7d66001 it went looking for `scripts/trim_plan.py` with
+    `glob('/**/…', recursive=True)`, which walks /proc and never returns; the step ran out its 600 s."""
+    import task_agent
+
+    g = task_agent._s3_context_guidance("sid-1")
+    assert "`ffmpeg` and `ffprobe` are on PATH" in g
+    assert "`import trim_plan`" in g and "never search the filesystem" in g

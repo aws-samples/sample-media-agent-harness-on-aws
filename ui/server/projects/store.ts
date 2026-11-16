@@ -141,6 +141,11 @@ export interface IndexQueryOptions {
   limit?: number;
   /** The `LastEvaluatedKey` of the previous page, to continue. */
   exclusiveStartKey?: Record<string, unknown>;
+  /**
+   * Only these attributes of each item (a `ProjectionExpression`). The GSI projects ALL, and an ASSET row carries its
+   * ingestion `steps` (~20 KB each), so a whole-project scan that needs four fields read ~30x what it used.
+   */
+  projection?: readonly string[];
 }
 
 export interface IndexQueryResult {
@@ -431,6 +436,7 @@ export class DynamoTransactStore implements TransactStore, IndexQueryStore {
         ScanIndexForward: opts.ascending ?? true,
         ...(opts.limit !== undefined ? { Limit: opts.limit } : {}),
         ...(opts.exclusiveStartKey ? { ExclusiveStartKey: opts.exclusiveStartKey } : {}),
+        ...(opts.projection?.length ? { ProjectionExpression: opts.projection.map((a) => b.name(a)).join(", ") } : {}),
         ...b.attrs(),
       }),
     )) as { Items?: Item[]; LastEvaluatedKey?: Record<string, unknown> };

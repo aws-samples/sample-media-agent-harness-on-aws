@@ -158,3 +158,18 @@ describe('SessionSidebar — Projects inventory', () => {
     expect(within(screen.getByTestId('project-inventory')).queryByRole('button', { name: /new/i })).toBeNull();
   });
 });
+
+describe('Settings (IND403: "Capabilities holds the settings; why not call it Settings?")', () => {
+  it('the lower menu heading is Settings, and nothing is labelled Capabilities', async () => {
+    render(<SessionSidebar {...makeProps()} />);
+    await flush();
+    expect(screen.getByRole('button', { name: /^Settings$/ })).toBeInTheDocument();
+    expect(screen.queryByText('Capabilities')).toBeNull();
+  });
+  it('the collapsed rail has ONE Settings button', async () => {
+    render(<SessionSidebar {...makeProps({ collapsed: true })} />);
+    await flush();
+    expect(screen.getAllByRole('button', { name: 'Settings' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Capabilities' })).toBeNull();
+  });
+});

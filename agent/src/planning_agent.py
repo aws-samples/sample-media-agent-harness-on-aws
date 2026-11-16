@@ -22,7 +22,7 @@ import boto3
 from strands import Agent
 from strands.models import BedrockModel
 import runtime_config_bootstrap  # noqa: F401,E402  — hydrate env before first-party imports (V2 1536B cap)
-from model.factory import build_model
+from model.factory import build_model, with_fallbacks
 from model.defaults import model_for
 from botocore.config import Config as BotoConfig
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -132,7 +132,7 @@ async def invoke(payload, context):
 
     model = build_model(model_id=model_id, boto_client_config=_boto_cfg)
     planning_agent = Agent(
-        model=model, system_prompt=_fused_system_prompt() if fused else PLANNING_SYSTEM_PROMPT,
+        model=with_fallbacks(model), system_prompt=_fused_system_prompt() if fused else PLANNING_SYSTEM_PROMPT,
         tools=tools)
 
     logger.info("Planning: goal=%s, model=%s, catalog_keys=%s", goal[:100], model_id, list(catalog.keys()))

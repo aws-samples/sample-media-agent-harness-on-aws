@@ -8,7 +8,7 @@ import { ACCESS_DENIED } from "./access";
 import type { AccessResult } from "./access";
 import type { AssetServiceCall, AssetServiceReply } from "./assetServiceClient";
 import { InMemoryTransactStore } from "./inMemoryStore";
-import { DUPLICATES_MAX_FILES, dispatchAssetRoute } from "./ingestionRoutes";
+import { DUPLICATES_MAX_FILES, PROJECT_SCAN_PAGE, dispatchAssetRoute, scanProjectAssets } from "./ingestionRoutes";
 import { ASSET_LIST_PK_ATTR, ASSET_LIST_SK_ATTR, assetKey, projectPk } from "./schema";
 import type { Item } from "./store";
 import { dispatchIngestionWriteRoute, s3UploadOps } from "./uploadRoutes";
@@ -234,18 +234,26 @@ describe("POST /projects/:pid/assets/duplicates", () => {
     expect(r.body.truncated).toBeUndefined();
   });
 
-  it("is one pass over the newest-first GSI, stopping once every file has its original", async () => {
+  it("is one projected pass over the newest-first GSI, stopping once every file has its original", async () => {
+    const full = [row("a.mp4"), row("b.mp4"), row("c.mp4")];
+    // The scan sees only the projected fields, as DynamoDB returns them; the answer is re-read whole.
+    const slim = (r: Item) => ({ assetId: r.assetId, status: r.status, displayName: r.displayName, sourceSize: r.sourceSize });
     const pages = [
-      { items: [row("a.mp4")], lastEvaluatedKey: { k: 1 } },
-      { items: [row("b.mp4")], lastEvaluatedKey: { k: 2 } },
-      { items: [row("c.mp4")] },
+      { items: [slim(full[0])], lastEvaluatedKey: { k: 1 } },
+      { items: [slim(full[1])], lastEvaluatedKey: { k: 2 } },
+      { items: [slim(full[2])] },
     ];
     const seen: any[] = [];
-    const store = { batchGet: async () => [], queryIndex: async (o: any) => (seen.push(o), pages[seen.length - 1]) };
+    const store = {
+      batchGet: async (keys: any[]) => full.filter((r) => keys.some((k) => k.SK === r.SK)),
+      queryIndex: async (o: any) => (seen.push(o), pages[seen.length - 1]),
+    };
     const r = await dup(store, { files: [{ name: "a.mp4", size: 100 }, { name: "b.mp4", size: 100 }] });
-    expect(r.body.duplicates.map((d: any) => d.index)).toEqual([0, 1]);
+    expect(r.body.duplicates.map((d: any) => [d.index, d.asset.assetId])).toEqual([[0, full[0].assetId], [1, full[1].assetId]]);
+    expect(r.body.duplicates[0].asset).toMatchObject({ displayName: "a.mp4", kind: "video", sourceSize: 100 });
     expect(seen).toHaveLength(2); // never read page 3
-    expect(seen[0]).toMatchObject({ indexName: "assetsByRegistered", ascending: false, limit: 50 });
+    expect(seen[0]).toMatchObject({ indexName: "assetsByRegistered", ascending: false, limit: PROJECT_SCAN_PAGE,
+      projection: ["assetId", "status", "displayName", "sourceSize"] });
     expect(seen[1].exclusiveStartKey).toEqual({ k: 1 });
   });
 
@@ -272,5 +280,84 @@ describe("POST /projects/:pid/assets/duplicates", () => {
   it("GET on the path is not the duplicates route", async () => {
     const r = await read("GET", [PID, "assets", "duplicates"], new InMemoryTransactStore());
     expect(r.status).toBe(404); // a detail lookup of a malformed id
+  });
+});
+
+// ------------------------------------------------------------------------------------ whole-project scans
+
+/** An in-memory store that records every GSI page it was asked for. */
+function countingStore(rows: Item[]) {
+  const inner = new InMemoryTransactStore();
+  inner.seed(...rows);
+  const pages: any[] = [];
+  const store = {
+    batchGet: (keys: any) => inner.batchGet(keys),
+    query: (pk: string, sk?: string) => inner.query(pk, sk),
+    queryIndex: async (o: any) => { pages.push(o); return inner.queryIndex(o); },
+  };
+  return { store, pages };
+}
+
+describe("whole-project scans", () => {
+  const many = (n: number, over: (i: number) => Partial<Item> = () => ({})) =>
+    Array.from({ length: n }, (_, i) => row(`clip ${i}.mp4`, { steps: { probe: { log: "x".repeat(200) } }, ...over(i) }));
+
+  it("reads in pages of PROJECT_SCAN_PAGE up to the row bound, and says when the bound ended it", async () => {
+    const { store, pages } = countingStore(many(2500));
+    const all: Item[] = [];
+    expect(await scanProjectAssets(store, PID, { maxRows: 5000 }, (r) => void all.push(r))).toEqual({ truncated: false });
+    expect(all).toHaveLength(2500);
+    expect(pages.map((p) => p.limit)).toEqual([PROJECT_SCAN_PAGE, PROJECT_SCAN_PAGE, PROJECT_SCAN_PAGE]);
+
+    pages.length = 0;
+    let seen = 0;
+    expect(await scanProjectAssets(store, PID, { maxRows: 1200 }, () => void seen++)).toEqual({ truncated: true });
+    expect(seen).toBe(1200); // exactly the bound: the second page asks for the 200 left
+    expect(pages.map((p) => p.limit)).toEqual([PROJECT_SCAN_PAGE, 200]);
+  });
+
+  it("a visitor's stop ends the scan without calling it truncated", async () => {
+    const { store, pages } = countingStore(many(2500));
+    let seen = 0;
+    expect(await scanProjectAssets(store, PID, { maxRows: 5000 }, () => (++seen < 10 ? undefined : false))).toEqual({ truncated: false });
+    expect(seen).toBe(10);
+    expect(pages).toHaveLength(1);
+  });
+
+  it("the folder list is one projected read of a 120-file project (it was three 50-row pages of whole rows)", async () => {
+    const { store, pages } = countingStore(many(120, (i) => ({ folder: i % 2 ? "Footage/Day 1" : "Footage/Day 2" })));
+    const r = await read("GET", [PID, "assets", "folders"], store);
+    expect(r.status).toBe(200);
+    expect(r.body.folders).toEqual([{ folder: "Footage/Day 1", count: 60 }, { folder: "Footage/Day 2", count: 60 }]);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].projection).toEqual(["status", "visibility", "folder"]);
+  });
+
+  it("a name search and a folder's files scan projected rows but answer with whole asset views", async () => {
+    const rows = many(120, (i) => ({ folder: i < 60 ? "A" : "B", contentType: "video/mp4" }));
+    const { store, pages } = countingStore(rows);
+    const byName = await read("GET", [PID, "assets"], store, { query: `?q=${encodeURIComponent("clip 7")}` });
+    expect(byName.status).toBe(200);
+    // Every match comes back as a whole view, though the scan read only the search fields.
+    expect(byName.body.assets.find((a: any) => a.displayName === "clip 7.mp4"))
+      .toMatchObject({ contentType: "video/mp4", sourceSize: 100, folder: "A" });
+    expect(byName.body.total).toBe(11); // 7, 70–79
+    expect(pages[0].projection).toEqual(expect.arrayContaining(["assetId", "status", "kind", "folder", "displayName"]));
+    expect(pages[0].projection).not.toContain("steps");
+
+    const inB = await read("GET", [PID, "assets"], store, { query: "?folder=B" });
+    expect(inB.body.total).toBe(60);
+    expect(inB.body.assets).toHaveLength(50); // one SEARCH_PAGE, each whole
+    expect(inB.body.assets.every((a: any) => a.folder === "B" && a.contentType === "video/mp4")).toBe(true);
+  });
+
+  it("a removed asset never reaches a search answer, even when the projected scan still listed it", async () => {
+    const live = row("keep.mp4");
+    const gone = row("keep too.mp4");
+    const { store } = countingStore([live, gone]);
+    // The GSI trails the base table: the scan sees `gone` as live, the consistent re-read sees it removed.
+    const stale = { ...store, batchGet: async (keys: any) => (await store.batchGet(keys)).map((r: Item) => (r.assetId === gone.assetId ? { ...r, status: "removed" } : r)) };
+    const r = await read("GET", [PID, "assets"], stale, { query: "?q=keep" });
+    expect(r.body.assets.map((a: any) => a.assetId)).toEqual([live.assetId]);
   });
 });

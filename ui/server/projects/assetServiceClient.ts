@@ -55,6 +55,8 @@ export type AssetServiceCommand =
   | "rename_folder"
   | "create_folder"
   | "resolve_locations"
+  /** A video's keyframe times from its MP4/MOV index (the timeline's snap targets; agent projects.keyframes). */
+  | "keyframes"
   | "search_images"
   | "create_bookmarks"
   | "remove_bookmarks"

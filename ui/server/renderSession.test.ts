@@ -7,6 +7,7 @@ vi.mock("../src/shared/composeTimeline", () => ({
 }));
 
 import {
+  renderTabLabel,
   deriveRenderSession,
   sessionFromArtifactUrl,
   composeRenderTabs,
@@ -327,5 +328,19 @@ describe('renderViewManifestError (POST /sessions/:id/renders)', () => {
     expect(renderViewManifestError({ id: 'v', template: 'nle-timeline' })).toBeNull();
     expect(renderViewManifestError({ id: 'x', template: 'graph-view' })).toMatch(/must be one of/);
     expect(renderViewManifestError(null)).toMatch(/object/);
+  });
+});
+
+describe("renderTabLabel", () => {
+  const loc = "s3://b/projects/p/sessions/s/output/Netflix_Open_Content_Meridian_clip_0029-0318_dd37230.mp4";
+  it("a plain media render is named after its file, not the kind ('Video', 8e2acba8)", () => {
+    expect(renderTabLabel({ renderSkill: "render-video", tracks: [{ type: "video" }], sourceLocation: loc }))
+      .toBe("Netflix_Open_Content_Meridian_clip_0029-0318_dd37230.mp4");
+  });
+  it("an analysis is named after the work; a self-named manifest keeps its title", () => {
+    expect(renderTabLabel({ renderSkill: "render-shot-segmentation", tracks: [{ type: "video" }], sourceLocation: loc }))
+      .toBe("Shot Segmentation");
+    expect(renderTabLabel({ template: "asset-player", title: "Clip A.mp4" })).toBe("Clip A.mp4");
+    expect(renderTabLabel({ renderSkill: "render-video", tracks: [{ type: "video" }] })).toBe("Video");
   });
 });

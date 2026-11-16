@@ -330,7 +330,12 @@ export interface AssetUrlEntry {
 export interface AssetUrlsResponse {
   urls: Record<string, AssetUrlEntry>;
   errors: Record<string, ProjectsApiErrorBody>;
+  /** A moment's own picture per `"<asset_id>@<at_ms>"` asked for in `frames` (the frame of the shot it starts in). */
+  frames?: Record<string, { url: string; expiresAt: number }>;
 }
+
+/** One moment's picture to sign: the video and the time (ms) the moment starts at. */
+export interface FrameAsk { asset_id: string; at_ms: number }
 
 // ------------------------------------------------------------------------------------------ enablement
 
@@ -644,16 +649,28 @@ export function getAsset(projectId: string, assetId: string): Promise<ProjectsRe
  * The route accepts at most 100 ids; coalescing concurrent requests and chunking to 100 is the caller's job
  * (`assetUrlBatcher`, Task 9.6). Cross-spec: owned by media-harness-project-ingestion; dev stand-in in Task 10.2.
  */
+/** A video's keyframe times (s) from its MP4/MOV index, or `null` when it is not one we read
+ *  (`GET /projects/:pid/assets/:assetId/keyframes`). */
+export function getKeyframes(projectId: string, assetId: string): Promise<ProjectsResult<number[] | null>> {
+  return call(
+    `/projects/${enc(projectId)}/assets/${enc(assetId)}/keyframes`,
+    { method: 'GET' },
+    (b) => (Array.isArray(b?.keyframes) ? (b.keyframes as unknown[]).filter((n): n is number => typeof n === 'number' && Number.isFinite(n)) : null),
+  );
+}
+
 export function getAssetUrls(
   projectId: string,
   assetIds: string[],
+  frames: FrameAsk[] = [],
 ): Promise<ProjectsResult<AssetUrlsResponse>> {
   return call(
     `/projects/${enc(projectId)}/assets/urls`,
-    { method: 'POST', body: { asset_ids: assetIds } },
+    { method: 'POST', body: frames.length ? { asset_ids: assetIds, frames } : { asset_ids: assetIds } },
     (b) => ({
       urls: (b?.urls ?? {}) as Record<string, AssetUrlEntry>,
       errors: (b?.errors ?? {}) as Record<string, ProjectsApiErrorBody>,
+      ...(b?.frames ? { frames: b.frames as Record<string, { url: string; expiresAt: number }> } : {}),
     }),
   );
 }

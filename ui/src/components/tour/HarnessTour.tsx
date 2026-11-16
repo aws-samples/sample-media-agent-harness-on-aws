@@ -20,6 +20,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { TOUR_START_EVENT } from './startTour';
 import { getActiveLogo } from '../../config/branding';
 import { HERO_COPY } from '../../views/landingCopy';
+import { jobsStore } from '../../hooks/useJobs';
 
 const DONE_KEY = 'harness-tour-v1-done';
 /** The step a tour in progress is on, so a reload (or a long job) doesn't lose the user's place. */
@@ -49,8 +50,15 @@ interface TourStep {
   snap?: () => unknown;
   /** The step's goal is visible in the UI — advance. Polled while the step is open (do / wait steps). */
   done?: (snap: unknown) => boolean;
-  /** "Do it for me": perform the action for a user who is stuck. */
-  doIt?: () => void | Promise<void>;
+  /** What the step waited for FAILED (a failed agent turn, a failed job): the reason, else null. The tour then goes
+   *  back to the step that started it and says why, instead of advancing as if it had worked. */
+  failed?: (snap: unknown) => string | null;
+  /** "Do it for me": perform the action for a user who is stuck. A string it returns is shown on the card: why it
+   *  could do nothing (e.g. the demo video is not there yet). */
+  doIt?: () => void | Promise<void | string>;
+  /** A step to play with: reaching `done` ticks it ✓ and offers Next, but does not move on — the user tries it as
+   *  often as they like and goes on when ready (jumping between shots, not one click and gone). */
+  stay?: boolean;
 }
 
 /** Rendered and on screen. Not `offsetParent` — that is null for `position: fixed` controls (the panel edge toggle). */
@@ -77,8 +85,21 @@ const toChat = () => byLabel(/^Chat$/)()?.click();
 // ---- the chat walk-through: real controls, real state -------------------------------------------------------
 const turnRunning = () => !!byLabel('Stop agent')();
 /** One `⏱ 12.3s` summary per finished assistant turn — the most reliable "the answer is complete" signal. */
-const finishedTurns = () => (region('center')()?.innerText.match(/⏱/g) || []).length;
-const turnDone = (before: unknown) => !turnRunning() && finishedTurns() > (before as number);
+/** Rendered text of an element (`innerText` where there is layout, else `textContent`). */
+const textOf = (el: HTMLElement | null | undefined) => (el ? el.innerText ?? el.textContent ?? '' : '');
+const finishedTurns = () => (textOf(region('center')()).match(/⏱/g) || []).length;
+const turnDone = (before: unknown) => !turnRunning() && finishedTurns() > (before as number) && !lastTurnFailure();
+/** The newest assistant reply, when it is a failed turn ("This turn failed: …"): its reason, else null. */
+function lastTurnFailure(): string | null {
+  const rows = region('center')()?.querySelectorAll<HTMLElement>('[data-role="assistant"]');
+  const last = rows && rows.length ? rows[rows.length - 1] : null;
+  if (!last || last.getAttribute('data-turn-failed') !== 'true') return null;
+  const text = textOf(last).replace(/\s+/g, ' ');
+  const reason = text.split(/This turn failed:\s*/i)[1] || text;
+  return reason.slice(0, 180).trim();
+}
+/** A turn this step waited for finished, and failed. */
+const turnFailed = (before: unknown) => (!turnRunning() && finishedTurns() > (before as number) ? lastTurnFailure() : null);
 const isEmptySession = () => /what.s on your mind\?/i.test(region('center')()?.innerText || '');
 const count = (sel: string) => document.querySelectorAll(sel).length;
 const click = (find: FindOne) => find()?.click();
@@ -87,12 +108,78 @@ const later = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
  *  without search indexing — so it asks for what every video has: its technical metadata. */
 const FIRST_ASK = 'Extract the technical metadata of this video.';
 const rendererTabs = () => [...document.querySelectorAll<HTMLElement>('[data-tour="right-panel"] [role="tab"]')];
-const succeededJobs = () => count('[data-job-row][title$="· SUCCEEDED"]');
+/** When the user started the shots job (step "Find the shots"): any job registered after it is the tour's job. */
+let jobsSince = 0;
+const FAILED_JOB = new Set(['FAILED', 'TIMED_OUT', 'ABORTED']);
+/** The tour's jobs, from the jobs store (which the sidebar keeps live whatever tab is showing — the Jobs panel's own
+ *  rows exist only while its tab is open). A job that finished before this step opened still counts. */
+const tourJobs = () => {
+  const since = [...jobsStore.getSnapshot().jobsById.values()].filter((j) => Date.parse(j.startAt) >= jobsSince - 15_000);
+  // THE shot job: the agent may run a quick probe job first (process_media for the clip's facts), whose success
+  // moved the tour on while shot segmentation was still pending. Any job only when none is a shot job.
+  const shots = since.filter((j) => /shot/i.test(j.trioId || ''));
+  return shots.length ? shots : since.filter((j) => !/media-processing|process_media/i.test(j.trioId || ''));
+};
+const tourJobDone = () => tourJobs().some((j) => j.status === 'SUCCEEDED');
+const tourJobFailure = () => {
+  const bad = tourJobs().find((j) => FAILED_JOB.has(j.status));
+  return bad && !tourJobDone() ? `the job ${bad.status === 'FAILED' ? 'failed' : bad.status.toLowerCase().replace('_', ' ')}` : null;
+};
 /** Renderer tabs when the user clicked Clip: a clip runs directly (no turn, no job) and opens as a new tab. */
 let clipBaseline = { tabs: 0 };
 const clipTabOpen = () => rendererTabs().length > clipBaseline.tabs;
 const lastTab = () => { const t = rendererTabs(); return t.length ? t[t.length - 1] : null; };
 
+/** "Do it for me" on Ask: Send is disabled while the attached file is still resolving, and a click on a disabled
+ *  button does nothing — the tour's first click landed there and nothing was sent. Wait until it can send, send,
+ *  and make sure a turn started. */
+async function sendWhenReady(): Promise<string | void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    for (let n = 0; n < 40; n++) {
+      const send = byLabel('Send message')() as HTMLButtonElement | null;
+      if (send && !send.disabled) break;
+      await later(250);
+    }
+    click(byLabel('Send message'));
+    for (let n = 0; n < 16; n++) { if (turnRunning()) return; await later(250); }
+  }
+  return 'The message did not send yet — press Send when the attached video has finished loading.';
+}
+/** The newest reply in the chat (the answer to the tour's question). */
+const lastReplyRow = (): HTMLElement | null => {
+  const rows = [...document.querySelectorAll<HTMLElement>('[data-tour="center"] [data-role="assistant"]')];
+  return rows.length ? rows[rows.length - 1] : null;
+};
+/** Its "▸ N steps" toggle: the tools the agent called. A long answer scrolls it out of view, so the step brings the
+ *  reply's top back first. */
+const replySteps: FindOne = () => {
+  const b = lastReplyRow()?.querySelector<HTMLElement>('button[aria-label="Expand steps"],button[aria-label="Collapse steps"]');
+  return b && visible(b) ? b : null;
+};
+const showReplyTop = () => lastReplyRow()?.scrollIntoView?.({ block: 'start' });
+const replyStepsOpen = () => lastReplyRow()?.querySelector('button[aria-label="Collapse steps"]') != null;
+/** "Jump to a shot": the shot the user clicked (its start, in seconds), then the player there. */
+let shotClickedAt: number | null = null;
+if (typeof document !== 'undefined') {
+  document.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement | null)?.closest?.('[data-testid="lane-shots"] button');
+    const at = b && /@ (\d+(?:\.\d+)?)s/.exec(b.getAttribute('title') || '');
+    if (at) shotClickedAt = Number(at[1]);
+  }, true);
+}
+const shotLane = bySelector('[data-testid="lane-shots"]');
+const playerAtShot = () => shotClickedAt !== null && [...document.querySelectorAll<HTMLVideoElement>('[data-tour="right-panel"] video')]
+  .some((v) => Math.abs(v.currentTime - (shotClickedAt as number)) < 0.75);
+async function jumpToAShot(): Promise<string | void> {
+  const shots = [...document.querySelectorAll<HTMLElement>('[data-testid="lane-shots"] button')];
+  if (!shots.length) return 'The Shots lane is not on screen yet — open your clip\'s tab on the right.';
+  click(() => shots[Math.min(2, shots.length - 1)]);
+}
+
+/** Ranges the timeline kept from an earlier visit (a re-taken tour) would make Clip cut several clips: start clean. */
+function clearRanges() {
+  if (count('[data-testid^="range-band-"]')) click(byLabel('Clear all ranges and markers'));
+}
 /** "Do it for me" on the timeline: drag a range over roughly the first quarter, as a user would. */
 function dragRange() {
   const ruler = document.querySelector<HTMLElement>('[data-testid="timeline-ruler"]');
@@ -124,7 +211,7 @@ async function searchPlusMenu(text: string) {
 }
 /** Attach the demo video: switch the (still empty) session to Personal if it is elsewhere, then pick
  *  `0-demo.mp4` by name. Falls back to the first video when the demo is not there (e.g. a user who deleted it). */
-export async function attachDemoVideo() {
+export async function attachDemoVideo(): Promise<string | void> {
   if (!plusMenuOpen()) { click(byLabel('Attach and tools')); await later(500); }
   if (!demoItem()) {
     // The session's project is the + menu's checked radio; Personal's row is labelled "Personal, private, …".
@@ -140,7 +227,9 @@ export async function attachDemoVideo() {
   const demo = demoItem();
   if (demo) { demo.click(); return; }
   if (!videoItems().length) await searchPlusMenu('.mp4');
-  videoItems()[0]?.click();
+  const any = videoItems()[0];
+  if (any) { any.click(); return; }
+  return `There's no video in this project yet. ${DEMO_VIDEO} is added to your Personal project when you first sign in — reload the page, or upload a video, then try again.`;
 }
 
 const region = (name: string): FindOne => bySelector(`[data-tour="${name}"]`);
@@ -170,40 +259,52 @@ const STEPS: TourStep[] = [
   { section: 'Chat', kind: 'do', title: 'Ask about it',
     before: () => window.dispatchEvent(new CustomEvent('chat-input:set', { detail: { value: FIRST_ASK } })),
     find: all(bySelector('textarea[aria-label="Chat message input"]'), byLabel('Send message')), place: 'top',
-    done: turnRunning, doIt: () => click(byLabel('Send message')),
+    done: turnRunning, doIt: sendWhenReady,
     body: <>We've typed a first question for you. Press <b>Send</b> — or write your own.</> },
-  { section: 'Chat', kind: 'wait', title: 'The agent is answering', snap: finishedTurns, done: turnDone,
+  { section: 'Chat', kind: 'wait', title: 'The agent is answering', snap: finishedTurns, done: turnDone, failed: turnFailed,
     body: 'It reads the video and answers in the chat. The video itself opens in the renderer on the right.' },
-  { section: 'Chat', kind: 'do', title: 'Pick a range', before: showRight('Renderer'),
+  { section: 'Chat', kind: 'do', title: 'See how it answered', before: showReplyTop, find: replySteps, place: 'right',
+    done: replyStepsOpen, doIt: () => click(replySteps),
+    body: <>The agent answered by <b>calling tools</b>, not from memory. Click <b>▸ steps</b> on its reply to see each
+      one — here it read the file's technical facts. The video it is talking about opened on the right.</> },
+  { section: 'Chat', kind: 'do', title: 'Cut a clip', before: () => { showRight('Renderer')(); window.setTimeout(clearRanges, 400); },
     find: bySelector('[data-testid="timeline-editor"]'), place: 'left',
-    done: () => count('[data-testid^="range-band-"]') > 0, doIt: dragRange,
-    body: <>This is the video's timeline. <b>Drag along the ruler</b> to mark the part you want — it snaps to shot cuts.</> },
-  { section: 'Chat', kind: 'do', title: 'Cut a clip', find: bySelector('[data-testid="action-clip"]'), place: 'left',
     snap: () => { clipBaseline = { tabs: rendererTabs().length }; return null; },
-    done: clipTabOpen, doIt: () => click(bySelector('[data-testid="action-clip"]')),
-    body: <>Click <b>Clip</b>. It's cut right away — no agent turn, no job — and opens in a new tab; the chat keeps a
-      line of what you did. <b>Frame</b> and <b>Crop</b> work the same way.</> },
+    done: clipTabOpen,
+    doIt: async () => {
+      if (count('[data-testid^="range-band-"]') > 1) { clearRanges(); await later(300); } // one range: one clip
+      if (!count('[data-testid^="range-band-"]')) { dragRange(); await later(500); }
+      if (!count('[data-testid^="range-band-"]')) return 'Mark a range on the timeline first, then click Clip.';
+      click(bySelector('[data-testid="action-clip"]'));
+    },
+    body: <><b>Drag along the ruler</b> to mark the part you want (it snaps to shot cuts), then click <b>Clip</b> once.
+      It's cut directly — no agent turn, no job — in a few seconds, and opens in a new tab.</> },
   { section: 'Chat', kind: 'do', title: 'Open your clip', before: showRight('Renderer'),
     find: lastTab, place: 'bottom',
     done: () => lastTab()?.getAttribute('aria-selected') === 'true',
     doIt: () => lastTab()?.click(),
     body: <>Your clip opened in its own tab. <b>Click it</b> if it isn't selected — everything you run next works on just this clip.</> },
   { section: 'Chat', kind: 'do', title: 'Find the shots', find: bySelector('[data-testid="analyze-menu"]'), place: 'left',
+    snap: () => { jobsSince = Date.now(); return null; },
     done: turnRunning,
     doIt: async () => { click(bySelector('[data-testid="analyze-menu"]')); await later(300); click(bySelector('[data-testid="analyze-item-shots"]')); },
     body: <>Heavier analysis runs as a background <b>job</b>. On your clip, open <b>Analyze</b> and choose <b>Shot Segmentation</b>.</> },
-  { section: 'Chat', kind: 'wait', title: 'Starting the job', snap: finishedTurns, done: turnDone,
+  { section: 'Chat', kind: 'wait', title: 'Starting the job', snap: finishedTurns, done: turnDone, failed: turnFailed,
     body: 'The agent hands the work to a background job and replies right away.' },
-  { section: 'Chat', title: 'Watch it in Jobs', before: showRight('Jobs'), find: region('right-panel'), place: 'left',
-    body: <>Every job this chat started, with its status. A running job pulses; when it turns <b>Completed</b> you'll also get a notification. You can keep chatting meanwhile.</> },
-  { section: 'Chat', kind: 'wait', title: 'Shot segmentation is running', find: region('right-panel'),
-    snap: succeededJobs, done: (n) => succeededJobs() > (n as number),
-    body: 'This takes a few minutes. Explore anything you like — the tour picks up when the job is done.' },
+  { section: 'Chat', kind: 'wait', title: 'Watch it in Jobs', before: showRight('Jobs'), find: region('right-panel'),
+    done: tourJobDone, failed: tourJobFailure,
+    body: <>Every job this chat started shows here. A running job pulses; when it turns <b>Completed</b> you get a
+      notification. It takes about a minute — the tour moves on by itself, and you can keep chatting meanwhile.</> },
   { section: 'Chat', kind: 'do', title: 'Bring the results back', find: notice, place: 'bottom',
     done: turnRunning, doIt: openNotice,
     body: <>Your job finished. Click the <b>notification</b> under the bell (or open the <b>bell</b> and pick it) — <b>View results</b> brings the shots onto your clip's timeline, and the agent summarises what it found.</> },
-  { section: 'Chat', kind: 'wait', title: 'Fetching the results', snap: finishedTurns, done: turnDone,
+  { section: 'Chat', kind: 'wait', title: 'Fetching the results', snap: finishedTurns, done: turnDone, failed: turnFailed,
     body: 'The shots appear on the clip\'s timeline as a Shots lane.' },
+  { section: 'Chat', kind: 'do', title: 'Jump to a shot', before: showRight('Renderer'), find: shotLane, place: 'left',
+    snap: () => { shotClickedAt = null; return null; },
+    done: playerAtShot, doIt: jumpToAShot, stay: true,
+    body: <>Your clip now has a <b>Shots</b> lane: one block per shot the job found. <b>Click any shot</b> — the video
+      jumps to the first frame of that shot. Try a few, then press <b>Next</b> when you're ready.</> },
   { section: 'Explore', title: 'Projects', before: clickNav('Projects'), find: byLabel(/^Projects$/), place: 'right',
     body: <>Your files live in <b>projects</b> — the media, its analysis, and the chats about it. You start with a default project; create more for a campaign, a show or a team and invite members. A <b>magnifier</b> marks a searchable project: its media is analysed, so you can search it and ask about what's inside.</> },
   { section: 'Explore', title: 'The file browser', before: () => bySelector('[data-project-row]')()?.click(), find: region('center'), place: 'inside',
@@ -211,11 +312,14 @@ const STEPS: TourStep[] = [
   { section: 'Explore', title: 'Workflow, Agents and Skills', find: all(byLabel(/^Workflow$/), byLabel(/^Agents$/), byLabel(/^Skills$/)), place: 'right',
     body: <><b>Workflow</b> shows multi-step plans the agent runs, step by step. <b>Agents</b> is where you build your own — a role, tools and skills — to use in chat or share. <b>Skills</b> is reusable know-how the agent loads when needed: browse the built-ins or write your own.</> },
   { section: 'Explore', title: 'Settings', find: region('settings'), place: 'right',
-    body: <><b>Capabilities</b> holds the settings: <b>General</b> for theme and text size, <b>Model</b> for the agent's model, <b>Tools</b> and <b>Hooks</b> for what it can call and what runs around each turn, and <b>Improve</b> for feedback on past answers. Your name at the bottom signs you out.</> },
+    body: <><b>Settings</b>: <b>General</b> for theme and text size, <b>Model</b> for the agent's model, <b>Tools</b> and <b>Hooks</b> for what it can call and what runs around each turn, and <b>Improve</b> for feedback on past answers. Your name at the bottom signs you out.</> },
 ];
 
 /** The route the welcome banner lists: every step the user acts on or reads — waits are not stops. */
 const STOPS = STEPS.filter((st) => st.kind !== 'wait').map((st, k) => ({ ...st, n: k + 1 }));
+/** Step `i`'s stop number on that route; a wait step belongs to the stop before it. */
+export const stopNumber = (i: number) => Math.max(1, STEPS.slice(0, i + 1).filter((st) => st.kind !== 'wait').length);
+export const STOP_COUNT = STOPS.length;
 
 const SECTION_META: Record<Section, { icon: string; blurb: string }> = {
   Chat: { icon: '💬', blurb: 'Ask, open media, run a job, get the results back.' },
@@ -254,14 +358,18 @@ export default function HarnessTour({ firstVisit = null }: { firstVisit?: boolea
   const [i, setI] = useState(() => (forced() ? 0 : savedStep() ?? 0));
   const [rect, setRect] = useState<DOMRect | null>(null);
   const [justDone, setJustDone] = useState(false);
+  /** Why the tour came back to this step, or why "Do it for me" could do nothing. Cleared on the next step. */
+  const [note, setNote] = useState<string | null>(null);
   const step = STEPS[i];
   const kind = step.kind ?? 'describe';
 
   const finish = useCallback(() => {
     try { localStorage.setItem(DONE_KEY, '1'); localStorage.removeItem(STEP_KEY); } catch { /* storage off */ }
     setStage('off');
+    // Leave nothing the tour opened behind it (Skip tour left the + menu open over the composer).
+    if (plusMenuOpen()) click(byLabel('Attach and tools'));
   }, []);
-  const go = useCallback((n: number) => setI(Math.max(0, Math.min(STEPS.length - 1, n))), []);
+  const go = useCallback((n: number) => { setNote(null); setI(Math.max(0, Math.min(STEPS.length - 1, n))); }, []);
   const next = useCallback(() => (i === STEPS.length - 1 ? finish() : go(i + 1)), [i, go, finish]);
 
   useEffect(() => {
@@ -276,14 +384,33 @@ export default function HarnessTour({ firstVisit = null }: { firstVisit?: boolea
     setJustDone(false);
     step.before?.();
     const snap = step.snap?.();
-    let alive = true, advanced = false;
+    let alive = true, advanced = false, scrolls = 0;
     const tick = () => {
       if (!alive) return;
+      const found = step.find?.() ?? null;
+      // A target scrolled out of view (a long answer pinned the chat to its bottom; content that loads after the
+      // step began) is brought back — a few times at most, so it never fights a user who scrolls away on purpose.
+      const target = Array.isArray(found) ? found[0] : found;
+      if (target && scrolls < 3) {
+        const r = target.getBoundingClientRect();
+        if (r.bottom < 0 || r.top > window.innerHeight) { scrolls++; target.scrollIntoView?.({ block: 'center' }); }
+      }
       setRect(unionRect(collect(step)));
+      const failure = !advanced && kind !== 'describe' ? step.failed?.(snap) : null;
+      if (failure) {
+        // Back to the step that started the work, saying why — never on as if it had worked.
+        advanced = true;
+        let back = i - 1;
+        while (back > 0 && STEPS[back].kind !== 'do') back--;
+        setI(back);
+        setNote(`That didn't work: ${failure}. Try again${/unavailable|throttl|capacity|unable to process/i.test(failure) ? ' in a minute, or pick another model in Settings → Model' : ''}.`);
+        return;
+      }
       if (!advanced && kind !== 'describe' && step.done?.(snap)) {
         advanced = true;
         setJustDone(true);
-        window.setTimeout(() => { if (alive) next(); }, 900);
+        // A step to play with waits for the user's Next; every other step moves on by itself.
+        if (!step.stay) window.setTimeout(() => { if (alive) next(); }, 900);
       }
     };
     const first = window.setTimeout(tick, 260);
@@ -319,7 +446,7 @@ export default function HarnessTour({ firstVisit = null }: { firstVisit?: boolea
 
   if (stage === 'off') return null;
 
-  const doIt = step.doIt ? () => { void step.doIt!(); } : undefined;
+  const doIt = step.doIt ? () => { setNote(null); void Promise.resolve(step.doIt!()).then((why) => { if (typeof why === 'string') setNote(why); }); } : undefined;
   return (
     <>
       <style>{TOUR_CSS}</style>
@@ -330,7 +457,7 @@ export default function HarnessTour({ firstVisit = null }: { firstVisit?: boolea
       ) : kind === 'wait' ? (
         <Docked step={step} i={i} rect={rect} justDone={justDone} onSkip={next} onFinish={finish} />
       ) : (
-        <Spotlight step={step} i={i} rect={rect} justDone={justDone} onDoIt={doIt}
+        <Spotlight step={step} i={i} rect={rect} justDone={justDone} note={note} onDoIt={doIt}
           onBack={() => go(i - 1)} onNext={next} onFinish={finish} />
       )}
     </>
@@ -390,8 +517,8 @@ function ArrowIcon() {
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>;
 }
 
-function Spotlight({ step, i, rect, justDone, onDoIt, onBack, onNext, onFinish }: {
-  step: TourStep; i: number; rect: DOMRect | null; justDone: boolean; onDoIt?: () => void;
+function Spotlight({ step, i, rect, justDone, note, onDoIt, onBack, onNext, onFinish }: {
+  step: TourStep; i: number; rect: DOMRect | null; justDone: boolean; note?: string | null; onDoIt?: () => void;
   onBack: () => void; onNext: () => void; onFinish: () => void;
 }) {
   const interactive = step.kind === 'do';
@@ -441,8 +568,9 @@ function Spotlight({ step, i, rect, justDone, onDoIt, onBack, onNext, onFinish }
         <div className="ht-pop-head">
           <span className="ht-section"><span aria-hidden="true">{SECTION_META[step.section].icon}</span>{step.section}</span>
           {interactive && <span className="ht-yourturn">Your turn</span>}
-          <span className="ht-count">{i + 1} / {STEPS.length}</span>
+          <span className="ht-count">{stopNumber(i)} / {STOP_COUNT}</span>
         </div>
+        {note && <div className="ht-note" role="alert" data-testid="tour-note">{note}</div>}
         {firstOfSection && <div className="ht-chapter">{SECTION_META[step.section].blurb}</div>}
         <h3 id="ht-step-title" className="ht-step-title">{justDone ? <>✓ {step.title}</> : step.title}</h3>
         <div className="ht-body">{step.body}</div>
@@ -450,7 +578,7 @@ function Spotlight({ step, i, rect, justDone, onDoIt, onBack, onNext, onFinish }
         <div className="ht-pop-actions">
           <button type="button" className="ht-link" onClick={onFinish}>Skip tour</button>
           <span style={{ flex: 1 }} />
-          {interactive ? (
+          {interactive && !(justDone && step.stay) ? (
             <>
               <button type="button" className="ht-link" onClick={onNext} data-testid="tour-skip-step">Skip step</button>
               {onDoIt && <button type="button" className="ht-btn ht-ghost ht-sm" onClick={onDoIt} data-testid="tour-do-it">Do it for me</button>}
@@ -483,7 +611,7 @@ function Docked({ step, i, rect, justDone, onSkip, onFinish }: {
       <div className="ht-pop-head">
         <span className={`ht-spinner${justDone ? ' ht-spinner-done' : ''}`} aria-hidden="true" />
         <span className="ht-dock-title">{justDone ? <>✓ {step.title}</> : step.title}</span>
-        <span className="ht-count">{i + 1} / {STEPS.length}</span>
+        <span className="ht-count">{stopNumber(i)} / {STOP_COUNT}</span>
       </div>
       <div className="ht-body">{step.body}</div>
       <div className="ht-pop-actions">
@@ -510,8 +638,8 @@ function Progress({ i }: { i: number }) {
     <div className="ht-progress" aria-hidden="true">
       {(['Chat', 'Explore'] as Section[]).map((sec) => (
         <div key={sec} className="ht-progress-group">
-          {STEPS.map((s, n) => s.section === sec && (
-            <span key={n} className={`ht-seg${n < i ? ' done' : n === i ? ' now' : ''}`} />
+          {STOPS.map((s) => s.section === sec && (
+            <span key={s.n} className={`ht-seg${s.n < stopNumber(i) ? ' done' : s.n === stopNumber(i) ? ' now' : ''}`} />
           ))}
         </div>
       ))}
@@ -672,6 +800,7 @@ const TOUR_CSS = `
 .ht-seg.done{background:color-mix(in srgb,var(--color-primary) 50%,var(--color-border))}
 .ht-seg.now{background:var(--color-primary)}
 .ht-pop-actions{display:flex;align-items:center;gap:8px}
+.ht-note{margin:8px 0 6px;padding:8px 10px;border-radius:8px;font-size:var(--fs-sm);line-height:1.5;color:var(--color-text);border:1px solid var(--color-error);background:color-mix(in srgb,var(--color-error) 10%,transparent)}
 .ht-link{background:none;border:none;color:var(--color-text-tertiary);font-size:var(--fs-xs);cursor:pointer;padding:0;font-family:inherit}
 .ht-link:hover{color:var(--color-text)}
 .ht-pop::before{content:"";position:absolute;width:14px;height:14px;transform:rotate(45deg);

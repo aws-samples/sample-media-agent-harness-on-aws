@@ -46,7 +46,7 @@ export function deriveRenderSession(
 }
 
 /** The session row fields the render gate reads (`undefined` when there is no row). */
-export type RenderSessionRow = { actorId?: unknown; locked?: unknown } | undefined;
+export type RenderSessionRow = { actorId?: unknown; locked?: unknown; active?: unknown } | undefined;
 
 export type RenderSessionDecision =
   | { kind: "ok"; sessionId: string }
@@ -91,7 +91,7 @@ export async function decideRenderSession(
     const fromUrl = sessionFromArtifactUrl(artifactUrl);
     if (fromUrl) {
       const row = await getRow(fromUrl);
-      if (row && row.actorId === actorId && !row.locked) return { kind: "ok", sessionId: fromUrl };
+      if (row && row.actorId === actorId && !row.locked && row.active !== 0) return { kind: "ok", sessionId: fromUrl };
     }
   }
   return { kind: "ok", sessionId: ownerTaggedRenderSession(actorId, now) };
@@ -99,6 +99,7 @@ export async function decideRenderSession(
 
 
 import { composeTimeline } from "../src/shared/composeTimeline";
+import { viewSubjectIds } from "../src/shared/renderSubject";
 import { decideApiSession } from "./runtimeBody";
 import { ownerTaggedRenderSession } from "./artifactOwner";
 
@@ -326,6 +327,8 @@ export function composeRenderTabs<
         ...(sk ? { sourceKey: sk } : {}),
         composite: true,
         memberKeys: group.map((g) => g.key), // so the UI drops the absorbed solo tabs
+        // What the tab is about: every member's file identities (design A — one tab per subject; see renderSubject).
+        subjectIds: [...new Set(group.flatMap((g) => viewSubjectIds(g.manifest)))],
         manifest: composite,
       });
     } else {
@@ -334,7 +337,7 @@ export function composeRenderTabs<
       // (RendererRegistry), so a solo analysis already renders on its media's timeline without
       // this layer rewriting anything. An earlier version promoted the template here — that was
       // the symptom-level fix for staging 9e977f30, made redundant by the container fold.
-      composed.push(...(group as unknown as Array<Record<string, unknown>>));
+      composed.push(...group.map((g) => ({ ...g, subjectIds: viewSubjectIds(g.manifest) }) as Record<string, unknown>));
     }
   }
   // Collapse #2: generated images collapse into ONE gallery PER SESSION (composeRenderTabs only
@@ -379,7 +382,9 @@ export function composeRenderTabs<
   } else {
     composed.push(...(gallery as unknown as Array<Record<string, unknown>>));
   }
-  composed.push(...(solos as unknown as Array<Record<string, unknown>>));
+  // Every other view carries what it is about, so the UI shows all views of one subject as ONE tab with versions
+  // (a player of a file and that file's timeline, a re-run gallery) instead of one tab each.
+  composed.push(...solos.map((r) => ({ ...r, subjectIds: viewSubjectIds(r.manifest) }) as Record<string, unknown>));
   composed.sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
   return composed;
 }
@@ -430,4 +435,28 @@ export function renderViewManifestError(manifest: unknown): string | null {
     return `manifest.template must be one of ${[...RENDER_VIEW_TEMPLATES].join(", ")}`;
   }
   return null;
+}
+
+
+/**
+ * A restored tab's name. A manifest carries `renderSkill` but no tab label (the label only ever rode the stream), so
+ * the work names it ("render-shot-segmentation" -> "Shot Segmentation"); a manifest that names itself (`title`, an
+ * `asset-player` from show_asset) keeps that. The skill that merely RENDERS that kind of media ("render-video" for a
+ * video track) names nothing: every plain video tab was restored as "Video" (8e2acba8), so such a tab is named
+ * after its file.
+ */
+export function renderTabLabel(manifest: Record<string, any>): string {
+  const skill = String(manifest?.renderSkill ?? "").split(",")[0].trim();
+  const kinds: string[] = Array.isArray(manifest?.tracks)
+    ? manifest.tracks.map((t: any) => String(t?.type ?? "").toLowerCase()).filter(Boolean) : [];
+  if (skill && kinds.some((k) => skill.toLowerCase() === `render-${k}`)) {
+    const location = typeof manifest.sourceLocation === "string" ? manifest.sourceLocation : "";
+    const name = location.split("?")[0].split("/").pop() ?? "";
+    let file = name;
+    try { file = decodeURIComponent(name); } catch { /* a malformed escape keeps the raw name */ }
+    if (file) return file;
+  }
+  const fromSkill = skill.replace(/^render[-_]/, "").split(/[-_\s]+/).filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  return fromSkill || (typeof manifest?.title === "string" ? manifest.title.trim() : "");
 }

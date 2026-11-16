@@ -243,10 +243,10 @@ def test_skill_promote_new_lineage_to_org_happy_path():
     assert new_item["SK"] == f"skill#{result.published_id}#v0000000001"
     assert new_item["GSI1PK"] == f"PUB#{result.published_id}"
     assert new_item["GSI1SK"] == "v0000000001"
-    assert new_item["status"] == "published"
+    assert "status" not in new_item and new_item["deprecated"] is False
     assert new_item["current"] is True
     assert new_item["scope"] == "org"
-    assert new_item["recordType"] == "published"
+    assert "recordType" not in new_item and new_item["version"] == 1
     assert new_item["promotedFrom"] == "d-42"
     assert new_item["publishPolicy"] == {
         "ownerIds": ["u-jane"],

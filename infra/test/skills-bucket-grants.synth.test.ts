@@ -139,6 +139,13 @@ for (const env of ["staging", "prod", "sandbox"] as EnvName[]) {
       for (const st of ffmpegGrants) {
         assert.ok([...actions(st)].every((a) => !isWrite(a)), `tools/ffmpeg is read-only for the sandbox: ${[...actions(st)]}`);
       }
+      // The session's own plan outputs, which the chainer tells a dependent step to read (READ only).
+      const planGrants = ss.filter((st) => resources(st).some((r) => r.endsWith("/plans/${aws:PrincipalTag/session_id}/*")));
+      assert.ok(planGrants.length > 0, "the scoped role can read its own session's plan outputs");
+      for (const st of planGrants) {
+        assert.ok([...actions(st)].every((a) => !isWrite(a)), `plans/<sid> is read-only for the sandbox: ${[...actions(st)]}`);
+      }
+      assert.ok(!ss.flatMap(resources).some((r) => /\/plans\/\*$/.test(r)), "never every session's plans");
       const writes = ss.filter((st) => actions(st).some(isWrite)).flatMap(resources);
       assert.ok(writes.length > 0 && writes.every((r) => r.includes("${aws:PrincipalTag/session_id}")),
         `every write is under the tagged session: ${writes}`);

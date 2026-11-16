@@ -52,7 +52,7 @@ import type { CardUrlPhase } from '../components/renderer/templates/momentText';
  */
 export type CardUrl =
   | { phase: 'minting' }
-  | { phase: 'ready'; url: string; obtainedAt: number }
+  | { phase: 'ready'; url: string; obtainedAt: number; poster?: string }
   | { phase: 'no_access' }
   | { phase: 'load_failed' };
 
@@ -107,9 +107,12 @@ function outcomeToMint(
 ): { minted: MintedUrl } | { fail: FailReason } {
   if (!outcome) return { fail: 'load_failed' };
   if (!outcome.ok) return { fail: outcome.kind === 'not_found' ? 'not_found' : 'load_failed' };
-  // Image cards prefer the rendition (a lighter still) and fall back to the source bytes.
+  // Image cards prefer the rendition (a lighter still) and fall back to the source bytes. A video card shows
+  // its rendition as the picture and keeps the source for Preview / Play all, so a gallery mounts no players
+  // (24 at once held every connection to S3, and Firefox's ~6 per host stalled the one you clicked).
   const picked = kind === 'image' ? outcome.entry.rendition ?? outcome.entry.source : outcome.entry.source;
-  return { minted: { url: picked.url, obtainedAt: now, expiresAt: picked.expiresAt } };
+  const poster = kind === 'video' ? outcome.entry.rendition?.url : undefined;
+  return { minted: { url: picked.url, obtainedAt: now, expiresAt: picked.expiresAt, ...(poster ? { poster } : {}) } };
 }
 
 /** Map a card's `assetUrl.ts` {@link UrlState} to the {@link CardUrl} the gallery renders. */
@@ -119,7 +122,8 @@ function toCardUrl(s: UrlState | undefined): CardUrl {
     case 'minting':
       return { phase: 'minting' };
     case 'ready':
-      return { phase: 'ready', url: s.minted.url, obtainedAt: s.minted.obtainedAt };
+      return { phase: 'ready', url: s.minted.url, obtainedAt: s.minted.obtainedAt,
+        ...(s.minted.poster ? { poster: s.minted.poster } : {}) };
     case 'failed':
       // `load_failed` is the one failure the Actor may retry past; `not_found` / `removed` mean the
       // asset is gone for this Actor and present uniformly as `no_access` (Req 3.28, 3.15).

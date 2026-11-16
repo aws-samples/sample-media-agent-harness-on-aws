@@ -330,8 +330,35 @@ describe("session ↔ project binding (D1, R2)", () => {
     expect(await sessions().read("sess-2", ACTOR)).toEqual({ activeProjectId: "pa" });
     expect(await sessions().read("sess-3", ACTOR)).toEqual({ activeProjectId: "pa" });
     const get = sendMock.mock.calls.map((c) => c[0] as any).find((c) => c.__type === "Get");
-    expect(get.input.ProjectionExpression).toBe("actorId, activeProjectId, webSearch, #tr[0].#role");
-    expect(get.input.ExpressionAttributeNames).toEqual({ "#tr": "transcript", "#role": "role" });
+    expect(get.input.ProjectionExpression).toBe("actorId, activeProjectId, webSearch, #tr[0].#role, #tr[1].#sum.#op.#pid, #tr[2].#role");
+    expect(get.input.ExpressionAttributeNames).toEqual({ "#tr": "transcript", "#role": "role", "#sum": "summary", "#op": "open_project", "#pid": "projectId" });
+  });
+
+  // "start lab 1" in a new chat: its only turn handed off (switch_project). That turn did nothing in its own
+  // project, so the chat may move to the project it handed off to — and only to that one.
+  const handoff = (to: string) => [
+    { id: "t-0-u", role: "user", content: "start lab 1", timestamp: 1, turnId: "t-0" },
+    { id: "t-0-a", role: "assistant", content: "Opening Lab 1.", timestamp: 2, turnId: "t-0",
+      summary: { type: "execution_summary", open_project: { projectId: to, projectName: "Lab 1" } } },
+  ];
+
+  it("lets a chat whose only turn handed off move to that project", async () => {
+    const personal = await ensurePersonalProject(ACTOR);
+    const lab = await ownedProject(ACTOR, "Lab 1");
+    seedSession("sess-1", { activeProjectId: personal.projectId, transcript: handoff(lab) });
+    expect(await sessions().read("sess-1", ACTOR)).toEqual({ activeProjectId: personal.projectId, hasTurns: true, handoffTo: lab });
+    expect((await gate(lab)).kind).toBe("proceed");
+    expect(ddbTable.get("sess-1")?.activeProjectId).toBe(lab);
+  });
+
+  it("still refuses any other project, and any project once a second turn exists", async () => {
+    const personal = await ensurePersonalProject(ACTOR);
+    const lab = await ownedProject(ACTOR, "Lab 1");
+    const other = await ownedProject(ACTOR, "Other");
+    seedSession("sess-1", { activeProjectId: personal.projectId, transcript: handoff(lab) });
+    expect(await gate(other)).toMatchObject({ kind: "reject", status: 409 });
+    seedSession("sess-1", { activeProjectId: personal.projectId, transcript: [...handoff(lab), ...TURN] });
+    expect(await gate(lab)).toMatchObject({ kind: "reject", status: 409 });
   });
 
   it("refuses a different project once the session has a turn: 409 session_project_fixed, no token, no write", async () => {

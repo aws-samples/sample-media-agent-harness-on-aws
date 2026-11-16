@@ -87,6 +87,23 @@ sit at the bottom where a focused node never reaches them.
    at the target length, or all N clips at the longer real length). Never silently pick invalid durations
    to make impossible math "work".
 
+5. **Recast (`minimax/h3-max/recast`, replace a person in a video): recast EACH SHOT on its own.** fal finds the
+   cuts in a clip itself and refuses a shot over 15 s, at RESULT time (`422` / `value_error (video_url)`), and it
+   can read two similar neighbouring shots as one — so a clip of several shots passes or fails on the footage.
+   One shot per job never depends on that, costs the same (billed per second), and runs in parallel:
+   - a shot over 15 s → equal pieces of 15 s or less (a 20 s shot → two 10 s pieces);
+   - a shot under the model's minimum (`get_model_schema`; 5 s for h3-max) → hold its last frame to the
+     minimum (`tpad=stop_mode=clone`), recast, and keep only the shot's own frames afterwards;
+   - a shot with both people in it → one job with both references; a shot with nobody to recast → keep it.
+   Keep each person's face the same across jobs with the same reference image (and one fixed `seed` per person).
+   **What a recast changes is set by the PROMPT, so say it.** "Keep the wardrobe, change only the identity"
+   swaps the face and keeps the clothes; "replace the whole person: face, hair, body and clothing, as in the
+   reference image" swaps all of it. Unless the user said which, ask once: face only, or the whole person.
+   **Put the scene back together in THIS chat** with `video-processing`'s `scripts/reassemble_shots.py`, never as
+   a plan step: it encodes every shot at the source's frame rate and size to the source's exact frame count and
+   puts the original dialogue back, in about two minutes. A plan step has 600 s for everything (c7d66001 and
+   8e2acba8 ran out of it twice).
+
 Full rationale for rule 1 is under "Do NOT call recommend_model or get_model_schema first";
 model ids and their input field names are in "Model shortlist". The rest of this file is
 retrieval and orchestration detail the main agent uses.
@@ -232,6 +249,7 @@ is unavailable or its output is unsuitable.
 | Image → video | `minimax/h3-max/image-to-video` (takes `image_url`) | `fal-ai/kling-video/v3/pro/image-to-video` (takes `start_image_url`) |
 | Music / SFX | `fal-ai/stable-audio-25/text-to-audio` | `fal-ai/ace-step/prompt-to-audio` |
 | Speech (TTS) | `fal-ai/minimax/speech-2.8-turbo` | `fal-ai/elevenlabs/tts/turbo-v2.5` |
+| Recast (replace a person in a video) | `minimax/h3-max/recast` — no `prompt_expansion_mode`; one shot per job, 15 s or less (rule 5) | — |
 | Upscale | `fal-ai/seedvr/upscale/image` | `fal-ai/topaz/upscale/video` (video) |
 | Background removal | `fal-ai/bria/background/remove` | — |
 | Combine clips — mux (video+audio), concatenate, crossfade, overlay/PiP | **ffmpeg in `code_interpreter`** — see the `video-processing` skill (authoritative for ALL combining). NOT a fal endpoint. | — |

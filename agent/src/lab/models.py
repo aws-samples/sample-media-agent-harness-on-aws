@@ -266,16 +266,16 @@ class AssetCommon:
       - ``deprecated``            → flag on a version, hides it from group / org
                                     listings unless include_deprecated is set.
 
-    ``status`` is retained as an explicit field for v1 read-path
-    compatibility but is now redundant with ``(version, deprecated)``.
-    Production write paths post-migration set status from those values via
-    :meth:`derive_status`.
+    ``status`` is DERIVED, never stored: ``__post_init__`` computes it from
+    ``(version, deprecated)``, so the two can't disagree. The only meaning a
+    passed ``status`` keeps is the legacy ``"deprecated"`` (rows written before
+    the ``deprecated`` flag), which sets the flag.
     """
 
     asset_id: str  # working-copy id and version-lineage id are the same
     category: Category
     name: str
-    status: Status  # legacy, derived from (version, deprecated) going forward
+    status: Status  # derived in __post_init__ from (version, deprecated)
     scope: Scope
     s3_prefix: str
     created_at: int  # epoch ms
@@ -296,6 +296,11 @@ class AssetCommon:
     promoted_from: Optional[str] = None  # originating asset_id (kept for v1 compat)
     last_published_as: Optional[tuple[str, int]] = None  # legacy
     cloned_from: Optional[tuple[str, int]] = None  # set when this row was clone-created
+
+    def __post_init__(self) -> None:
+        if self.status == "deprecated":
+            self.deprecated = True
+        self.status = self.derive_status(self.version, self.deprecated)
 
     @staticmethod
     def derive_status(version: Optional[int], deprecated: bool) -> "Status":
@@ -596,18 +601,14 @@ def to_index_item(
     written as null, matching the design's "absent means N/A" convention
     for DynamoDB.
     """
-    # ``recordType`` retains its v1 values (``draft``/``published``) so
-    # readers keyed on it stay green. The v2 routing decision (working
-    # copy vs. version) is made from ``version is None`` directly in
-    # code, not from this attribute.
-    record_type = "draft" if asset.version is None else "published"
-
+    # No "recordType" either: working copy vs. version IS ``version`` (absent = working copy), so a second
+    # attribute could only disagree with it. ``recordType`` is written by the outbox alone ("outbox"), which is
+    # what the projector's stream filter matches.
     item: dict[str, Any] = {
         "assetId": asset.asset_id,
         "category": asset.category,
         "name": asset.name,
-        # Legacy status is derived; written for backward compatibility.
-        "status": asset.status,
+        # No "status": it is derived from (version, deprecated) on read.
         "deprecated": bool(asset.deprecated),
         "scope": asset.scope,
         "s3Prefix": asset.s3_prefix,
@@ -617,7 +618,6 @@ def to_index_item(
         "scopeHistory": [
             _scope_history_entry_to_item(e) for e in asset.scope_history
         ],
-        "recordType": record_type,
     }
 
     if asset.version is not None:
@@ -724,29 +724,20 @@ def from_index_item(item: dict) -> AssetCommon:
     category = item["category"]
     cls = _CATEGORY_TO_CLASS[category]
 
-    # v2: derive deprecated from the explicit flag when present, else
-    # fall back to the legacy ``status == "deprecated"`` value.
-    deprecated_flag = item.get("deprecated")
-    if deprecated_flag is None:
-        deprecated_flag = item.get("status") == "deprecated"
-    version_val = int(item["version"]) if "version" in item else None
-    # Status: prefer the stored value (v1 rows pre-migration), else derive.
-    status_val = item.get("status") or AssetCommon.derive_status(
-        version_val, bool(deprecated_flag)
-    )
-
     common_kwargs: dict[str, Any] = {
         "asset_id": item["assetId"],
         "category": category,
         "name": item.get("name", ""),
         "description": item.get("description", ""),
-        "status": status_val,
+        # Legacy rows still carry a stored status; __post_init__ honours
+        # only its "deprecated" and derives the rest.
+        "status": item.get("status", "draft"),
         "scope": item.get("scope", "private"),
         "s3_prefix": item["s3Prefix"],
         "created_at": int(item.get("createdAt", 0)),
         "updated_at": int(item.get("updatedAt", 0)),
-        "version": version_val,
-        "deprecated": bool(deprecated_flag),
+        "version": int(item["version"]) if "version" in item else None,
+        "deprecated": bool(item.get("deprecated", False)),
         "publish_policy": _publish_policy_from_item(item.get("publishPolicy")),
         "scope_history": [
             _scope_history_entry_from_item(e)

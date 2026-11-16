@@ -2,7 +2,8 @@
  * MediaCard — the ONE card for every item the app shows: a file in chat, a file in a project, a moment, a saved
  * moment. Same frame, same two lines, same icons in the same order, everywhere:
  *
- *   picture (16:9)   — the thumbnail, a video's first frame, or a kind tile. Click = Preview. A video shows its
+ *   picture (16:9)   — the thumbnail (a video's is its hero still), or a kind tile. Never a <video>: a player per
+ *                      card starved the browser's connections. Click = Preview. A video shows its
  *                      duration bottom-right; a moment its range bottom-left and its length bottom-right.
  *   title · meta     — the name, then one line of facts ("Video · 1280×720 · 2.3 MB", or a status badge).
  *   description      — optional, one line (a moment's matched text).
@@ -39,9 +40,6 @@ export interface MediaCardProps {
   description?: React.ReactNode;
   /** An image URL for the picture. */
   thumb?: string | null;
-  /** A video URL whose first frame (or the frame at `posterAt` seconds) is the picture. */
-  videoSrc?: string | null;
-  posterAt?: number;
   /** Fit the picture whole (a frame strip, a vertical crop) instead of filling the box. */
   contain?: boolean;
   /**
@@ -129,19 +127,6 @@ export function MediaCard(p: MediaCardProps) {
       style={fitWidth ? fitWidthImgStyle : { ...fillStyle, objectFit: p.contain ? 'contain' : 'cover' }}
       onLoad={(e) => p.onMediaMeta?.({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
       onError={p.onMediaError} />;
-  } else if (p.videoSrc) {
-    // The frame at `posterAt` (#t) is the poster; nothing plays on the card. No crossOrigin: playback needs no CORS.
-    const at = Math.max(0.1, p.posterAt ?? 0.1);
-    picture = (
-      <video src={`${p.videoSrc.split('#')[0]}#t=${at}`} preload="metadata" muted playsInline tabIndex={-1} aria-hidden="true"
-        style={{ ...fillStyle, objectFit: p.contain ? 'contain' : 'cover' }}
-        onLoadedMetadata={(e) => {
-          const v = e.currentTarget;
-          p.onMediaMeta?.({ width: v.videoWidth || undefined, height: v.videoHeight || undefined,
-            duration: Number.isFinite(v.duration) ? v.duration : undefined });
-        }}
-        onError={p.onMediaError} />
-    );
   } else {
     picture = <span style={tileStyle} aria-hidden="true" data-testid="card-kind-icon"><AssetIcon kind={tileIcon(p.kind)} size={30} /></span>;
   }
@@ -161,7 +146,7 @@ export function MediaCard(p: MediaCardProps) {
         ...(p.selecting && p.onSelectedChange ? { cursor: 'pointer' } : null) }} onClick={pictureClick}
         data-card-media="">
         {picture}
-        {(p.kind === 'video' || p.videoSrc) && !p.overlay && <span style={playStyle} aria-hidden="true"><span style={playGlyphStyle} /></span>}
+        {p.kind === 'video' && !p.overlay && <span style={playStyle} aria-hidden="true"><span style={playGlyphStyle} /></span>}
         {p.overlay && <span style={overlayStyle}>{p.overlay}</span>}
         {p.badgeLeft && <span style={{ ...badgeStyle, left: 8, right: 'auto' }} data-testid="card-badge-left">{p.badgeLeft}</span>}
         {p.badge && <span style={badgeStyle} data-testid="card-badge">{p.badge}</span>}

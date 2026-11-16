@@ -1361,6 +1361,8 @@ export interface SessionRender {
   sourceKey?: string;
   /** For a composite: the solo render keys it absorbed, so the UI drops those solo tabs. */
   memberKeys?: string[];
+  /** What the view is about (shared/renderSubject); the panel groups views by it into one tab with versions. */
+  subjectIds?: string[];
 }
 
 /**

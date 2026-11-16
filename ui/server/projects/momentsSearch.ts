@@ -55,6 +55,7 @@ export interface MomentCard {
   citation: null;
   /** An image search: the indexes of the query images that found this moment ("match any"). */
   matched_by?: number[];
+  found_by?: string[];
 }
 
 /** One query image of the tab's search (design 2026-10-18 §2): an image asset, or a frame of a project video. */
@@ -330,6 +331,19 @@ export function matchedText(hit: Record<string, unknown>): [string, boolean] {
 
 interface RegistryRow { assetId?: unknown; kind?: unknown; displayName?: unknown; status?: unknown }
 
+/** Which of hybrid search's searches matched a hit (`ann:*` = by meaning, `fts:*` = by keyword); the agent's
+ * Moments (`render/moments.found_by`) apply the same rule. */
+export function foundBy(sources: unknown): { found_by?: string[] } {
+  // M2C sends `{"ann:vector": 0.0117, "fts:named_entities": ...}` (source → score); a list of names is accepted too.
+  const names = Array.isArray(sources) ? sources : sources && typeof sources === "object" ? Object.keys(sources) : [];
+  const s = names.filter((x): x is string => typeof x === "string").map((x) => x.toLowerCase());
+  const out = [
+    ...(s.some((x) => /^(ann|knn|vector)/.test(x)) ? ["meaning"] : []),
+    ...(s.some((x) => /^(fts|bm25|keyword|text)/.test(x)) ? ["keyword"] : []),
+  ];
+  return out.length ? { found_by: out } : {};
+}
+
 /** Cards for `hits` in rank order: kind filter, Hit shape, registry (removed / unknown dropped), one per key. */
 export function shapeMomentCards(
   pid: string, hits: unknown[], rows: Map<string, RegistryRow>, kinds: Kind[] | null,
@@ -364,6 +378,7 @@ export function shapeMomentCards(
       highlight_terms: highlightTerms(h.highlights),
       citation: null,
       ...(Array.isArray(h.matched_by) ? { matched_by: (h.matched_by as number[]).slice() } : {}),
+      ...foundBy(h.match_sources),
     });
   }
   return out;
@@ -569,8 +584,7 @@ export async function dispatchMomentsSearch(
       console.warn("[moments-search] document companion failed; plain results only:", (companion.reason as Error)?.message ?? companion.reason);
     }
     const companionHits = companion.status === "fulfilled" && typeof companion.value === "string" ? hitsOfResult(companion.value) : [];
-    const hits = mergeDocumentHits(hitsOfResult(text), companionHits);
-    const rows = await registryRows(store, ctx.pid, hits);
+    const hits = mergeDocumentHits(hitsOfResult(text), companionHits);    const rows = await registryRows(store, ctx.pid, hits);
     const items = shapeMomentCards(ctx.pid, hits, rows, parsed.kinds);
     sendJson(res, 200, { query: parsed.query, kinds: parsed.kinds, items, total: items.length });
   } catch (e) {

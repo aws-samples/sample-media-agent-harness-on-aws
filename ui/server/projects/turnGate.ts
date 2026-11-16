@@ -59,6 +59,11 @@ export interface TurnGateSessionRow {
    * turn carries. `lastActivityAt` is not one: every PATCH (a project pick included) bumps it.
    */
   hasTurns?: boolean;
+  /**
+   * The project the session's ONLY turn handed off to (`switch_project` / `create_project` on its first turn:
+   * the turn's summary `open_project`). Such a turn did nothing in its own project, so it does not fix it.
+   */
+  handoffTo?: string;
 }
 
 // ------------------------------------------------------------------------- session ↔ project binding (R2)
@@ -98,10 +103,13 @@ export function sessionProjectGoneBody(projectId: string, personal: { projectId:
 /**
  * A session's project is fixed by its first turn (D1): once the row records a turn AND a project, a request for
  * a different project is refused. A row with no turns yet (or a pre-Projects row with no project) may still
- * switch. `null` (absent, foreign, or unreadable row) never refuses: the caller fails open, as the gate does.
+ * switch, and so may one whose only turn handed off to the requested project ("start lab 1" moves that chat
+ * into the lab's project instead of leaving it behind). `null` (absent, foreign, or unreadable row) never
+ * refuses: the caller fails open, as the gate does.
  */
 export function projectChangeRefused(row: TurnGateSessionRow | null, requestedProjectId: string): boolean {
-  return !!row && row.hasTurns === true && !!row.activeProjectId && row.activeProjectId !== requestedProjectId;
+  return !!row && row.hasTurns === true && !!row.activeProjectId && row.activeProjectId !== requestedProjectId
+    && row.handoffTo !== requestedProjectId;
 }
 
 export interface TurnGatePersistFields {
@@ -137,15 +145,20 @@ export function dynamoSessionStore(ddb: DynamoDBDocumentClient, table: string): 
 
   return {
     async read(sessionId, actorSub) {
-      // Only the first transcript message's role: enough to tell "has a turn" without reading the whole tail.
+      // The first message's role ("has a turn"), the first reply's hand-off target and whether a second turn
+      // exists: enough to tell a lone hand-off turn without reading the whole tail.
       const item = await readOwned(
-        sessionId, actorSub, "actorId, activeProjectId, webSearch, #tr[0].#role", { "#tr": "transcript", "#role": "role" },
+        sessionId, actorSub, "actorId, activeProjectId, webSearch, #tr[0].#role, #tr[1].#sum.#op.#pid, #tr[2].#role",
+        { "#tr": "transcript", "#role": "role", "#sum": "summary", "#op": "open_project", "#pid": "projectId" },
       );
       if (!item) return null;
       const row: TurnGateSessionRow = {};
       if (typeof item.activeProjectId === "string" && item.activeProjectId) row.activeProjectId = item.activeProjectId;
       if (typeof item.webSearch === "boolean") row.webSearch = item.webSearch;
-      if (Array.isArray(item.transcript) && item.transcript.length > 0) row.hasTurns = true;
+      const tr = Array.isArray(item.transcript) ? (item.transcript as Array<Record<string, any>>) : [];
+      if (tr.length > 0) row.hasTurns = true;
+      const to = tr[1]?.summary?.open_project?.projectId;
+      if (tr.length === 2 && typeof to === "string" && to) row.handoffTo = to;
       return row;
     },
 

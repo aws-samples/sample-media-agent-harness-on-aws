@@ -26,7 +26,7 @@ import boto3
 from strands import Agent, AgentSkills, Skill, tool
 from strands.models import BedrockModel
 import runtime_config_bootstrap  # noqa: F401,E402  — hydrate env before first-party imports (V2 1536B cap)
-from model.factory import build_model
+from model.factory import build_model, with_fallbacks
 from model.defaults import model_for
 from botocore.config import Config as BotoConfig
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -1747,12 +1747,13 @@ def _correlate_sidecars(sidecar_urls: list[str],
             if not _proj.declaration_applies(data, decl):
                 continue
             name = spec.get("name") or "render-skill"
+            lane_set = str(decl.get("lane_set") or "").strip().lower()
             if "markers" in decl:
-                found["markers"].extend(_proj.project_markers(data, decl["markers"]))
+                found["markers"].extend(_proj.project_markers(data, decl["markers"], lane_set))
             if "segments" in decl:
-                found["segments"].extend(_proj.project_segments(data, decl["segments"]))
+                found["segments"].extend(_proj.project_segments(data, decl["segments"], lane_set))
             if "lanes" in decl:
-                found["segments"].extend(_proj.project_lanes(data, decl["lanes"]))
+                found["segments"].extend(_proj.project_lanes(data, decl["lanes"], lane_set))
             if "boxes" in decl:
                 found["annotations"].extend(_proj.project_boxes(data, decl["boxes"]))
             if "boxes_by" in decl:
@@ -2526,6 +2527,11 @@ def _build_video_annotations_manifest(
         if thumbnail:
             entity["thumbnail"] = thumbnail
         entities.append(entity)
+        # A RECOGNIZED person's name rides on each of its boxes too: the timeline's people lanes and the on-video
+        # box label read the annotation, not `entities[]`, and showed "Person 1" for Kevin Kilner (8e2acba8).
+        if entity.get("named") is True or entity.get("nameSource"):
+            for a in entity_annotations:
+                a.setdefault("name", entity["label"])
         annotations.extend(entity_annotations)
         appearances.extend({"entityId": entity_id, **a} for a in entity_appearances)
 
@@ -2536,7 +2542,13 @@ def _build_video_annotations_manifest(
     max_end = max((a["end"] for a in annotations), default=0.0)
     if duration is None or duration <= 0:
         duration = max_end
-    duration = round(max(duration, max_end, 0.001), 3)
+    else:
+        # A stated duration is the media's length. A sample lasts one frame interval, so the last one "ends" past
+        # the last frame (168.17 + 1 s on a 168.27 s clip, 8e2acba8): clamp the appearances, never extend the media.
+        for a in (*annotations, *appearances):
+            if isinstance(a, dict) and isinstance(a.get("end"), (int, float)) and a["end"] > duration:
+                a["end"] = round(duration, 3)
+    duration = round(max(duration, 0.001), 3)
 
     metadata: dict = {}
     for data in sidecars.values():
@@ -2870,7 +2882,7 @@ async def _populate_from_sidecars_llm(sidecars: dict, skill: Optional[dict],
             f"Sidecar artifacts:\n{json.dumps(sidecars)[:12000]}"
         )
         model = build_model(model_id=RENDER_MODEL_ID, boto_client_config=_boto_cfg)
-        agent = Agent(model=model, system_prompt=sys_prompt, tools=[])
+        agent = Agent(model=with_fallbacks(model), system_prompt=sys_prompt, tools=[])
 
         async def _run():
             chunks: list[str] = []
@@ -3816,7 +3828,7 @@ async def _render_agentic(payload, context):
     # Create the Strands Agent with render-specific configuration
     model = build_model(model_id=model_id, boto_client_config=_boto_cfg)
     render_agent = Agent(
-        model=model,
+        model=with_fallbacks(model),
         system_prompt=RENDER_SYSTEM_PROMPT,
         tools=RENDER_TOOLS,
         plugins=plugins,

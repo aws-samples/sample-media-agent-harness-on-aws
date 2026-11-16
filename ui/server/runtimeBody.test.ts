@@ -51,6 +51,10 @@ describe("decideApiSession", () => {
     expect(decideApiSession(UUID, ME, {})).toMatchObject({ kind: "reject", status: 403 });
     expect(decideApiSession(UUID, undefined, { actorId: ME })).toMatchObject({ kind: "reject", status: 403 });
   });
+  it("410s the caller's own DELETED chat: no turn continues it", () => {
+    expect(decideApiSession(UUID, ME, { actorId: ME, active: 0 })).toMatchObject({ kind: "reject", status: 410, code: "session_deleted" });
+    expect(decideApiSession(UUID, ME, { actorId: ME, active: 1 }).kind).toBe("ok");
+  });
   it("allows a client-minted id with no row yet (sessions are created lazily)", () => {
     expect(decideApiSession(UUID, ME, undefined)).toEqual({ kind: "ok", locked: false });
     expect(decideApiSession("session-1712345678901-abc123de", ME, undefined).kind).toBe("ok");

@@ -63,6 +63,9 @@ class MediaAction:
     source_uri: str          # canonical s3://bucket/key (cache identity + lineage)
     source_name: str
     asset_id: str = ""
+    # The source file's kind as the proxy read it off the asset ("video" | "audio"): an audio file is clipped
+    # (trimmed) as audio — a sample-exact cut, no video stream, no frame grid.
+    source_kind: str = "video"
     points_ms: list[int] = field(default_factory=list)
     ranges_ms: list[tuple[int, int]] = field(default_factory=list)
     box: Optional[tuple[float, float, float, float]] = None
@@ -90,7 +93,10 @@ def parse_action(raw: Any) -> MediaAction:
         raise MediaActionError("source.url (https) and source.s3uri are required")
     act = MediaAction(action_id=action_id, op=op, source_url=url, source_uri=uri,
                       source_name=str(src.get("name") or uri.rsplit("/", 1)[-1]),
-                      asset_id=str(src.get("asset_id") or ""))
+                      asset_id=str(src.get("asset_id") or ""),
+                      source_kind="audio" if src.get("kind") == "audio" else "video")
+    if act.source_kind == "audio" and op != "clip":
+        raise MediaActionError(f"{op} needs a video")
     if op == "frame":
         pts = raw.get("points")
         if not isinstance(pts, list) or not pts:
@@ -163,6 +169,12 @@ def plan_outputs(act: MediaAction, prefix: str) -> list[dict]:
         for i, p in enumerate(act.points_ms):
             jobs.append({"kind": "image", "at_ms": p,
                          "key": f"{prefix}{stem}_frame_{_tc(p)}_{p % 1000:03d}_{tag}{i}.jpg"})
+    elif act.op == "clip" and act.source_kind == "audio":
+        # A trim of an audio file: PCM (a .wav) is copied, sample-exact and lossless; anything else is AAC (.m4a).
+        ext = ".wav" if act.source_uri.lower().endswith((".wav", ".wave")) else ".m4a"
+        for i, (a, b) in enumerate(act.ranges_ms):
+            jobs.append({"kind": "audio", "in_ms": a, "out_ms": b,
+                         "key": f"{prefix}{stem}_trim_{_tc(a)}-{_tc(b)}_{tag}{i}{ext}"})
     elif act.op == "clip":
         for i, (a, b) in enumerate(act.ranges_ms):
             jobs.append({"kind": "video", "in_ms": a, "out_ms": b, "fast": bool(act.fast),
@@ -217,13 +229,54 @@ def snap_clip(in_ms: int, out_ms: int, fps: Optional[float]) -> tuple:
     return in_frame / fps, (out_frame - in_frame) / fps, in_frame, out_frame
 
 
+def audio_clip_cmd(ffmpeg: str, src: str, dst: str, in_t: float, dur: float, pcm_codec: Optional[str] = None) -> list:
+    """ffmpeg argv to trim an audio file: input seek + ``-t``, decoded, so it is exact to the SAMPLE (a stream copy
+    of PCM cuts at packet edges — 84 ms long on a 48 kHz chunk). A ``.wav`` is re-written in the source's own PCM
+    format (lossless); anything else is AAC."""
+    if dst.lower().endswith(".wav"):
+        codec = ["-c:a", pcm_codec if (pcm_codec or "").startswith("pcm_") else "pcm_s16le"]
+    else:
+        codec = ["-c:a", "aac", "-b:a", "192k"]
+    return [ffmpeg, "-y", "-ss", _fmt_seconds(in_t), "-i", src, "-t", _fmt_seconds(dur), "-vn", *codec, dst]
+
+
 def frame_cmd(ffmpeg: str, src: str, dst: str, at_t: float) -> list:
     """ffmpeg argv to extract exactly one frame at ``at_t`` (accurate input seek + ``-frames:v 1``)."""
     return [ffmpeg, "-y", "-ss", _fmt_seconds(at_t), "-i", src, "-frames:v", "1", "-q:v", "2", dst]
 
 
+def copy_start(keyframes: list, in_t: float, fps: Optional[float]) -> Optional[float]:
+    """The keyframe a clip starting at ``in_t`` can be stream-copied from, else None.
+
+    A stream copy can only start on a keyframe; when ``in_t`` IS one (within half a frame — a shot boundary
+    usually is, the encoder puts a keyframe on a scene cut), the copy starts on exactly that frame and is as
+    exact as a re-encode at a fraction of the cost. Returns that keyframe's own timestamp: the copy must seek
+    to it exactly (a hair later and the edit list hides it, a hair earlier and it copies the previous GOP)."""
+    tol = 0.5 / fps if fps and fps > 0 else 0.0005
+    best = None
+    for k in keyframes or []:
+        try:
+            k = float(k)
+        except (TypeError, ValueError):
+            continue
+        if abs(k - in_t) <= tol and (best is None or abs(k - in_t) < abs(best - in_t)):
+            best = k
+    return best
+
+
+def rate_cap_kbps(source_video_bps: Optional[float]) -> Optional[int]:
+    """The re-encode's bitrate ceiling: 1.5x the source's video bitrate, so a clip never comes out several times
+    the size of the file it was cut from (CRF 20 alone made a 418 kbps source's clips 2.3 Mbps — 5.6x the bytes
+    to encode and upload). None when the source's rate is unknown: CRF alone, as before."""
+    try:
+        bps = float(source_video_bps or 0)
+    except (TypeError, ValueError):
+        return None
+    return int(bps * 1.5 / 1000) + 1 if bps > 0 else None
+
+
 def clip_cmd(ffmpeg: str, src: str, dst: str, in_t: float, dur: float, has_audio: bool,
-             fast: bool = False) -> list:
+             fast: bool = False, max_kbps: Optional[int] = None) -> list:
     """ffmpeg argv for a clip.
 
     DEFAULT: a frame-accurate accurate-seek RE-ENCODE — ``-ss`` before ``-i`` then ``-t``, with the
@@ -238,13 +291,18 @@ def clip_cmd(ffmpeg: str, src: str, dst: str, in_t: float, dur: float, has_audio
                 "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", dst]
     cmd = [ffmpeg, "-y", "-ss", ss, "-i", src, "-t", t,
            "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p", "-threads", "0"]
+    if max_kbps:
+        cmd += ["-maxrate", f"{max_kbps}k", "-bufsize", f"{2 * max_kbps}k"]
     cmd += ["-c:a", "aac"] if has_audio else ["-an"]
     cmd += ["-movflags", "+faststart", dst]
     return cmd
 
 
 # The helpers injected into the sandbox program (single definition, shared with the unit tests).
-_SANDBOX_HELPERS = (_fmt_seconds, snap_frame, snap_clip, frame_cmd, clip_cmd)
+from projects.keyframes import file_keyframes, keyframes_from_moov, read_keyframes  # noqa: E402  (one reader)
+
+_SANDBOX_HELPERS = (_fmt_seconds, snap_frame, snap_clip, frame_cmd, audio_clip_cmd, copy_start, rate_cap_kbps, clip_cmd,
+                    keyframes_from_moov, read_keyframes, file_keyframes)
 
 
 # --------------------------------------------------------------------------------------------- sandbox program
@@ -285,6 +343,38 @@ def _copyable(ffprobe, path):
     a = [x.get("codec_name") for x in streams if x.get("codec_type") == "audio"]
     return bool(v) and v[0] in ("h264", "hevc") and (not a or a[0] in ("aac", "mp3"))
 
+def _first_frame(ffmpeg, path, ignore_editlist):
+    args = [ffmpeg, "-v", "error"] + (["-ignore_editlist", "1"] if ignore_editlist else []) + [
+        "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        return None
+    return hashlib.sha256(r.stdout).hexdigest() if r.returncode == 0 and r.stdout else None
+
+def _copy_is_clean(ffmpeg, path):
+    """A stream copy is exact only if it starts on its first shown frame: true for a keyframe every later frame is
+    decodable from (an IDR), not for an open-GOP keyframe, whose copy carries frames from before the cut that only an
+    edit list hides — and not every player honours one. Same first frame with and without the edit list = clean."""
+    a = _first_frame(ffmpeg, path, False)
+    return a is not None and a == _first_frame(ffmpeg, path, True)
+
+def _audio_codec(ffprobe, path):
+    try:
+        r = subprocess.run([ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+                            "-of", "csv=p=0", path], capture_output=True, text=True, timeout=30)
+        return (r.stdout or "").strip().split(",")[0] or None
+    except Exception:  # noqa: BLE001
+        return None
+
+def _video_bps(ffprobe, path):
+    try:
+        r = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=bit_rate",
+                            "-of", "csv=p=0", path], capture_output=True, text=True, timeout=30)
+        return float((r.stdout or "0").strip().split(",")[0] or 0)
+    except Exception:  # noqa: BLE001 - unknown: no cap
+        return 0.0
+
 _out = {"error": "media action did not run"}
 try:
     import boto3
@@ -293,22 +383,51 @@ try:
     _local, _hit = _cached_source()
     _fps = probe_fps(_ffprobe, _local)          # frames/sec on the real frame grid, or None (unknown)
     _audio = probe_has_audio(_ffprobe, _local)
+    _can_copy = None   # probed once, only if a clip needs it
+    _kfs = None        # the source's keyframes from its index (projects.keyframes), read once if a clip needs them
+    _cap = None
     _outs = []
     with tempfile.TemporaryDirectory() as _td:
         for _i, _j in enumerate(_JOBS):
-            _dst = os.path.join(_td, "out%d%s" % (_i, ".jpg" if _j["kind"] == "image" else ".mp4"))
-            if _j["kind"] == "image":
+            _dst = os.path.join(_td, "out%d%s" % (_i, os.path.splitext(_j["key"])[1] or ".mp4"))
+            _r = None
+            if _j["kind"] == "audio":
+                # A trim of an audio file: exact to the sample (input seek + -t), no frame grid, no video.
+                _cmd = audio_clip_cmd(_ffmpeg, _local, _dst, _j["in_ms"] / 1000.0, (_j["out_ms"] - _j["in_ms"]) / 1000.0,
+                                      _audio_codec(_ffprobe, _local))
+                _ct = "audio/wav" if _dst.lower().endswith(".wav") else "audio/mp4"
+            elif _j["kind"] == "image":
                 # Snap the requested instant to the nearest real frame and seek there exactly.
                 _at_t, _at_frame = snap_frame(_j["at_ms"], _fps)
                 _cmd = frame_cmd(_ffmpeg, _local, _dst, _at_t)
                 _ct = "image/jpeg"
             elif not _j.get("box"):
-                # A plain clip: snap in/out to the frame grid and RE-ENCODE for frame accuracy by
-                # default. The opt-in `fast` flag restores the keyframe-granular stream copy, used
-                # only when the source codecs are actually copyable into MP4.
+                # A plain clip, snapped to the frame grid. A STREAM COPY when it is exact — the clip starts on a
+                # keyframe (a shot boundary usually does) — else a frame-accurate RE-ENCODE, capped at the
+                # source's own bitrate. The opt-in `fast` flag still forces the keyframe-granular copy.
                 _in_t, _dur, _inf, _outf = snap_clip(_j["in_ms"], _j["out_ms"], _fps)
-                _fast = bool(_j.get("fast")) and _copyable(_ffprobe, _local)
-                _cmd = clip_cmd(_ffmpeg, _local, _dst, _in_t, _dur, _audio, _fast)
+                if _can_copy is None:
+                    _can_copy = _copyable(_ffprobe, _local)
+                if _can_copy and _kfs is None:
+                    try:
+                        _kfs = file_keyframes(_local) or []
+                    except Exception:  # noqa: BLE001 - an index we cannot read: re-encode, the safe path
+                        _kfs = []
+                _kf = copy_start(_kfs, _in_t, _fps) if _can_copy else None
+                _cmd = None
+                if _kf is not None:
+                    _r = subprocess.run(clip_cmd(_ffmpeg, _local, _dst, _kf, _dur, _audio, True),
+                                        capture_output=True, text=True, timeout=_TIMEOUT)
+                    if _r.returncode != 0 or not os.path.isfile(_dst) or not _copy_is_clean(_ffmpeg, _dst):
+                        _kf = None  # not a clean start (an open-GOP keyframe): re-encode below
+                if _kf is not None:
+                    pass  # the copy above is the clip
+                elif bool(_j.get("fast")) and _can_copy:
+                    _cmd = clip_cmd(_ffmpeg, _local, _dst, _in_t, _dur, _audio, True)
+                else:
+                    if _cap is None:
+                        _cap = rate_cap_kbps(_video_bps(_ffprobe, _local)) or 0
+                    _cmd = clip_cmd(_ffmpeg, _local, _dst, _in_t, _dur, _audio, False, _cap or None)
                 _ct = "video/mp4"
             else:
                 # Crop: always re-encode (filtered pass), with the snapped trim when a range is given.
@@ -330,7 +449,8 @@ try:
                 _cmd += ["-c:a", "aac"] if _audio else ["-an"]
                 _cmd += ["-movflags", "+faststart", _dst]
                 _ct = "video/mp4"
-            _r = subprocess.run(_cmd, capture_output=True, text=True, timeout=_TIMEOUT)
+            if _cmd is not None:
+                _r = subprocess.run(_cmd, capture_output=True, text=True, timeout=_TIMEOUT)
             if _r.returncode != 0 or not os.path.isfile(_dst):
                 raise RuntimeError("ffmpeg failed: " + (_r.stderr or "")[-600:].strip())
             with open(_dst, "rb") as _fh:

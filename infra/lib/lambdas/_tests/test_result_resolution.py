@@ -950,6 +950,17 @@ def test_importer_copies_proxy_object_to_cloudfront():
     assert c["Key"] == "artifacts/imports/job1/node1/transcoded.mp4"
     assert c["CopySource"] == {"Bucket": "m2c-proxy", "Key": "micro-workflow/x/transcoded.mp4"}
     assert c.get("ContentType") == "video/mp4"   # inferred + REPLACE'd
+    # The copy says where it came from, so a tool of the producer can be handed the original (agent origin_refs).
+    assert c["Metadata"] == {"origin": "s3://m2c-proxy/micro-workflow/x/transcoded.mp4"}
+    assert c["MetadataDirective"] == "REPLACE"
+
+
+def test_importer_records_the_origin_even_for_an_unknown_type():
+    s3 = _FakeS3Copy()
+    rr.make_s3_importer(s3, "skills-bkt", "d123.cloudfront.net")("m2c-proxy", "micro-workflow/x/embeddings.npz", "j/embeddings.npz")
+    c = s3.copies[0]
+    assert c["Metadata"] == {"origin": "s3://m2c-proxy/micro-workflow/x/embeddings.npz"}
+    assert c["ContentType"] == "application/octet-stream"
 
 
 def test_importer_skips_copy_when_already_in_our_bucket():

@@ -157,3 +157,17 @@ describe("schema", () => {
     expect(() => countersKey("")).toThrow();
   });
 });
+
+describe("DynamoTransactStore.queryIndex projection", () => {
+  it("sends a ProjectionExpression over name placeholders, and none without a projection", async () => {
+    const client = fakeSender(() => ({ Items: [] }));
+    const store = new DynamoTransactStore({ tableName: T, client });
+    await store.queryIndex({ indexName: "assetsByRegistered", partitionAttr: "assetListPk", partitionValue: "PROJECT#x",
+      projection: ["status", "role", "folder"] });
+    const input = client.inputs[0] as any;
+    const names = input.ExpressionAttributeNames as Record<string, string>;
+    expect(input.ProjectionExpression.split(", ").map((id: string) => names[id])).toEqual(["status", "role", "folder"]);
+    await store.queryIndex({ indexName: "assetsByRegistered", partitionAttr: "assetListPk", partitionValue: "PROJECT#x" });
+    expect((client.inputs[1] as any).ProjectionExpression).toBeUndefined();
+  });
+});

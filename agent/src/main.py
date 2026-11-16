@@ -99,6 +99,9 @@ from tools.view_images import view_images
 from tools.crop_video import crop_video
 from tools.media_quick import clip_video, extract_frames
 from tools.media_gallery import show_media_gallery
+
+#: Built-ins a `turn_purpose: results_summary` turn does not get: everything that makes media or opens a tab.
+RESULTS_SUMMARY_WITHHELD_TOOLS = frozenset({"show_media_gallery", "clip_video", "extract_frames", "crop_video"})
 from jobs.registry import JobRegistry
 from orchestration.step_labels import TOOL_LABELS, coerce_input as _safe_input, has_input_payload, label_for_tool_done, label_for_tool_use
 from orchestration import dispatch_tool
@@ -1891,8 +1894,19 @@ def _stream_error_text(err: object) -> str:
     return f"\n\n**This turn failed:** {detail}\n"
 
 
-def _step_event(status: str, label: str) -> str:
-    return json.dumps({"type": "step", "status": status, "label": label})
+def _step_event(status: str, label: str, node_id: str = "") -> str:
+    return json.dumps({"type": "step", "status": status, "label": label, **({"node_id": node_id} if node_id else {})})
+
+
+# A tool call is one step, closed in place by this id: its running line, its live ticks and its done line.
+def _tool_node_id(tool_use_id: str) -> str:
+    return f"tool-{tool_use_id}"
+
+
+# A tool still running after this long re-states its step every TOOL_TICK_S with the elapsed time, so a long
+# job or sub-agent call reads "Running shot segmentation · 45s" instead of one frozen line.
+TOOL_TICK_AFTER_S = 10
+TOOL_TICK_S = 10
 
 
 def _message_stop_reason(event) -> str:
@@ -2559,6 +2573,12 @@ async def invoke(payload, context):
     # this actor's owned Skills are added. This prevents private Skill content
     # or package files from leaking through the process-global plugin.
     added_bi = [t for n, t in _all_builtin_tools.items() if n in _added_builtins]
+    # A results-summary turn (a finished job's notification) reads and summarises: it never makes media or opens a
+    # tab, since the results are already shown. Asking in the prompt was not enough (IND403: the agent opened a
+    # second shot-segmentation gallery). A client can only NARROW its own turn this way, never widen it.
+    if str(payload.get("turn_purpose") or "") == "results_summary":
+        added_bi = [t for n, t in _all_builtin_tools.items()
+                    if n in _added_builtins and n not in RESULTS_SUMMARY_WITHHELD_TOOLS]
     # The WebSearch tool is bound only on a turn whose chat has web search on (web_search.filter_tools).
     gw_tools = _web_search.filter_tools(mcp_manager.get_all_added_tools())
     # ...and is bound DIRECTLY on such a turn, so "search with WebSearch" is a tool the orchestrator really has.
@@ -2626,12 +2646,15 @@ async def invoke(payload, context):
             return _compose_turn_context(getattr(_sm_for_ctx, "turn_context", "") or "", _turn_prompt)
 
         _request_plugins.append(_ContextInjector(_render_turn_context, name="harness:turn-context"))
+    from model import retry as _model_retry  # a transient model error retries the call, not the turn
+    from model.factory import with_fallbacks as _with_fallbacks
     request_agent_kwargs = {
-        "model": request_model,
+        "model": _with_fallbacks(request_model),  # its configured backups take over when it is unavailable
         "system_prompt": _request_prompt,
         "tools": added_bi + gw_tools + _search_tools,
         "plugins": _request_plugins,
         "hooks": [request_hook_provider],
+        "retry_strategy": _model_retry.retry_strategy(),
     }
     if session_manager is not None:
         request_agent_kwargs["session_manager"] = session_manager
@@ -2756,12 +2779,20 @@ async def invoke(payload, context):
         """Poll the ProgressChannel every second and push events into the merge queue.
         Also emits a keepalive heartbeat every 30s if nothing else is flowing."""
         last_yield = _time.time()
+        last_tick = _time.time()
         while True:
             await asyncio.sleep(1)
             drained = progress_channel.drain()
             for pe in drained:
                 await merge_q.put(("progress", pe))
                 last_yield = _time.time()
+            now = _time.time()
+            if now - last_tick >= TOOL_TICK_S:
+                last_tick = now
+                for tid, entry in list(active_tools.items()):
+                    if now - entry["started_at"] >= TOOL_TICK_AFTER_S:
+                        await merge_q.put(("tool_tick", tid))
+                        last_yield = now
             # Keepalive: if nothing has been yielded for 30s, send a heartbeat
             if _time.time() - last_yield > 30:
                 await merge_q.put(("keepalive", None))
@@ -2796,6 +2827,14 @@ async def invoke(payload, context):
 
             if tag == "keepalive":
                 yield _step_event("running", "Working...")
+                continue
+
+            if tag == "tool_tick":
+                entry = active_tools.get(value)
+                if entry is not None:  # closed meanwhile: its done line already replaced the step
+                    elapsed = int(_time.time() - entry["started_at"])
+                    yield _step_event("running", f"{label_for_tool_use(entry['info'])} · {elapsed}s",
+                                      _tool_node_id(value))
                 continue
 
             if tag == "error":
@@ -2846,7 +2885,7 @@ async def invoke(payload, context):
                             _closed = _turn_start.close()
                             if _closed:
                                 yield _closed
-                            yield _step_event("running", label_for_tool_use(tool_info))
+                            yield _step_event("running", label_for_tool_use(tool_info), _tool_node_id(tool_use_id))
                         else:
                             # Subsequent current_tool_use event for a tool
                             # we're already tracking — refresh the cached
@@ -2879,6 +2918,7 @@ async def invoke(payload, context):
                         "status": status,
                         "label": label,
                         "duration_ms": int(duration * 1000),
+                        "node_id": _tool_node_id(tool_use_id),
                     })
 
             if "data" in event and isinstance(event["data"], str):
@@ -2939,6 +2979,7 @@ async def invoke(payload, context):
             "status": status,
             "label": label,
             "duration_ms": int(duration * 1000),
+            "node_id": _tool_node_id(tool_use_id),
         })
     active_tools.clear()
 

@@ -66,6 +66,7 @@ import {
   dismissNotice,
   markSessionPersisted,
   markSessionProjectFixed,
+  moveHandedOffChat,
   projectGoneNewChatMessage,
   reconcileWithProjectList,
   resetToPersonal,
@@ -149,7 +150,10 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
  * Enqueues a message into the queue, capped at MAX_QUEUE_SIZE.
  * Returns the new queue. If the queue is already at capacity, the message is dropped.
  */
-export interface QueuedMessage { prompt: string; displayText?: string }
+export interface QueuedMessage { prompt: string; displayText?: string; turnPurpose?: TurnPurpose }
+/** A turn the harness sends for a purpose that narrows what the agent may do (`results_summary`: read and
+ *  summarise a finished job — no gallery, clip or frame, which opened a duplicate tab of results already shown). */
+export type TurnPurpose = 'results_summary';
 
 export function enqueueMessage(queue: QueuedMessage[], message: QueuedMessage): QueuedMessage[] {
   if (queue.length >= MAX_QUEUE_SIZE) {
@@ -678,13 +682,17 @@ export default function ChatCanvas({
     return () => window.removeEventListener('session-cache-external-update', handler as EventListener);
   }, [sessionId, isStreaming]);
 
-  // Auto-scroll to bottom when new messages arrive or live text updates
+  // Follow the conversation, but never past the start of the reply: scroll to the bottom unless that
+  // would push the latest user message off the top, so a long reply is read from its first line.
+  const lastUserId = useMemo(() => [...messages].reverse().find((m) => m.role === 'user')?.id, [messages]);
   useEffect(() => {
     const container = scrollContainerRef.current;
-    if (container) {
-      container.scrollTop = container.scrollHeight;
-    }
-  }, [messages.length, liveText]);
+    if (!container) return;
+    const bottom = container.scrollHeight - container.clientHeight;
+    const el = lastUserId && container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(lastUserId)}"]`);
+    const anchor = el ? el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 8 : bottom;
+    container.scrollTop = Math.min(bottom, anchor);
+  }, [lastUserId, messages.length, liveText]);
 
   // Render the full (MAX_MESSAGES-capped) transcript directly. A previous
   // fixed-height virtual window (80px/message) computed scroll spacers from an
@@ -1028,7 +1036,7 @@ export default function ChatCanvas({
     } catch { /* quota exceeded — drop */ return null; }
   }, []);
 
-  const processMessage = useCallback(async (message: string, attachments?: readonly ReadyAttachment[] | null, displayText?: string, opts?: { findSimilar?: FindSimilarPayload }) => {
+  const processMessage = useCallback(async (message: string, attachments?: readonly ReadyAttachment[] | null, displayText?: string, opts?: { findSimilar?: FindSimilarPayload; turnPurpose?: TurnPurpose }) => {
     // A card's Find_Similar reference (Req 3.23), forwarded verbatim as the turn body's `find_similar_ref`.
     // The proxy turn gate resolves it; the client only names the asset. Present only for a Find_Similar turn.
     const findSimilarRef = opts?.findSimilar;
@@ -1083,6 +1091,7 @@ export default function ChatCanvas({
     setMessages(prev => { capturedBase = prev; return prev; });
 
     let persistedForTurn = sessionCreatedRef.current;
+    const firstTurn = !persistedForTurn;
     if (!persistedForTurn) {
       // The CLEAN text names the chat: the agent prompt can carry a source url (a timeline action handed to the
       // agent was titled "Clip the video. [source: https://mediawo…").
@@ -1238,7 +1247,8 @@ export default function ChatCanvas({
           ...(attachmentRefs.length > 0 ? { attachment: attachmentRefs[0], attachments: attachmentRefs } : {}),
           ...(turnProject?.activeProjectId ? { active_project_id: turnProject.activeProjectId } : {}),
           ...(turnProject ? { web_search: turnProject.webSearch } : {}),
-          ...(findSimilarRef ? { find_similar_ref: findSimilarRef } : {}) },
+          ...(findSimilarRef ? { find_similar_ref: findSimilarRef } : {}),
+          ...(opts?.turnPurpose ? { turn_purpose: opts.turnPurpose } : {}) },
         callback, controller.signal);
       abortControllersRef.current.delete(capturedSessionId);
       // Turn finished — clear any lingering pending state (covers the case
@@ -1297,7 +1307,15 @@ export default function ChatCanvas({
       const openProject = parseOpenProject((receivedSummary as ExecutionSummary | null)?.open_project);
       if (openProject && currentSessionRef.current === capturedSessionId) {
         void refreshProjectsList(); // a project create_project just made is listed at once
-        requestNewChatInProject(openProject.projectId, openProject.projectName, openProject.prompt);
+        // A chat whose FIRST turn only handed off ("start lab 1") moves there and carries on, so no empty chat is
+        // left behind; a chat that already did work stays in its project and the work opens a new chat.
+        const { projectId: pid, projectName: pname, prompt } = openProject;
+        const openNew = () => requestNewChatInProject(pid, pname, prompt);
+        if (!firstTurn) openNew();
+        else void moveHandedOffChat(capturedSessionId, pid, pname).then((r) => {
+          if (!r.ok) return openNew();
+          if (prompt) window.dispatchEvent(new CustomEvent('chat:send', { detail: { prompt, sessionId: capturedSessionId } }));
+        });
       }
     } catch (err) {
       onRenderPending?.(false, capturedSessionId);
@@ -1334,6 +1352,19 @@ export default function ChatCanvas({
           requestNewChatInProject(goneTo.id, goneTo.name, undefined, {
             ...(displayText === undefined ? { draft: message } : {}),
             notice: projectGoneNewChatMessage(turnProject?.activeProjectName),
+          });
+        }
+        return;
+      }
+      // `410 session_deleted`: this chat was deleted (in another tab). A deleted chat is gone everywhere, so open a
+      // new chat in the same project with the message in its composer.
+      if (httpErr?.status === 410 && (httpErr.body as { error?: { code?: unknown } } | null)?.error?.code === 'session_deleted'
+          && turnProject?.activeProjectId && turnProject.activeProjectName) {
+        if (currentSessionRef.current === capturedSessionId) {
+          setMessages(prev => prev.filter(m => m.id !== userMsgId));
+          requestNewChatInProject(turnProject.activeProjectId, turnProject.activeProjectName, undefined, {
+            ...(displayText === undefined ? { draft: message } : {}),
+            notice: 'That chat was deleted, so this is a new one.',
           });
         }
         return;
@@ -1403,7 +1434,7 @@ export default function ChatCanvas({
     if (!isStreaming && !inFlightSessionsRef.current.has(sessionId) && queue && queue.length > 0) {
       const [nextMessage, ...rest] = queue;
       setMessageQueues(prev => ({ ...prev, [sessionId]: rest }));
-      processMessage(nextMessage.prompt, null, nextMessage.displayText);
+      processMessage(nextMessage.prompt, null, nextMessage.displayText, nextMessage.turnPurpose ? { turnPurpose: nextMessage.turnPurpose } : undefined);
     }
   }, [isStreaming, messageQueues, processMessage, sessionId]);
 
@@ -1416,6 +1447,7 @@ export default function ChatCanvas({
       const ce = e as CustomEvent<{ prompt?: string; sessionId?: string; displayText?: string }>;
       const p = ce.detail?.prompt;
       if (!p) return;
+      const purpose = (ce.detail as { turnPurpose?: TurnPurpose } | undefined)?.turnPurpose;
       // Only handle an auto-render aimed at the session we're actually showing.
       // A background job completion (or a session-switch race between the
       // dispatch-time active-session check and this handler) could otherwise
@@ -1431,9 +1463,9 @@ export default function ChatCanvas({
       if (locked) return;
       window.dispatchEvent(new CustomEvent('chat:auto-render-ack'));
       if (isStreaming || inFlightSessionsRef.current.has(sessionId)) {
-        setMessageQueues(prev => ({ ...prev, [sessionId]: enqueueMessage(prev[sessionId] ?? [], { prompt: p, displayText: ce.detail?.displayText }) }));
+        setMessageQueues(prev => ({ ...prev, [sessionId]: enqueueMessage(prev[sessionId] ?? [], { prompt: p, displayText: ce.detail?.displayText, ...(purpose ? { turnPurpose: purpose } : {}) }) }));
       } else {
-        processMessage(p, null, ce.detail?.displayText);
+        processMessage(p, null, ce.detail?.displayText, purpose ? { turnPurpose: purpose } : undefined);
       }
     };
     window.addEventListener('chat:auto-render', handler as EventListener);
@@ -1448,12 +1480,13 @@ export default function ChatCanvas({
   // session; queued if a turn is already in flight.
   useEffect(() => {
     const handler = (e: Event) => {
-      const ce = e as CustomEvent<{ prompt?: string; sessionId?: string; displayText?: string; findSimilar?: FindSimilarPayload }>;
+      const ce = e as CustomEvent<{ prompt?: string; sessionId?: string; displayText?: string; findSimilar?: FindSimilarPayload; turnPurpose?: TurnPurpose }>;
       const p = ce.detail?.prompt;
       if (!p) return;
       const targetSid = ce.detail?.sessionId;
       if (targetSid && targetSid !== sessionId) return;
       if (locked) return;  // frozen session: block the Jobs-panel Results fetch turn (server 423s it too)
+      const purpose = ce.detail?.turnPurpose;
       const findSimilar = ce.detail?.findSimilar;
       if (findSimilar) {
         // A Find_Similar send carries per-turn context (`find_similar_ref`) that cannot survive queuing:
@@ -1468,9 +1501,9 @@ export default function ChatCanvas({
         return;
       }
       if (isStreaming || inFlightSessionsRef.current.has(sessionId)) {
-        setMessageQueues(prev => ({ ...prev, [sessionId]: enqueueMessage(prev[sessionId] ?? [], { prompt: p, displayText: ce.detail?.displayText }) }));
+        setMessageQueues(prev => ({ ...prev, [sessionId]: enqueueMessage(prev[sessionId] ?? [], { prompt: p, displayText: ce.detail?.displayText, ...(purpose ? { turnPurpose: purpose } : {}) }) }));
       } else {
-        processMessage(p, null, ce.detail?.displayText);
+        processMessage(p, null, ce.detail?.displayText, purpose ? { turnPurpose: purpose } : undefined);
       }
     };
     window.addEventListener('chat:send', handler as EventListener);
@@ -1899,7 +1932,8 @@ function MessageBubble({
   const jobRefs = extractJobReferences(message);
 
   return (
-    <div style={assistantMessageRowStyle} data-message-id={message.id}>
+    <div style={assistantMessageRowStyle} data-message-id={message.id} data-role="assistant"
+      data-turn-failed={isFailedTurn(message) ? 'true' : undefined}>
       <div style={assistantBubbleStyle}>
         {/* Step progress indicators (collapsible) */}
         {message.steps && message.steps.length > 0 && (
@@ -1978,6 +2012,13 @@ export function settleSteps(steps: StepEvent[]): StepEvent[] {
   return steps
     .filter(s => s.status !== 'running' || !finished.has(base(s.label)))
     .map(s => (s.status === 'running' ? { ...s, status: 'pending' as StepEvent['status'] } : s));
+}
+
+/** A turn the agent ended with an error: its one error text ("**This turn failed:** …", main.py `_stream_error_text`)
+ *  or a failed "Turn failed" step. The guided tour reads it (`data-turn-failed`) so a failed turn never advances it. */
+export function isFailedTurn(message: { content?: string; steps?: { status: string; label?: string }[] }): boolean {
+  if (/\*\*This turn failed:\*\*/.test(message.content || '')) return true;
+  return (message.steps || []).some((st) => (st.status === 'failed' || st.status === ('error' as string)) && /turn failed/i.test(st.label || ''));
 }
 
 function StepsIndicator({ steps: rawSteps, settled = false }: { steps: StepEvent[]; settled?: boolean }) {

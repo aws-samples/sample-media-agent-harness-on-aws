@@ -23,10 +23,11 @@ FROZEN = {
     "design.DESIGN_SYSTEM_PROMPT": "ae3790ab7058c1fca073deb9a9c8d713273d7860b867cce17bcc5001d6b8a8e9",
     # The one-call plan-and-design prompt: the planning prompt + FUSED_DESIGN_SECTION_TEMPLATE
     # wrapping the design prompt above verbatim.
-    "planning.FUSED_SYSTEM_PROMPT": "622404ad31d46182b115829c93b8add88f60c88a61f8c935e4cd78d7f21e1857",
+    "planning.FUSED_SYSTEM_PROMPT": "65288bd6ea6b5f04e43f83e52c0db974249b4251758bddc5ade7bfa6c7140820",
     # Rebaselined for the one-source-N-slices fan-out carve-out (session 27c33c57: "clip shots
     # 3-9" became a 7-node plan, 7m39s, each node re-reading the whole source).
-    "planning.PLANNING_SYSTEM_PROMPT": "ed538607bc9f5e660f8312b2f56335f9a5d5729411a52c2af38d6f15e1665122",
+    # Rebaselined for SKILL SCRIPTS: a step whose skill names a script runs it by its path (8e2acba8).
+    "planning.PLANNING_SYSTEM_PROMPT": "b06fe362d0f0f8edae493cbe56b67878bb2f906096697323db079f592ef12c32",
     "render.RENDER_SYSTEM_PROMPT": "a160a456b24cad516ed6fbcaa2e499d8b336c081ab1048938063ee089cb7625b",
     "task.DEFAULT_TASK_SYSTEM_PROMPT": "64c3be38cd21a8f2ed675e467349abc61458ba1e5ef01609156f3d51f754622b",
     # Rebaselined: the download link carries the caller's conversation_id, because the download
@@ -47,7 +48,7 @@ FROZEN = {
 # remembered-file-locations rule (browse the project as a Renderer grid tab).
 # 2026-10-16: RESPONSE STYLE gained "Search once with a well-formed query..." and "Refer to files by their short
 # asset reference, never by long URLs".
-ORCHESTRATOR_ASSEMBLED_SHA = "830fb08fc10b568fe35ebef5346f6f53b30c631235964f20f6db2ab256052325"
+ORCHESTRATOR_ASSEMBLED_SHA = "8f624bf47ddae810b20b070ac0a3351bea2ced605d7b7ab3a9c547cd54d0c256"
 
 
 def _live_named() -> dict:

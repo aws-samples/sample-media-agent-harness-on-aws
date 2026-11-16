@@ -13,7 +13,7 @@ import type { ChatMessage } from '../lab-api';
 
 export type MediaActionOp = 'frame' | 'clip' | 'crop';
 
-export interface MediaActionOutput { kind: 'image' | 'video'; name: string; url: string; key: string; s3uri: string }
+export interface MediaActionOutput { kind: 'image' | 'video' | 'audio'; name: string; url: string; key: string; s3uri: string }
 
 /** What an action line shows; `running` exists on screen only (the proxy records `done` / `failed`). */
 export interface ActionLineRecord {
@@ -90,7 +90,8 @@ const isBox = (b: unknown): b is { x: number; y: number; w: number; h: number } 
 export function directBatchRequest(data: TimelineActionLike | undefined, sessionId: string, actionId: string): MediaActionBatch | null {
   const clips = Array.isArray(data?.clips) ? (data!.clips as BatchEntry[]) : [];
   if (!sessionId || clips.length === 0 || clips.length > MAX_BATCH_ITEMS) return null;
-  const op: MediaActionOp | null = data!.verb === 'clip' ? 'clip' : data!.verb === 'extract' ? 'frame' : data!.verb === 'crop' ? 'crop' : null;
+  // A trim is a clip of an audio file: the same direct action (the proxy and the sandbox take audio for a clip).
+  const op: MediaActionOp | null = data!.verb === 'clip' || data!.verb === 'trim' ? 'clip' : data!.verb === 'extract' ? 'frame' : data!.verb === 'crop' ? 'crop' : null;
   if (!op) return null;
   const items: MediaActionBatch['items'] = [];
   for (const c of clips) {
@@ -144,23 +145,28 @@ export function directMediaRequest(data: TimelineActionLike | undefined, session
 
 export type MediaActionReply =
   | { ok: true; outputs: MediaActionOutput[]; elapsedMs: number; record?: ActionLineRecord }
-  /** `ran`: the action ran and failed (recorded as a failed line); otherwise it was refused before running. */
-  | { ok: false; ran: boolean; error: string; record?: ActionLineRecord };
+  /** `ran`: the action ran and failed (recorded as a failed line); otherwise it was refused before running.
+   *  `unknown`: no answer came back (the connection dropped, an edge timeout's HTML page) — it may well have run,
+   *  and finished. Never handed to the agent: that cut every clip a second time. */
+  | { ok: false; ran: boolean; error: string; record?: ActionLineRecord; unknown?: boolean };
 
 export async function runMediaAction(body: MediaActionBody): Promise<MediaActionReply> {
   try {
     const res = await authFetch('/media/actions', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    const json = await res.json().catch(() => ({})) as Record<string, unknown>;
+    const json = await res.json().catch(() => null) as Record<string, unknown> | null;
+    // Not the route's own JSON (CloudFront's 504 page, a proxy restart): whether it ran is unknown.
+    if (!json) return { ok: false, ran: false, unknown: true, error: `no answer (HTTP ${res.status}) — it may still have finished` };
     if (res.ok && json.ok === true) {
       return { ok: true, outputs: (json.outputs as MediaActionOutput[]) ?? [], elapsedMs: Number(json.elapsedMs) || 0,
         record: json.record as ActionLineRecord | undefined };
     }
-    return { ok: false, ran: res.status === 502, error: String(json.error ?? `HTTP ${res.status}`),
+    // A long action's reply streams (200 + keep-alive), so the body — not the status — says whether it ran.
+    return { ok: false, ran: typeof json.ran === 'boolean' ? json.ran : res.status === 502, error: String(json.error ?? `HTTP ${res.status}`),
       record: json.record as ActionLineRecord | undefined };
   } catch (e) {
-    return { ok: false, ran: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, ran: false, unknown: true, error: `${e instanceof Error ? e.message : String(e)} — it may still have finished` };
   }
 }
 
@@ -320,8 +326,10 @@ export const RESULT_GALLERY_EVENT = 'lab:open-result-gallery';
 export interface ResultGalleryDetail {
   sessionId: string;
   label: string;
-  kind: 'image' | 'video';
-  items: { url: string; name: string }[];
+  kind: 'image' | 'video' | 'audio';
+  items: { url: string; name: string; kind?: 'image' | 'video' | 'audio' }[];
+  /** The gallery this one is the next version of (its subject ids): it opens in that gallery's tab. */
+  subjectIds?: string[];
 }
 
 /** The gallery tab's manifest: frames as an `image-annotated` gallery, clips as a `clip-gallery`. */
@@ -329,8 +337,29 @@ export function resultGalleryManifest(d: ResultGalleryDetail, id: string, create
   return d.kind === 'image'
     ? { id, template: 'image-annotated', createdAt, title: d.label, src: d.items[0]?.url,
         images: d.items.map((i) => ({ src: i.url, label: i.name, annotations: [] })), annotations: [] }
-    : { id, template: 'clip-gallery', createdAt, title: d.label,
-        clips: d.items.map((i, n) => ({ id: `c${n + 1}`, label: i.name, src: i.url, kind: 'video' })) };
+    : { id, template: 'clip-gallery', createdAt, title: d.label, ...(d.subjectIds?.length ? { subjectIds: d.subjectIds } : {}),
+        clips: d.items.map((i, n) => ({ id: `c${n + 1}`, label: i.name, src: i.url, kind: i.kind === 'audio' || (!i.kind && d.kind === 'audio') ? 'audio' : 'video' })) };
+}
+
+/**
+ * Trimming some of a gallery's items returns the gallery's NEXT VERSION: the same set, in order, each trimmed item in
+ * place of its original, declared to be about the gallery it revises — so it opens as a version in that gallery's
+ * tab, not as a separate tab (staging 2026-11-15: one Trim all marked opened seven). `record.items[i]` is what the
+ * batch's i-th item made; an item that failed keeps its original.
+ */
+export function setVersionDetail(
+  v: { set: { clipId: string; label: string; src: string; kind?: 'video' | 'image' | 'audio' }[]; clips: { clipId: string }[]; origin: { subjectIds: string[]; label?: string } },
+  record: ActionLineRecord | undefined, sessionId: string, verb: string,
+): ResultGalleryDetail {
+  const made = new Map<string, MediaActionOutput>();
+  v.clips.forEach((c, i) => { const o = record?.items?.[i]?.outputs?.[0]; if (o) made.set(c.clipId, o); });
+  const word = verb === 'trim' ? 'trimmed' : verb === 'crop' ? 'cropped' : 'clipped';
+  const items = v.set.map((c) => {
+    const o = made.get(c.clipId);
+    return o ? { url: o.url, name: `${c.label} · ${word}`, kind: o.kind } : { url: c.src, name: c.label, ...(c.kind ? { kind: c.kind } : {}) };
+  });
+  const kind = items.every((i) => i.kind === 'audio') ? 'audio' : 'video';
+  return { sessionId, kind, items, label: `${v.origin.label || 'Gallery'} · ${word}`, subjectIds: v.origin.subjectIds };
 }
 
 /** The gallery tab's name: "3 clips · trailer.mp4" / "8 frames · trailer.mp4". */
@@ -398,7 +427,8 @@ export interface DirectActionOptions {
   /** The chat path (the old `chat:send` prompt): used when the direct path refuses or the action fails. */
   fallback: () => void;
   /** Open the results (new Renderer tabs). */
-  openOutputs: (outputs: MediaActionOutput[], op: MediaActionOp, sourceName?: string) => void;
+  /** `record`: a batch's line, whose `items[i].outputs` say which item made what (a set's next version uses it). */
+  openOutputs: (outputs: MediaActionOutput[], op: MediaActionOp, sourceName?: string, record?: ActionLineRecord) => void;
   now?: () => number;
 }
 
@@ -414,7 +444,26 @@ const nameFromLocation = (loc?: string) => {
  * before running (not a project file, no project, over the length cap) removes the line and takes the chat
  * path; a failed run keeps the failed line and ALSO hands the request to the agent, so it still gets done.
  */
-export async function runDirectTimelineAction(body: MediaActionBody, opts: DirectActionOptions, startedAt?: number): Promise<MediaActionReply> {
+/** What makes two actions the same: one session, one op, one file, the same ranges / points / box. */
+const actionIdentity = (b: MediaActionBody) => JSON.stringify([b.sessionId, b.op, b.source.assetId ?? b.source.location ?? '',
+  b.ranges ?? null, b.points ?? null, b.box ?? null, b.aspect ?? null]);
+const inFlight = new Map<string, Promise<MediaActionReply>>();
+
+/**
+ * Run one direct action, at most once at a time per identity: Clip can take 10-16 s the first time (the sandbox
+ * starts), the button gave no sign of it, and a second click cut a second identical clip (IND403 dry run). A repeat
+ * while the same action runs joins it — one line, one result, one tab — instead of starting another.
+ */
+export function runDirectTimelineAction(body: MediaActionBody, opts: DirectActionOptions, startedAt?: number): Promise<MediaActionReply> {
+  const key = actionIdentity(body);
+  const running = inFlight.get(key);
+  if (running) return running;
+  const run = runDirectTimelineActionOnce(body, opts, startedAt).finally(() => inFlight.delete(key));
+  inFlight.set(key, run);
+  return run;
+}
+
+async function runDirectTimelineActionOnce(body: MediaActionBody, opts: DirectActionOptions, startedAt?: number): Promise<MediaActionReply> {
   const now = opts.now ?? (() => Date.now());
   const t0 = startedAt ?? now();
   retries.set(body.actionId, { body, opts, startedAt: t0 });
@@ -429,6 +478,10 @@ export async function runDirectTimelineAction(body: MediaActionBody, opts: Direc
   if (reply.ok) {
     line({ ...base, ...(reply.record ?? {}), status: 'done', outputs: reply.outputs, elapsedMs: reply.elapsedMs });
     opts.openOutputs(reply.outputs, body.op, base.sourceName);
+  } else if (reply.unknown) {
+    // No answer: it may have run, so it is NOT handed to the agent (that cut the clips a second time). The line
+    // says so and offers Retry; the outputs of a run that did finish land in the project regardless.
+    line({ ...base, status: 'failed', error: reply.error });
   } else if (!reply.ran) {
     publishActionLine({ sessionId: body.sessionId, message: actionLineMessage(body.actionId, t0, base), remove: true });
     retries.delete(body.actionId);
@@ -465,7 +518,7 @@ export async function runDirectBatch(batch: MediaActionBatch, opts: DirectAction
     const { label, ...item } = batch.items[index];
     const reply = await runMediaAction({ ...item, op: batch.op, sessionId: batch.sessionId, actionId: batch.actionId,
       batch: { id: batch.actionId, index, total, ...(label ? { label } : {}) } });
-    if (!reply.ok && !reply.ran && index === 0 && !prior) {
+    if (!reply.ok && !reply.ran && !reply.unknown && index === 0 && !prior) {
       publishActionLine({ sessionId: batch.sessionId, message: actionLineMessage(batch.actionId, t0, record), remove: true });
       opts.fallback();
       return record;
@@ -486,7 +539,7 @@ export async function runDirectBatch(batch: MediaActionBatch, opts: DirectAction
     ...(outputs.length ? {} : { error: record.error ?? batchFailures(record)[0]?.error ?? 'Nothing could be made.' }) };
   line(record);
   batchRetries.set(batch.actionId, { batch, opts, startedAt: t0, record });
-  if (outputs.length) opts.openOutputs(outputs, batch.op, /^\d+ videos$/.test(record.sourceName) ? undefined : record.sourceName);
+  if (outputs.length) opts.openOutputs(outputs, batch.op, /^\d+ videos$/.test(record.sourceName) ? undefined : record.sourceName, record);
   return record;
 }
 
@@ -500,7 +553,7 @@ export function routeTimelineAction(
   deps: {
     projectOf: (sessionId: string) => string | null | undefined;
     sendToAgent: () => void;
-    openOutputs: (outputs: MediaActionOutput[], sessionId: string, op?: MediaActionOp, sourceName?: string) => void;
+    openOutputs: (outputs: MediaActionOutput[], sessionId: string, op?: MediaActionOp, sourceName?: string, record?: ActionLineRecord) => void;
     newActionId?: () => string;
     /** Make sure the chat's row (with its project) exists first: a brand-new chat has none until its first turn. */
     prepare?: (sessionId: string) => Promise<void>;
@@ -509,7 +562,7 @@ export function routeTimelineAction(
   const sid = sessionId ?? '';
   const id = (deps.newActionId ?? (() => `act-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`))();
   const hasProject = !!sid && !!deps.projectOf(sid);
-  const opts = { fallback: deps.sendToAgent, openOutputs: (outputs: MediaActionOutput[], op: MediaActionOp, name?: string) => deps.openOutputs(outputs, sid, op, name) };
+  const opts = { fallback: deps.sendToAgent, openOutputs: (outputs: MediaActionOutput[], op: MediaActionOp, name?: string, record?: ActionLineRecord) => deps.openOutputs(outputs, sid, op, name, record) };
   // A failed prepare still runs the action: the proxy then refuses it and the chat path takes over, as before.
   const ready = () => (deps.prepare ? deps.prepare(sid).catch(() => undefined) : Promise.resolve());
   const batch = hasProject ? directBatchRequest(data, sid, id) : null;

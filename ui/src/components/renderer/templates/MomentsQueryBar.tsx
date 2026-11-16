@@ -3,16 +3,14 @@
  * `action-trail.html` §2):
  * The bar holds words OR an image, never both (M2C searches one kind per call; mock `search-and-actions.html` §1):
  *   - {@link ImageQueryValue}: image mode — the field becomes the image (thumbnail + name + "· similar moments"), its
- *     menu (Use a different image…, Open at <time>, Remove), "Search by words", ✕, and the Recent searches clock;
+ *     menu (Use a different image…, Open at <time>, Remove), "Search by words" and ✕;
  *   - {@link SearchByImageButton}: words mode's image button at the field's right end, and {@link SearchByImage}, its
  *     popover, laid out like the composer's + menu — upload (or drop / paste) a picture, kept with this chat only;
  *     the selected card's frame; or "Recent images in <project>" with a name search (the + menu's own section);
- *   - {@link RecentSearches}: the tab's searches behind a clock button (no longer pills under the field);
  *   - {@link MatchedBadges}: on a card of a multi-image search, the image(s) that found it.
  */
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { AssetIcon } from '../../chat/AssetIcons';
-import ClockIcon from '../../icons/ClockIcon';
 import type { RendererProps, MomentsQueryImage } from '../types';
 import type { MomentsTabSearch } from './momentsTabSearch';
 import { request as requestAssetUrls } from '../../../projects/assetUrlBatcher';
@@ -62,14 +60,13 @@ function imageKindText(image: MomentsQueryImage): string {
 
 /**
  * IMAGE MODE: the search field BECOMES the image (mock `search-and-actions.html` §1). Thumbnail + name + "· similar
- * moments" opens the image's menu (Use a different image…, Open at…, Remove); then "Search by words", ✕ and the Recent
- * searches clock. There is no text input here: M2C searches words OR an image, never both.
+ * moments" opens the image's menu (Use a different image…, Open at…, Remove); then "Search by words" and ✕. There is
+ * no text input here: M2C searches words OR an image, never both.
  */
-export function ImageQueryValue({ search, projectId, sessionId, selectedImage, theme: t, onWords, recent }: {
+export function ImageQueryValue({ search, projectId, sessionId, selectedImage, theme: t, onWords }: {
   search: MomentsTabSearch; projectId: string; sessionId: string; selectedImage: MomentsQueryImage | null; theme: Theme;
   /** Back to words mode (the bar focuses its input). */
   onWords: () => void;
-  recent: React.ReactNode;
 }) {
   const [menu, setMenu] = useState(false);
   const [picker, setPicker] = useState<Picker | null>(null);
@@ -112,8 +109,6 @@ export function ImageQueryValue({ search, projectId, sessionId, selectedImage, t
       <button type="button" data-testid="query-search-words" onClick={onWords} style={linkStyle(t)}>Search by words</button>
       <button type="button" aria-label={`Clear ${image.label}`} title="Clear" data-testid="query-image-remove" onClick={onWords}
         style={iconButtonStyle(t, false)}><AssetIcon kind="close" size={14} /></button>
-      <span aria-hidden="true" style={dividerStyle(t)} />
-      {recent}
     </>
   );
 }
@@ -133,56 +128,6 @@ export function SearchByImageButton({ search, projectId, sessionId, selectedImag
         <SearchByImage theme={t} projectId={projectId} sessionId={sessionId} selectedImage={selectedImage}
           hasImages={false} canAdd={false} mode="camera"
           onClose={() => setOpen(false)} onPick={(img) => { setOpen(false); search.searchImages([img]); }} />
-      )}
-    </span>
-  );
-}
-
-/**
- * The tab's searches behind a clock button (they used to sit under the field as pills that read like the type
- * filters). The agent's results first, then each search: an "Aa" tile and the quoted words, or the image's
- * thumbnail and name; the one on screen highlighted; its count when known.
- */
-export function RecentSearches({ search, projectId, theme: t }: { search: MomentsTabSearch; projectId: string; theme: Theme }) {
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open]);
-  const go = (i: number) => { setOpen(false); search.goTo(i); };
-  const row = (i: number, tile: React.ReactNode, name: React.ReactNode, title?: string) => {
-    const n = search.countAt(i);
-    const on = search.index === i;
-    return (
-      <button key={i} type="button" role="menuitem" aria-current={on || undefined} title={title} onClick={() => go(i)}
-        style={{ ...menuItemStyle(t), ...(on ? { background: t.colors.accentSubtle, color: t.colors.primary, fontWeight: 600 } : null) }}
-        data-testid="moments-recent-row">
-        {tile}
-        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
-        {n !== null && <span style={{ color: t.colors.textTertiary, fontSize: 11.5, fontWeight: 400 }}>{n}</span>}
-      </button>
-    );
-  };
-  return (
-    <span style={{ position: 'relative', display: 'inline-flex' }}>
-      <button type="button" aria-label="Recent searches" title="Recent searches" data-testid="moments-recent"
-        aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} style={iconButtonStyle(t, open)}>
-        <ClockIcon size={15} />
-      </button>
-      {open && (
-        <>
-          <span style={scrimStyle} aria-hidden="true" onMouseDown={() => setOpen(false)} />
-          <span role="menu" aria-label="Recent searches" data-testid="moments-recent-menu" style={{ ...menuStyle(t), left: 'auto', right: 0, width: 320 }}>
-            <span style={recentHeaderStyle(t)}>Recent searches</span>
-            {row(0, <span style={tileStyle(t)}>★</span>, "The agent's results")}
-            {search.history.map((e, idx) => (e.images && e.images.length
-              ? row(idx + 1, <QueryThumb image={e.images[0]} projectId={projectId} width={40} height={24} />,
-                e.images.map((x) => x.label).join(' · '), e.images.map((x) => x.label).join(' · '))
-              : row(idx + 1, <span style={tileStyle(t)} data-testid="moments-recent-text-tile">Aa</span>, `“${e.q ?? ''}”`, e.q)))}
-          </span>
-        </>
       )}
     </span>
   );
@@ -318,14 +263,4 @@ function iconButtonStyle(t: Theme, on: boolean): React.CSSProperties {
 function linkStyle(t: Theme): React.CSSProperties {
   return { border: 'none', background: 'none', padding: '0 4px', font: 'inherit', fontSize: 12.5, fontWeight: 600, color: t.colors.primary,
     cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 };
-}
-function dividerStyle(t: Theme): React.CSSProperties {
-  return { width: 1, height: 20, background: t.colors.border, flexShrink: 0 };
-}
-function tileStyle(t: Theme): React.CSSProperties {
-  return { width: 40, height: 24, flexShrink: 0, display: 'grid', placeItems: 'center', borderRadius: 4, background: t.colors.surfaceSubtle,
-    color: t.colors.textTertiary, fontSize: 12, fontWeight: 600 };
-}
-function recentHeaderStyle(t: Theme): React.CSSProperties {
-  return { padding: '6px 9px 4px', fontSize: 10.5, fontWeight: 700, color: t.colors.textTertiary, textTransform: 'uppercase', letterSpacing: '.06em' };
 }

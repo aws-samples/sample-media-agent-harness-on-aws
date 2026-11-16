@@ -123,6 +123,9 @@ describe('rollUpRuns (side-panel consolidation)', () => {
     expect(plan.nodeTotal).toBe(2);
     expect(plan.nodeDone).toBe(1);
     expect(plan.aggregateStatus).toBe('RUNNING'); // a node is still running
+    // IND403 "Jobs only pulses": a running plan names the step it is on.
+    expect(plan.runningStep).toBeTruthy();
+    expect(plan.runningStep).not.toBe('Running');
     const standalone = rows.find(r => r.job.jobId === 's1')!;
     expect(standalone.isPlan).toBe(false);
     expect(standalone.aggregateStatus).toBe('SUCCEEDED');
@@ -210,5 +213,33 @@ describe('JobsPanel open-flow quick-link', () => {
     });
     render(<JobsPanel activeSessionId="session-A" />);
     expect(screen.queryByLabelText(LABEL)).toBeNull();
+  });
+});
+
+describe('JobsPanel row text (IND403 dry run)', () => {
+  it('names the workflow, not the raw trio id, and a running job shows how long it has been going', () => {
+    const started = new Date(Date.now() - 42_000).toISOString();
+    jobsMock.mockReturnValue({ jobs: [job({ jobId: 'j-run', sessionId: 'session-A', trioId: 'shot-segmentation|segment_shots', status: 'RUNNING', startAt: started, updatedAt: started, terminalAt: null })] });
+    render(<JobsPanel activeSessionId="session-A" />);
+    expect(screen.getByText('Shot Segmentation')).toBeTruthy();
+    expect(screen.queryByText(/shot-segmentation\|segment_shots/)).toBeNull();
+    expect(screen.getByText(/Running · 4[12]s/)).toBeTruthy();
+  });
+});
+
+describe('View results — the summary turn, never "feature the artifacts"', () => {
+  afterEach(cleanup);
+  it('sends a results_summary turn, so the agent cannot open a second gallery tab of the same shots', () => {
+    jobsMock.mockReturnValue({ jobs: [job({ jobId: 'j-shots', trioId: 'shot-segmentation|segment_shots', sessionId: 'session-A' })] });
+    const sent: Array<{ prompt: string; turnPurpose?: string }> = [];
+    const onSend = (e: Event) => sent.push((e as CustomEvent).detail);
+    window.addEventListener('chat:send', onSend);
+    render(<JobsPanel activeSessionId="session-A" />);
+    fireEvent.click(screen.getByRole('button', { name: 'View results' }));
+    window.removeEventListener('chat:send', onSend);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].turnPurpose).toBe('results_summary');
+    expect(sent[0].prompt).toContain('get_job("j-shots")');
+    expect(sent[0].prompt).not.toMatch(/(^|[^-])feature the artifacts/i);
   });
 });

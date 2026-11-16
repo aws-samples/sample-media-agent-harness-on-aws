@@ -80,7 +80,14 @@ class Env:
         return self.index._table.scan()["Items"]
 
     def published(self) -> list[dict]:
-        return [r for r in self.lab_rows() if r.get("status") == "published"]
+        return [r for r in self.assets() if "version" in r and not r.get("deprecated")]
+
+    def drafts(self) -> list[dict]:
+        return [r for r in self.assets() if "version" not in r]
+
+    def assets(self) -> list[dict]:
+        """Asset rows: every lab row but the outbox's (the only rows that carry a ``recordType``)."""
+        return [r for r in self.lab_rows() if r.get("category") and r.get("recordType") != "outbox"]
 
 
 def zip_bytes(files: Mapping[str, Any]) -> bytes:

@@ -270,8 +270,9 @@ class TestUnifiedAssetIndexSmoke:
         item = kwargs["Item"]
         assert item["PK"] == "USER#u-jane#OWNED"
         assert item["SK"] == "skill#d-42"
-        assert item["recordType"] == "draft"
-        assert item["status"] == "draft"
+        # Working copy vs. version IS `version`: no second attribute to disagree with it.
+        assert "recordType" not in item and "version" not in item
+        assert "status" not in item and item["deprecated"] is False
         assert item["scope"] == "private"
         assert item["ownerUserId"] == "u-jane"
         # GSI1 must NOT be projected for drafts.
@@ -295,8 +296,8 @@ class TestUnifiedAssetIndexSmoke:
         assert item["SK"] == "skill#p-99#v0000000003"
         assert item["GSI1PK"] == "PUB#p-99"
         assert item["GSI1SK"] == "v0000000003"
-        assert item["recordType"] == "published"
-        assert item["status"] == "published"
+        assert "recordType" not in item and item["version"] == 3
+        assert "status" not in item and item["deprecated"] is False
         assert item["scope"] == "org"
         assert item["ownerOrgId"] == "o-acme"
         assert item["version"] == 3

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { cropAspectLabel } from '../../../projects/mediaActions';
 import type { RendererProps, InteractionEvent, CropActionData, CropBox } from '../types';
 import { useTimelineEngine, TimelineEngine, TimelineState } from '../../nle/TimelineEngine';
@@ -28,6 +28,8 @@ import CropIcon from '../../icons/CropIcon';
 import CloseIcon from '../../icons/CloseIcon';
 import CheckIcon from '../../icons/CheckIcon';
 import { normalizeViewState, sameViewState, type RenderViewState } from '../../../shared/renderViewState';
+import { ChatAssetContext } from '../../chat/InlineAssetImage';
+import { useTimelineKeyframes } from '../../../projects/useKeyframes';
 
 interface NleTimelineData {
   manifestUrl: string;
@@ -102,6 +104,9 @@ function NleTimelineContent({ loadState, engine, state, theme: t, mediaRef, onRe
   const didInitialSeekRef = useRef(false); // Component 5: initialTime applies on the FIRST load only, never on a URL refresh.
   // A persisted view that was left with a crop box drawn reopens with it (R8.2).
   useEffect(() => { if (restoredCrop) setShowCrop(true); }, [restoredCrop]);
+  // The file's keyframes (snap targets, below): read once per file from its index, through the chat's project.
+  const assetCtx = useContext(ChatAssetContext);
+  const keyframes = useTimelineKeyframes(assetCtx?.projectId, (loadState as { manifest?: unknown }).manifest);
   if (loadState.status === 'loading') {
     return (<div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 16, background: t.colors.surface, border: `1px solid ${t.colors.border}`, borderRadius: t.radius.panel }}><SkeletonBlock height={200} theme={t} /><SkeletonBlock height={48} theme={t} /><SkeletonBlock height={80} theme={t} /></div>);
   }
@@ -276,6 +281,8 @@ function NleTimelineContent({ loadState, engine, state, theme: t, mediaRef, onRe
   // segment lanes, and clips — so marking lands on real cut points, not a
   // pixel-approximate time. De-duped; only meaningful values.
   const snapTimes = Array.from(new Set<number>([
+    // The file's keyframes: a range that starts on one is cut as a stream copy — instant, and exact.
+    ...keyframes,
     ...(manifest.markers ?? []).flatMap(m => [m.time, ...(typeof m.endTime === 'number' ? [m.endTime] : [])]),
     ...(manifest.segments ?? []).flatMap(s => [s.start, s.end]),
     ...(manifest.clips ?? []).flatMap(c => [c.start, c.end]),

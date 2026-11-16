@@ -28,6 +28,7 @@ import {
   dispatchAssetRoute,
 } from "./ingestionRoutes";
 import type { AssetRouteDeps } from "./ingestionRoutes";
+import { resetMomentFrameCache } from "./momentFrames";
 
 const PID = "p0123456789abcdef0123456789abcdef";
 const ACTOR = "sub-alice";
@@ -130,6 +131,44 @@ async function run(
 function urlsParts(): string[] {
   return [PID, "assets", "urls"];
 }
+
+describe("Asset_URL_Route frames — each moment's own picture (IND403: every card showed one hero still)", () => {
+  it("signs the frame of the shot each time falls in, from the video's own record only", async () => {
+    resetMomentFrameCache();
+    const store = new InMemoryTransactStore();
+    const video = assetId("video");
+    const other = assetId("video");
+    const recordKey = `projects/${PID}/${video}/documents/abc.jsonl`;
+    const shot = (s: number, e: number, key: string) => JSON.stringify({ doc_type: "shot", start_ms: s, end_ms: e, fields: { frame_s3_key: key } });
+    const reads: string[] = [];
+    const readObject = async (bucket: string, key: string) => {
+      reads.push(`${bucket}/${key}`);
+      return [shot(0, 5000, "m2c/run/frames/f_000060.jpg"), JSON.stringify({ doc_type: "scene", start_ms: 0, end_ms: 9000 }),
+        shot(5000, 9000, `projects/${PID}/${video}/frames/f_000210.jpg`)].join("\n");
+    };
+    store.seed(
+      { ...assetRow(video, { kind: "video", sourceUri: `s3://${INGEST_BUCKET}/projects/${PID}/import/a.mp4` }), doc: { recordKey } },
+      // A row naming ANOTHER asset's record is never read.
+      { ...assetRow(other, { kind: "video", sourceUri: `s3://${INGEST_BUCKET}/projects/${PID}/import/b.mp4` }), doc: { recordKey } },
+    );
+    const { presignGet, calls } = recordingPresign();
+    const r = await run("POST", urlsParts(),
+      { checkAccess: allow, store, presignGet, readObject, ingestBucket: INGEST_BUCKET, m2cBucket: "m2c-bucket", now: () => NOW_MS } as AssetRouteDeps,
+      { body: { asset_ids: [], frames: [{ asset_id: video, at_ms: 1200 }, { asset_id: video, at_ms: 7000 }, { asset_id: other, at_ms: 1200 }] } });
+    expect(r.status).toBe(200);
+    expect(r.body.frames[`${video}@1200`].url).toContain("m2c-bucket/m2c/run/frames/f_000060.jpg");
+    expect(r.body.frames[`${video}@7000`].url).toContain(`${INGEST_BUCKET}/projects/${PID}/${video}/frames/f_000210.jpg`);
+    expect(r.body.frames[`${other}@1200`]).toBeUndefined();
+    expect(reads).toEqual([`${INGEST_BUCKET}/${recordKey}`]); // read once, cached
+    expect(calls).toHaveLength(2);
+  });
+
+  it("answers the uniform 404 when access is denied", async () => {
+    const r = await run("POST", urlsParts(), { checkAccess: deny, store: new InMemoryTransactStore(), ingestBucket: INGEST_BUCKET, now: () => NOW_MS },
+      { body: { asset_ids: [], frames: [{ asset_id: assetId("video"), at_ms: 0 }] } });
+    expect(r.status).toBe(404);
+  });
+});
 
 describe("Asset_URL_Route (POST /projects/:pid/assets/urls)", () => {
   it("rejects more than 100 ids with 400 too_many_ids", async () => {
@@ -448,6 +487,18 @@ describe("asset name search — relevance ranking + pagination", () => {
     expect(r.body.total).toBe(61);
   });
 
+  it("a name typed without its extension is exact: the original ranks ahead of newer _clip_ derivatives", async () => {
+    const store = new InMemoryTransactStore();
+    const original = seedNamed(store, "Netflix_Open_Content_Meridian.mp4", "2026-01-01T00:00:00.000Z");
+    for (let i = 0; i < 30; i++) {
+      seedNamed(store, `Netflix_Open_Content_Meridian_clip_00${i}.mp4`, `2026-02-${String((i % 27) + 1).padStart(2, "0")}T00:00:00.000Z`);
+    }
+    const r = await run("GET", [PID, "assets"], { checkAccess: allow, store },
+      { query: `?q=${encodeURIComponent("Netflix_Open_Content_Meridian")}` });
+    expect(r.status).toBe(200);
+    expect(r.body.assets[0].assetId).toBe(original);
+  });
+
   it("ranks exact > prefix > substring, overriding recency", async () => {
     const store = new InMemoryTransactStore();
     // Oldest is the exact match; newest is the mere substring. Recency alone would invert the order.
@@ -594,5 +645,36 @@ describe("bookmarks — GET …/assets/bookmarks and folder counts", () => {
     const list = await run("GET", [PID, "assets"], { checkAccess: allow, store });
     expect(list.body.assets.map((a: any) => a.assetId)).toEqual([aid]);
     expect((await run("GET", [PID, "assets", "bookmarks"], { checkAccess: deny, store })).status).toBe(404);
+  });
+});
+
+describe("keyframes (GET /projects/:pid/assets/:assetId/keyframes) — what the timeline snaps a dragged range onto", () => {
+  // The Asset_Service reads the index (agent projects.keyframes, the ONE reader the clip's copy decision uses too).
+  const service = (reply: any) => {
+    const calls: any[] = [];
+    return { calls, invokeAssetService: async (call: any) => { calls.push(call); return reply; } };
+  };
+  it("asks the Asset_Service for the asset's keyframes, as the caller", async () => {
+    const video = assetId("video");
+    const s = service({ ok: true, value: { keyframes: [0, 0.8, 1.6, "x", 2.4] } });
+    const req = makeReq("GET", `/${PID}/assets/${video}/keyframes`);
+    req.userToken = "tok-1";
+    const { res, done } = makeRes();
+    await dispatchAssetRoute(req, res, { actor: ACTOR, pid: PID, parts: [PID, "assets", video, "keyframes"], method: "GET" },
+      { store: new InMemoryTransactStore(), checkAccess: allow, invokeAssetService: s.invokeAssetService });
+    expect(await done).toMatchObject({ status: 200, body: { keyframes: [0, 0.8, 1.6, 2.4] } });
+    expect(s.calls).toEqual([{ projectId: PID, command: "keyframes", args: { asset_id: video }, userToken: "tok-1" }]);
+  });
+  it("no access or a malformed id is the uniform 404 without asking; a 404 from the service too; anything else: no snap", async () => {
+    const video = assetId("video");
+    const base = { store: new InMemoryTransactStore() };
+    const s = service({ ok: true, value: { keyframes: [1] } });
+    expect((await run("GET", [PID, "assets", video, "keyframes"], { ...base, checkAccess: deny, invokeAssetService: s.invokeAssetService })).status).toBe(404);
+    expect((await run("GET", [PID, "assets", "video:bad", "keyframes"], { ...base, checkAccess: allow, invokeAssetService: s.invokeAssetService })).status).toBe(404);
+    expect(s.calls).toHaveLength(0);
+    const gone = service({ ok: false, status: 404, error: { code: "not_found", message: "" } });
+    expect((await run("GET", [PID, "assets", video, "keyframes"], { ...base, checkAccess: allow, invokeAssetService: gone.invokeAssetService })).status).toBe(404);
+    const down = service({ ok: false, status: 503, error: { code: "unavailable", message: "" } });
+    expect((await run("GET", [PID, "assets", video, "keyframes"], { ...base, checkAccess: allow, invokeAssetService: down.invokeAssetService })).body).toEqual({ keyframes: null });
   });
 });

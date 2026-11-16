@@ -62,7 +62,29 @@ export function composeTimeline(manifests: RenderManifest[]): RenderManifest {
   let sourceLocation: string | undefined;
   const metadata: Record<string, string | number | boolean> = {};
 
+  // A LANE SET ("speakers", "people", "scenes") is shown as its NEWEST manifest drew it: a re-run or an agent
+  // correction (update_timeline) replaces that set instead of adding beside it, which first-wins never let through,
+  // and every other set stays. A segment names its set (`laneSet`, stamped by its render declaration), else its
+  // manifest does; an untagged segment (a view rendered before sets existed) is never replaced. The captions are
+  // the "speakers" set's.
+  const setOf = (m: RenderManifest, s?: { laneSet?: unknown }): string => {
+    const own = s?.laneSet ?? (m as { laneSet?: unknown }).laneSet;
+    return typeof own === 'string' ? own : '';
+  };
+  const setsOf = (m: RenderManifest): Set<string> => new Set([setOf(m),
+    ...(m.segments ?? []).map((s) => setOf(m, s as { laneSet?: unknown })),
+    ...(m.markers ?? []).map((mk) => setOf(m, mk as { laneSet?: unknown }))].filter(Boolean));
+  const laneOwner = new Map<string, RenderManifest>();
   for (const m of manifests) {
+    for (const set of setsOf(m)) {
+      const cur = laneOwner.get(set);
+      if (!cur || (m.createdAt ?? '') >= (cur.createdAt ?? '')) laneOwner.set(set, m);
+    }
+  }
+  const draws = (m: RenderManifest, set: string) => !set || laneOwner.get(set) === m;
+
+  for (const m of manifests) {
+    const drawsCaptions = !setsOf(m).has('speakers') || draws(m, 'speakers');
     duration = Math.max(duration, typeof m.duration === 'number' ? m.duration : 0);
     if (m.createdAt && m.createdAt > createdAt) createdAt = m.createdAt;
     const sk = (m as { sourceKey?: unknown }).sourceKey;
@@ -73,8 +95,12 @@ export function composeTimeline(manifests: RenderManifest[]): RenderManifest {
     if (!sourceLocation && typeof sloc === 'string' && sloc) sourceLocation = sloc;
     for (const t of m.tracks ?? []) if (t && t.id && !byTrackId.has(t.id)) byTrackId.set(t.id, t);
     if (m.peaks) peaks = { ...peaks, ...m.peaks };
-    for (const mk of m.markers ?? []) if (mk && mk.id && !byMarkerId.has(mk.id)) byMarkerId.set(mk.id, mk);
-    for (const s of m.segments ?? []) if (s && s.id && !bySegmentId.has(s.id)) bySegmentId.set(s.id, s);
+    for (const mk of m.markers ?? []) {
+      if (mk && mk.id && !byMarkerId.has(mk.id) && draws(m, setOf(m, mk as { laneSet?: unknown }))) byMarkerId.set(mk.id, mk);
+    }
+    for (const s of m.segments ?? []) {
+      if (s && s.id && !bySegmentId.has(s.id) && draws(m, setOf(m, s as { laneSet?: unknown }))) bySegmentId.set(s.id, s);
+    }
     for (const c of m.clips ?? []) if (c && c.id && !byClipId.has(c.id)) byClipId.set(c.id, c);
     // annotations (face boxes / overlay projections) are an untyped pass-through field — union them
     // by id so a merged composite still overlays every analysis's boxes on the shared video.
@@ -88,7 +114,7 @@ export function composeTimeline(manifests: RenderManifest[]): RenderManifest {
         }
       }
     }
-    for (const cue of m.captions ?? []) {
+    if (drawsCaptions) for (const cue of m.captions ?? []) {
       const k = `${cue.start}|${cue.speaker}|${cue.text}`;
       if (!captionSeen.has(k)) { captionSeen.add(k); captions.push(cue); }
     }

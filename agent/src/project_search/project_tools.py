@@ -71,7 +71,7 @@ from .registry_client import RegistryClient
 logger = logging.getLogger(__name__)
 
 TOOL_NAMES = ("project_status", "register_s3_location", "retry_asset", "remove_asset", "readd_asset",
-              "show_asset", "use_asset", "browse_project", "organize_project", "list_projects", "switch_project",
+              "show_asset", "use_asset", "update_timeline", "browse_project", "organize_project", "list_projects", "switch_project",
               "create_project", "delete_project")
 
 # Above this many items (or for any folder rename) organize_project asks for the user's go-ahead first: a move
@@ -234,6 +234,71 @@ def _asset_player_manifest(session_id: str, project_id: str, asset_id: str, kind
         "startMs": 0,
         "origin": "agent",
     }
+
+
+LANE_ITEMS_MAX = 2000
+
+
+def _lane_manifest(session_id: str, asset_id: str, display_name: str, source_uri: str, lane_set: str,
+                   items: list) -> tuple[Optional[dict], str]:
+    """A timeline manifest of ONE lane set for a project video, or ``(None, reason)``.
+
+    It names the video (``sourceAssetId`` + its ``s3://`` ``sourceLocation``), so the panel folds it into that
+    video's open timeline tab, and its ``laneSet``, so it REPLACES that set there (the newest manifest of a set
+    draws it, ``composeTimeline``) while everything else stays. The id is deterministic per (session, video,
+    set): redrawing a set rewrites one object.
+
+    ``speakers`` items are speech: one lane per speaker (``lane`` = the speaker id) and the video's captions, the
+    transcript list's rows. Any other set (scenes, chapters, ad breaks) is spans that tile the film: a BAND row
+    drawn like Shots (numbered blocks, ``text`` = the block's label), never transcript rows.
+    """
+    if not isinstance(items, list) or not items:
+        return None, "items must be a non-empty list"
+    if len(items) > LANE_ITEMS_MAX:
+        return None, f"at most {LANE_ITEMS_MAX} items"
+    speech = lane_set == "speakers"
+    segments, captions, markers, end_max = [], [], [], 0.0
+    for i, it in enumerate(items):
+        try:
+            start, end = float(it["start"]), float(it["end"])
+            lane = str(it.get("lane") or "").strip()[:50]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None, f"item {i} needs start and end (seconds)"
+        if start < 0 or end <= start:
+            return None, f"item {i}: 0 <= start < end"
+        if speech and not lane:
+            return None, f"item {i}: a speakers item needs its lane (the speaker id)"
+        text = str(it.get("text") or "").strip()
+        if speech:
+            segments.append({"id": f"{lane_set}-{i}", "name": text[:300] or lane, "start": start, "end": end,
+                             "group": lane, "laneSet": lane_set})
+            if text:
+                captions.append({"start": start, "end": end, "speaker": lane, "text": text[:300]})
+        else:
+            markers.append({"id": f"{lane_set}-{i}", "time": start, "endTime": end, "label": str(i + 1),
+                            **({"category": text[:60]} if text else {}), "laneSet": lane_set})
+        end_max = max(end_max, end)
+    digest = hashlib.sha256(f"{session_id}|{asset_id}|{lane_set}".encode()).hexdigest()[:24]
+    manifest = {
+        "id": f"lanes-{digest}",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "template": "nle-timeline",
+        "title": display_name,
+        "duration": end_max,
+        "tracks": [],
+        "clips": [],
+        "laneSet": lane_set,
+        "sourceAssetId": asset_id,
+        "sourceLocation": source_uri,
+        "origin": "agent",
+    }
+    if segments:
+        manifest["segments"] = segments
+    if captions:
+        manifest["captions"] = captions
+    if markers:
+        manifest["markers"] = markers
+    return manifest, ""
 
 
 def _project_browser_manifest(session_id: str, project_id: str, project_name: str, query: str, folder: str,
@@ -522,6 +587,56 @@ def make_project_tools(project_id: str, *, function_name: Optional[str] = None, 
                 **asset_source_refs(row.get("sourceUri"))}
 
     @tool
+    async def update_timeline(asset_id: str, lane_set: str, items: list) -> dict:
+        """Draw lanes on a project video's timeline in the Renderer: one LANE SET, replacing the set of that name
+        (other lanes stay). Use it whenever the user should SEE on the timeline something you corrected or
+        computed about the video -- a fix in a file you wrote does not change what the timeline shows.
+
+        - A speaker fix (relabel a segment, merge or rename speakers): lane_set "speakers", one item per
+          sentence of the WHOLE corrected transcript (every sentence, not only the changed one), lane = the
+          speaker id, text = the sentence. It replaces the diarization's speaker lanes and the subtitles.
+        - Scenes (or chapters, ad breaks): lane_set "scenes" (or "chapters", ...), one item per span, in order;
+          text = its short label (e.g. its setting). They are drawn as a band like Shots, numbered 1, 2, 3...
+          A scene run's scenes already appear on their own when the enrichment job finishes: redraw them only
+          for a regrouping or a correction.
+
+        Times are seconds from the start of the video. Returns `shown` and the lane count.
+
+        Args:
+            asset_id: The video's id from project_status, e.g. "video:6f1c...".
+            lane_set: Which set this replaces: "speakers", "scenes", or another short name.
+            items: The spans, each {"start": s, "end": s, "lane": "SPEAKER_01" (speakers only), "text": "..."}.
+        """
+        set_name = (lane_set or "").strip().lower()[:30]
+        if not set_name or not set_name.replace("-", "").replace("_", "").isalnum():
+            return {"error": "invalid_lane_set", "message": "lane_set must be a short name like speakers or scenes"}
+        session_id, _turn = _request_ids()
+        if not session_id:
+            return {"error": "timeline_unavailable", "message": "The Renderer is not available in this turn"}
+        # The video's own location names it the way its open timeline does, so the lanes fold into that tab.
+        recorded = await call("record_chat_session", {"assetId": asset_id, "sessionId": session_id})
+        if not recorded.get("ok"):
+            return _reply(recorded)
+        row = (recorded.get("value") or {}).get("asset") or {}
+        display_name = str(row.get("displayName") or asset_id)
+        if row.get("status") == "removed":
+            return {"error": "asset_removed", "message": f"{display_name} was removed from the project"}
+        if row.get("kind") != "video":
+            return {"error": "not_a_video", "message": f"{display_name} is not a video"}
+        source_uri = str(row.get("sourceUri") or "")
+        manifest, problem = _lane_manifest(session_id, asset_id, display_name, source_uri, set_name, items)
+        if manifest is None:
+            return {"error": "invalid_items", "message": problem}
+        from render.artifacts import write_session_manifest
+
+        key = await asyncio.to_thread(write_session_manifest, session_id, manifest["id"], manifest)
+        if not key or not _announce(key, manifest["id"], display_name):
+            return {"error": "timeline_unavailable", "message": f"Could not update {display_name}'s timeline; try again"}
+        return {"shown": True, "display_name": display_name,
+                "lanes": sorted({s["group"] for s in manifest.get("segments", [])}) or [set_name],
+                "items": len(items)}
+
+    @tool
     async def browse_project(query: Optional[str] = None, folder: Optional[str] = None,
                              kind: Optional[str] = None) -> dict:
         """Open the Active_Project's files as a browsable grid in a Renderer tab. Use this when the user asks to
@@ -668,9 +783,9 @@ def make_project_tools(project_id: str, *, function_name: Optional[str] = None, 
             return {"error": "already_switching",
                     "message": "This turn already opens a chat in another project; finish the turn there."}
         return {"status": "opening_new_chat", "project": {"projectId": pid, "name": pname},
-                "message": (f"A new chat in \"{pname}\" opens when this reply ends"
+                "message": (f"The chat continues in \"{pname}\" when this reply ends"
                             + (" and sends it the prompt" if prompt.strip() else "")
-                            + ". Say so in one short sentence and stop: the rest happens in that chat.")}
+                            + ". Say so in one short sentence and stop: the rest happens there.")}
 
     @tool
     async def list_projects() -> dict:
@@ -685,10 +800,10 @@ def make_project_tools(project_id: str, *, function_name: Optional[str] = None, 
 
     @tool
     async def switch_project(name: str, prompt: str = "") -> dict:
-        """Move the user to another project: when this reply ends the chat opens a NEW chat in that project and,
-        when `prompt` is given, sends it as that chat's first message. This chat, its files and its history stay
-        where they are; nothing is moved or copied. A chat's project is fixed by its first message, which is why
-        switching always means a new chat.
+        """Move the user to another project: when this reply ends the chat continues in that project and, when
+        `prompt` is given, sends it there. A chat whose first message was this request moves itself; a chat that
+        already did work keeps it (a chat's project is fixed by its first real turn) and a new chat opens in that
+        project. Nothing is moved or copied either way.
 
         Use it when the user asks to go to, open, or work in another project, or when a skill says to switch.
         Pass the user's request (or the skill's next step) as `prompt` so the work carries on there. Returns
@@ -768,5 +883,5 @@ def make_project_tools(project_id: str, *, function_name: Optional[str] = None, 
         }
 
     return [project_status, register_s3_location, retry_asset, remove_asset, readd_asset, show_asset,
-            use_asset, browse_project, organize_project, list_projects, switch_project, create_project,
+            use_asset, update_timeline, browse_project, organize_project, list_projects, switch_project, create_project,
             delete_project]

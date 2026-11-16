@@ -717,6 +717,34 @@ def write_session_manifest(session_id: str, manifest_id: str, manifest: dict) ->
         return None
 
 
+def _rendered_in(url: str, already: set) -> bool:
+    """``url`` (in any of its forms: CDN, presigned, s3://) is one of the session's rendered media."""
+    from render.review import _norm_url, _media_identity
+    if _norm_url(url) in already:
+        return True
+    m = _media_identity(url)
+    return bool(m) and m in already
+
+
+def rendered_this_session(url: str) -> bool:
+    """True when this session already shows ``url`` in a rendered tab (the durable, manifest-derived set)."""
+    try:
+        from jobs.context import current_session_id
+        return _rendered_in(url, _already_rendered_urls(current_session_id() or ""))
+    except Exception:  # noqa: BLE001 - unknown means "not shown": the caller renders it
+        return False
+
+
+def _file_label(urls: list[str]) -> Optional[str]:
+    """The first url's file name (``+N`` for the rest), for a render no caller named; ``None`` without one."""
+    from urllib.parse import unquote, urlparse
+    names = [unquote(urlparse(u).path.rsplit("/", 1)[-1]) for u in urls if isinstance(u, str)]
+    names = [n for n in names if n]
+    if not names:
+        return None
+    return names[0] if len(names) == 1 else f"{names[0]} +{len(names) - 1}"
+
+
 def dispatch_render(urls: list[str], source_urls: Optional[list[str]] = None,
                     label: Optional[str] = None,
                     render_request_id: Optional[str] = None,
@@ -743,6 +771,9 @@ def dispatch_render(urls: list[str], source_urls: Optional[list[str]] = None,
     Also returns the key for programmatic callers (e.g. the render hook action).
     """
     urls = [u for u in (urls or []) if isinstance(u, str) and u.strip()]
+    # A render nobody named is named after its file, never left to the UI's "Render Output N" (8e2acba8's three
+    # recast results arrived as three "Render Output" tabs).
+    label = label or _file_label(urls)
     if _gallery_shown:
         shown = [u for u in urls if _shown_in_gallery(u)]
         if shown:
@@ -834,13 +865,7 @@ def dispatch_render(urls: list[str], source_urls: Optional[list[str]] = None,
         except Exception:  # noqa: BLE001
             _already = set()
     if _already:
-        from render.review import _norm_url as _nrm, _media_identity as _mid
-        def _seen(u):
-            if _nrm(u) in _already:
-                return True
-            m = _mid(u)
-            return bool(m) and m in _already
-        fresh = [u for u in urls if not _seen(u)]
+        fresh = [u for u in urls if not _rendered_in(u, _already)]
         if not fresh:
             logger.info("dispatch_render: all %d url(s) already rendered this session; skipping", len(urls))
             # Resolve the composing marker emitted upstream (batched render announces it at BUFFER

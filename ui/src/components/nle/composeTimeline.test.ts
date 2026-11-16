@@ -97,3 +97,49 @@ describe('composeTimeline', () => {
     expect((c as { sourceKey?: string }).sourceKey).toBe('artifacts/s/clip.mp4');
   });
 });
+
+// IND403 Lab 1: a speaker relabel the agent wrote never replaced the diarization's UNKNOWN lane (first copy won).
+describe('composeTimeline — the newest manifest of a lane set draws it', () => {
+  const seg = (id: string, group: string, start: number, laneSet?: string) =>
+    ({ id, name: 'line', start, end: start + 1, group, ...(laneSet ? { laneSet } : {}) });
+  const at = (id: string, createdAt: string, extra: Record<string, unknown>) => ({
+    id, template: 'nle-timeline', duration: 10, createdAt, sourceKey: 'artifacts/s/clip.mp4', tracks: [], clips: [], ...extra,
+  }) as unknown as RenderManifest;
+  const diarization = at('dia', '2026-11-14T10:00:00Z', {
+    segments: [seg('speakers-0', 'SPEAKER_00', 1, 'speakers'), seg('speakers-1', 'UNKNOWN', 5, 'speakers')],
+    captions: [{ start: 5, end: 6, speaker: 'UNKNOWN', text: 'Officer, please come in' }],
+  });
+  const faces = at('faces', '2026-11-14T10:01:00Z', { segments: [seg('people-0-0', 'Werner Vogels', 2, 'people')] });
+  const relabel = at('lanes-speakers', '2026-11-14T10:05:00Z', {
+    laneSet: 'speakers', segments: [seg('speakers-0', 'SPEAKER_00', 1, 'speakers'), seg('speakers-1', 'SPEAKER_01', 5, 'speakers')],
+    captions: [{ start: 5, end: 6, speaker: 'SPEAKER_01', text: 'Officer, please come in' }],
+  });
+  const scenes = at('lanes-scenes', '2026-11-14T10:06:00Z', { laneSet: 'scenes', segments: [seg('scenes-0', 'Scenes', 0, 'scenes')] });
+
+  it('a newer speakers set replaces the lanes and captions; faces and scenes keep their own rows', () => {
+    const out = composeTimeline([videoManifest, diarization, faces, relabel, scenes]);
+    expect(out.segments!.map((s) => s.group).sort()).toEqual(['SPEAKER_00', 'SPEAKER_01', 'Scenes', 'Werner Vogels']);
+    expect(out.captions).toEqual([{ start: 5, end: 6, speaker: 'SPEAKER_01', text: 'Officer, please come in' }]);
+    expect(out.tracks.map((t) => t.id)).toEqual(['video-transcoded']); // the video still comes from its own manifest
+  });
+
+  it('without a newer set the analysis lanes stay as they were', () => {
+    const out = composeTimeline([videoManifest, diarization, faces]);
+    expect(out.segments!.map((s) => s.group)).toEqual(['SPEAKER_00', 'UNKNOWN', 'Werner Vogels']);
+  });
+
+  it('an untagged segment (a view from before lane sets) is never replaced', () => {
+    const legacy = at('old', '2026-11-01T10:00:00Z', { segments: [seg('s-0', 'UNKNOWN', 5)] });
+    const out = composeTimeline([videoManifest, legacy, relabel]);
+    expect(out.segments!.map((s) => s.group).sort()).toEqual(['SPEAKER_00', 'SPEAKER_01', 'UNKNOWN']);
+  });
+
+  it('a newer scenes BAND (markers) replaces the older one; the shots band is untouched', () => {
+    const shots = at('shots', '2026-11-14T10:00:00Z', { markers: [{ id: 'm-0', time: 0, endTime: 5, label: '0' }] });
+    const oldScenes = at('sc1', '2026-11-14T10:01:00Z', { markers: [{ id: 'scenes-0', time: 0, endTime: 10, label: '0', laneSet: 'scenes' }] });
+    const newScenes = at('sc2', '2026-11-14T10:02:00Z', { markers: [
+      { id: 'scenes-0', time: 0, endTime: 4, label: '1', laneSet: 'scenes' }, { id: 'scenes-1', time: 4, endTime: 10, label: '2', laneSet: 'scenes' }] });
+    const out = composeTimeline([videoManifest, shots, oldScenes, newScenes]);
+    expect(out.markers!.map((m) => `${(m as { laneSet?: string }).laneSet ?? 'shots'}:${m.label}`)).toEqual(['shots:0', 'scenes:1', 'scenes:2']);
+  });
+});

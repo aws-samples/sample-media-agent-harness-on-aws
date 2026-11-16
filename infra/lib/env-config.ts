@@ -410,6 +410,15 @@ export interface EnvConfig {
    */
   thinkingPrefixMismatch?: "drop_block" | "error" | "off";
   /**
+   * Also accept the loopback dev UI (`http://127.0.0.1:3000` and `http://localhost:3000`) as the Cognito app client's
+   * callback and logout URLs, so a developer can sign in to `npm run dev` (Vite bound to 127.0.0.1) against this
+   * deployed env with a REAL token: the dev bypass turns projects, uploads and the Personal demo file off, which the
+   * guided tour needs. The client is a PKCE public client, so a loopback redirect is the standard native-app shape
+   * (RFC 8252): it lets nothing reach the env that couldn't already. Test envs only: synth refuses it for prod and
+   * customer installs (agent-infra-stack.ts).
+   */
+  localDevLogin?: boolean;
+  /**
    * AgentCore Web Search on the shared Platform Gateway (agent-harness-help-web-search R6-R8,
    * media-harness-web-search-toggle). `enabled` creates the `web-search` connector target on the Platform
    * Gateway, grants its role `bedrock-agentcore:InvokeWebSearch`, and adds a Cedar permit for exactly the
@@ -547,6 +556,8 @@ const CONFIGS: Record<EnvName, EnvConfig> = {
     env: "staging",
     account: "100000000002",
     region: "us-west-2",
+    // Local dev UI may sign in here with a real Cognito token (testing the guided tour against staging).
+    localDevLogin: true,
     // Artifacts CDN + public /api/artifact locked; consumers resolve artifact identifiers on use.
     // Verified here first; prod and sandbox followed in the asset-lineage Phase 3 change.
     artifactsCdnPrivate: true,

@@ -130,7 +130,7 @@ def test_an_existing_draft_without_a_marker_becomes_a_new_version(env):
     second = _install(env, MD, FILES)
     assert second.created is True and second.action == "updated"
     assert second.published_id == first.published_id and second.version == 2
-    drafts = [r for r in env.lab_rows() if r.get("status") == "draft"]
+    drafts = env.drafts()
     assert len(drafts) == 1
 
 
@@ -163,7 +163,7 @@ def test_a_published_skill_without_a_draft_gets_the_next_version_not_a_second_sk
     assert second.published_id == first.published_id and second.version == 2
     assert _lineages(env) == {first.published_id}                     # still ONE skill of that name
     assert _body(env, f"{second.published_prefix}SKILL.md").decode() == md2
-    drafts = [r for r in env.lab_rows() if r.get("status") == "draft"]
+    drafts = env.drafts()
     assert len(drafts) == 1                                            # the clone, kept as the working copy
     # And the marker now makes an identical rerun a no-op.
     assert _install(env, md2, FILES).created is False

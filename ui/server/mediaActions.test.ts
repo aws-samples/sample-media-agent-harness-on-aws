@@ -221,3 +221,59 @@ describe("a batch (the gallery's Crop all / Clip all marked / Extract frame)", (
     expect(parseMediaActionRequest({ ...clip, batch: { id: "b c", index: 0, total: 2 } })).toMatchObject({ ok: false });
   });
 });
+
+describe("a long action keeps its request alive (the 60 s edge timeout cut it, and the agent cut it again)", () => {
+  it("past 20 s the reply streams: 200, a space every 15 s, then the JSON with ok/ran — which still parses", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (v: { status: number; body: string }) => void;
+      const d = deps({ invokeRuntime: () => new Promise((r) => { finish = r; }) });
+      const writes: string[] = [];
+      const out: { status?: number; text?: string } = {};
+      const r: any = { headersSent: false, writableEnded: false, on: vi.fn(),
+        writeHead(s: number) { out.status = s; this.headersSent = true; },
+        write(c: string) { writes.push(c); },
+        end(b?: string) { out.text = (writes.join("") + (b ?? "")); this.writableEnded = true; } };
+      const done = handleMediaActions(req(clip), r, d);
+      await vi.advanceTimersByTimeAsync(19_000);
+      expect(r.headersSent).toBe(false);          // a quick action answers as before, with its real status
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(out.status).toBe(200);
+      expect(writes).toEqual([" "]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(writes).toEqual([" ", " "]);
+      finish({ status: 200, body: JSON.stringify({ type: "media_action_result", ok: false, error: "moov atom not found" }) });
+      await done;
+      expect(JSON.parse(out.text!)).toMatchObject({ ok: false, ran: true, error: "moov atom not found" });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(writes).toHaveLength(2);             // and it stops ticking once answered
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("a quick action answers exactly as before: its real status, never a stream", async () => {
+    const { r, out } = res();
+    await handleMediaActions(req(clip), r, deps({
+      invokeRuntime: async () => ({ status: 200, body: JSON.stringify({ type: "media_action_result", ok: false, error: "moov atom not found" }) }),
+    }));
+    expect(out).toMatchObject({ status: 502, body: { ok: false, ran: true } });
+  });
+});
+
+describe("an audio file takes a Trim (a clip) directly, and only that", () => {
+  const audioSource = { readAssetSource: async () => ({ row: { kind: "audio", displayName: "chunk_2.wav" }, sourceUri: "s3://b/chunk_2.wav", url: "https://s/chunk_2.wav" }) };
+  it("a clip of an audio asset runs, and the runtime is told it is audio", async () => {
+    const d = deps(audioSource);
+    const { r, out } = res();
+    await handleMediaActions(req(clip), r, d);
+    expect(out.status).toBe(200);
+    expect(d.calls.invoke[0].payload.__media_action.source).toMatchObject({ kind: "audio", name: "chunk_2.wav" });
+  });
+  it("a frame or crop of an audio asset is refused before the runtime", async () => {
+    const d = deps(audioSource);
+    const { r, out } = res();
+    await handleMediaActions(req({ op: "frame", source: { location: LOC }, points: [1000], sessionId: SID }), r, d);
+    expect(out.status).toBe(422);
+    expect(d.calls.invoke).toHaveLength(0);
+  });
+});

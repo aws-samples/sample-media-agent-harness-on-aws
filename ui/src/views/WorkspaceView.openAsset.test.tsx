@@ -187,6 +187,25 @@ describe('WorkspaceView — lab:open-asset routing', () => {
     expect(entry.clientOnly).toBe(true);
   });
 
+  it("a Moments search's results (lab:open-view) open and save as a view named by its query", async () => {
+    render(<WorkspaceView onOpenSettings={vi.fn()} />);
+    await flush();
+    const manifest = { id: 'view-m1', template: 'clip-gallery', title: 'Moments', subjectIds: ['title:Moments'],
+      galleryMoments: { v: 1, project_id: 'p1', turn_id: 't', basis: 'searched', truncated: false, items: [], query: 'rain' } };
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('lab:open-view', { detail: { sessionId: 'other-chat', label: 'Moments', manifest } }));
+    });
+    await flush();
+    expect(mocks.createSessionRender).not.toHaveBeenCalled(); // another chat's search: not opened here
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('lab:open-view', { detail: { sessionId: 'session-1', label: 'Moments', manifest } }));
+    });
+    await flush();
+    expect(mocks.createSessionRender).toHaveBeenCalledWith('session-1', manifest);
+    const entry = rendererHistory![rendererHistory!.length - 1];
+    expect(entry).toMatchObject({ label: 'Moments', note: '“rain”', subjectIds: ['title:Moments'] });
+  });
+
   it('a Moment Expand opens the FULL asset with its span selected: viewState.range on the block and the POST', async () => {
     render(<WorkspaceView onOpenSettings={vi.fn()} />);
     await flush();

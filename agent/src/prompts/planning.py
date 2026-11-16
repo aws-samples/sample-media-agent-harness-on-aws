@@ -154,6 +154,14 @@ you MUST include it VERBATIM in the sub-goal description that uses that file.
 sub-goal description. If a file reference is missing from the sub-goal, the task will fail.
 - WRONG: "Separate audio stems from the source video"
 - RIGHT: "Separate audio stems from s3://bucket/artifacts/1785262402154-NetflixMeridian.mp4"
+
+SKILL SCRIPTS — the downstream agents get NO skills either:
+- When a skill names a script for a step (`scripts/<file>.py`, e.g. video-processing's \
+`scripts/reassemble_shots.py` for putting replaced shots back over the original audio), that step's \
+description MUST tell the agent to run that script by that path, with its inputs. Naming the path is \
+what puts the script in the agent's sandbox. Never re-describe a script's steps in prose instead: the \
+prose version is the hand-written loop the script exists to replace (8e2acba8's reel came out at the \
+wrong frame rate that way).
 {fanout_guidance}"""
 
 

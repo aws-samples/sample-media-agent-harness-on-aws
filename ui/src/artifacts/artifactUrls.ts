@@ -124,17 +124,19 @@ export function isArtifactKey(key: string): boolean {
   );
 }
 
-// A project ASSET's bytes: `projects/<pid>/<kind>:<uuid>/<file>`. Not an artifact key — the proxy's
-// `/api/artifact*` routes never serve it — but a manifest names one whenever its source is a project
-// file (the agent's stable-ref rewrite turns the presigned source URL into its artifacts-CDN path).
-// With the CDN private that path 403s, so it resolves through the asset-id-gated Asset_URL_Route.
-const PROJECT_ASSET_KEY_RE = /^projects\/(p[0-9a-f]{32})\/((?:video|image|audio|document|data):[0-9a-f-]{36})\/[^/\\\r\n]+$/;
+// A project FILE's bytes: any `projects/<pid>/…` key that is not session output. Not an artifact key —
+// the proxy's `/api/artifact*` routes never serve it — but a manifest names one whenever its source is a
+// project file (the agent's stable-ref rewrite turns the presigned source URL into its artifacts-CDN
+// path). With the CDN private that path 403s, so it resolves through the asset-id-gated Asset_URL_Route.
+// The canonical layout `projects/<pid>/<kind>:<uuid>/<file>` names its asset; a file registered in
+// place (the import inbox, `projects/<pid>/import/<name>`) does not, so `requestChunk` looks it up first.
+const PROJECT_FILE_KEY_RE = /^projects\/(p[0-9a-f]{32})\/(?:((?:video|image|audio|document|data):[0-9a-f-]{36})\/[^/\\\r\n]+$|[^\\\r\n]+$)/;
 
-/** The project + asset a project ASSET key names, or null. */
-export function projectAssetOfKey(key: unknown): { projectId: string; assetId: string } | null {
-  if (typeof key !== 'string' || key.includes('..')) return null;
-  const m = PROJECT_ASSET_KEY_RE.exec(key);
-  return m ? { projectId: m[1], assetId: m[2] } : null;
+/** The project (and asset, when the key names it) a project FILE key belongs to, or null. */
+export function projectAssetOfKey(key: unknown): { projectId: string; assetId: string | null } | null {
+  if (typeof key !== 'string' || key.includes('..') || isArtifactKey(key)) return null;
+  const m = PROJECT_FILE_KEY_RE.exec(key);
+  return m ? { projectId: m[1], assetId: m[2] ?? null } : null;
 }
 
 /** An artifact key, or a project ASSET key (resolved through the Asset_URL_Route). */
@@ -366,13 +368,31 @@ async function requestChunk(keys: string[], mode: Mode): Promise<Map<string, Res
     // A project ASSET (a manifest's source video) resolves through the asset-id-gated Asset_URL_Route,
     // per project. Its URLs are view URLs; a download asks the same route (no attachment variant).
     const byProject = new Map<string, Map<string, string>>();
+    const unnamed = new Map<string, string[]>();
     for (const k of assetKeys) {
       const a = projectAssetOfKey(k)!;
       if (!byProject.has(a.projectId)) byProject.set(a.projectId, new Map());
-      byProject.get(a.projectId)!.set(a.assetId, k);
+      if (a.assetId) byProject.get(a.projectId)!.set(a.assetId, k);
+      else unnamed.set(a.projectId, [...(unnamed.get(a.projectId) ?? []), k]);
     }
     await Promise.all([...byProject].map(async ([pid, ids]) => {
       try {
+        const named = unnamed.get(pid);
+        if (named) {
+          // A file registered in place: the asset registered at its key (SRC guard), same route as chat links.
+          const r = await authFetch(`/projects/${encodeURIComponent(pid)}/assets/resolve-locations`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ locations: named }),
+          });
+          const found = r && r.ok ? ((await r.json()) as { locations?: Record<string, unknown> } | null)?.locations ?? {} : {};
+          for (const k of named) {
+            const id = found[k];
+            if (typeof id === 'string' && id) ids.set(id, k);
+            else negative.set(ns(k, mode), Date.now() + NEGATIVE_TTL_MS);
+          }
+          if (!ids.size) return;
+        }
         const res = await authFetch(`/projects/${encodeURIComponent(pid)}/assets/urls`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },

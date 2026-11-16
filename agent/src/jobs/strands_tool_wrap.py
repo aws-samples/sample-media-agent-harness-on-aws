@@ -176,6 +176,26 @@ def _is_auth_context_changed_error(exc: BaseException) -> bool:
     )
 
 
+async def _origin_refs_inputs(tool_use):
+    """Return ``tool_use`` with each ``s3://`` URI of our copy of another system's output swapped for the original
+    (media.artifact_fetch.origin_refs_in): staging 0f31776c, a scene enrichment handed the workspace copy of
+    shots.json failed "must be on the proxy bucket". Never mutates the caller's object; any failure returns the
+    original, so a tool call is never broken by this rewrite."""
+    if not isinstance(tool_use, dict) or "input" not in tool_use:
+        return tool_use
+    try:
+        from media.artifact_fetch import origin_refs_in
+
+        # HeadObject is I/O: off the agent's event loop.
+        new_input, changed = await asyncio.to_thread(origin_refs_in, tool_use["input"])
+    except Exception as exc:  # noqa: BLE001 — strictly additive
+        logger.warning("origin swap skipped: %s", exc)
+        return tool_use
+    if changed:
+        logger.info("tool input: our copies swapped for their originals (%s)", tool_use.get("name", ""))
+    return {**tool_use, "input": new_input} if changed else tool_use
+
+
 async def _presign_own_artifact_inputs(tool_use):
     """Return ``tool_use`` with our artifact URLs in its ``input`` presigned, when
     ``ARTIFACTS_CDN_PRIVATE`` is on. Never mutates the caller's object; any failure
@@ -467,6 +487,7 @@ class _ResilientMCPMixin:
         # inputs over the internet and gets 403 from our CloudFront, so hand it short-lived
         # presigned S3 GETs instead. Only the outbound copy changes — the identifier the agent
         # holds (and stores) stays the stable artifact URL. Off unless ARTIFACTS_CDN_PRIVATE.
+        tool_use = await _origin_refs_inputs(tool_use)
         tool_use = await _presign_own_artifact_inputs(tool_use)
         events = []
         with lease:

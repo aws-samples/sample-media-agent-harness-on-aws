@@ -40,6 +40,7 @@
 // testing keeps working after the stand-in is removed. The GSI is eventually consistent, which is safe
 // because `checkAccess` runs first on the base table and no access decision reads the index (design §2).
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { frameAt, shotFramesOf } from "./momentFrames";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { readCappedBody } from "../agentTestRoute";
 import { PROJECT_NOT_FOUND_BODY, checkAccess as realCheckAccess } from "./access";
@@ -57,6 +58,7 @@ import {
 import { displayBase, deriveDisplayName, withoutCopySuffix } from "./displayNames";
 import { folderPathText, isFolderError, normalizeFolder } from "./folders";
 import { kindFor } from "./ingestionNames";
+import { invokeAssetService, type InvokeAssetService } from "./assetServiceClient";
 import { dynamoTransactStoreFromEnv } from "./store";
 import type { IndexQueryStore, Item, TransactStore } from "./store";
 
@@ -74,6 +76,8 @@ const ASSET_URLS_MAX_BODY_BYTES = 64 * 1024;
 
 /** Sign one GET; the proxy's credentials are used (injected `presignGet`, default builds an `S3Client`). */
 export type PresignGet = (bucket: string, key: string, expiresIn: number) => Promise<string>;
+/** Read one object as text (a video's Document_Record, for its moments' frames). */
+export type ReadObject = (bucket: string, key: string) => Promise<string>;
 
 /** The store the asset read routes need: a consistent `batchGet` and a GSI `queryIndex`. */
 export type AssetReadStore = Pick<TransactStore, "batchGet" | "query"> & IndexQueryStore;
@@ -85,6 +89,8 @@ export interface AssetRouteDeps {
   store?: AssetReadStore | null;
   /** Presigner; defaults to the proxy's own `S3Client` GET presign. */
   presignGet?: PresignGet;
+  /** Object reader; defaults to the proxy's own `S3Client` GET. */
+  readObject?: ReadObject;
   /** The Ingest bucket (renditions live here); defaults to `UPLOAD_BUCKET` or `SKILLS_S3_BUCKET`. */
   ingestBucket?: string;
   /** Extra buckets a `sourceUri` may live in (s3-location assets); defaults to env, else none. */
@@ -93,6 +99,8 @@ export interface AssetRouteDeps {
   m2cBucket?: string;
   /** Clock, in epoch ms (injectable for tests). */
   now?: () => number;
+  /** The Asset_Service (the keyframes route reads a video's index through it); defaults to the configured one. */
+  invokeAssetService?: InvokeAssetService;
 }
 
 /** The ingestion asset-row fields these routes read. Extra fields pass through the client views. */
@@ -159,6 +167,7 @@ function decodeSegment(s: string): string {
 // ------------------------------------------------------------------------------- default dependencies
 
 let cachedPresignGet: PresignGet | undefined;
+let cachedReadObject: ReadObject | undefined;
 let cachedStore: AssetReadStore | null | undefined;
 
 /** The default presigner: the proxy's own `S3Client` (its AWS credentials), built once. */
@@ -169,6 +178,18 @@ function defaultPresignGet(env: NodeJS.ProcessEnv): PresignGet {
       getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn });
   }
   return cachedPresignGet;
+}
+
+/** The default object reader: the proxy's own `S3Client`, built once. */
+function defaultReadObject(env: NodeJS.ProcessEnv): ReadObject {
+  if (!cachedReadObject) {
+    const client = new S3Client({ region: env.AWS_REGION ?? "us-west-2" });
+    cachedReadObject = async (bucket, key) => {
+      const out = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      return (await out.Body?.transformToString("utf-8")) ?? "";
+    };
+  }
+  return cachedReadObject;
 }
 
 /** The default store from env (same table/endpoint as the registry), built once. */
@@ -198,6 +219,7 @@ export function defaultM2cBucket(env: NodeJS.ProcessEnv = process.env): string {
 /** Forget the memoized default presigner/store; for tests that vary env. */
 export function resetAssetRouteDefaults(): void {
   cachedPresignGet = undefined;
+  cachedReadObject = undefined;
   cachedStore = undefined;
 }
 
@@ -205,6 +227,7 @@ interface ResolvedDeps {
   checkAccess: (actorSub: string, projectId: string) => Promise<AccessResult>;
   store: AssetReadStore | null;
   presignGet: PresignGet;
+  readObject: ReadObject;
   ingestBucket: string;
   allowlist: string[];
   m2cBucket: string;
@@ -217,6 +240,7 @@ function resolveDeps(deps: AssetRouteDeps): ResolvedDeps {
     checkAccess: deps.checkAccess ?? realCheckAccess,
     store: deps.store !== undefined ? deps.store : defaultStore(env),
     presignGet: deps.presignGet ?? defaultPresignGet(env),
+    readObject: deps.readObject ?? defaultReadObject(env),
     ingestBucket: deps.ingestBucket ?? defaultIngestBucket(env),
     allowlist: deps.sourceBucketAllowlist ?? defaultAllowlist(env),
     m2cBucket: deps.m2cBucket ?? defaultM2cBucket(env),
@@ -255,7 +279,8 @@ export async function dispatchAssetRoute(
   const isDetail = method === "GET" && parts.length === 3 && parts[2] !== "urls" && !isFolders && !isBookmarks;
   const isList = method === "GET" && parts.length === 2;
   const isDuplicates = method === "POST" && parts.length === 3 && parts[2] === "duplicates";
-  if (!isUrls && !isDetail && !isList && !isDuplicates && !isFolders && !isBookmarks) return false;
+  const isKeyframes = method === "GET" && parts.length === 4 && parts[3] === "keyframes";
+  if (!isUrls && !isDetail && !isList && !isDuplicates && !isFolders && !isBookmarks && !isKeyframes) return false;
 
   const d = resolveDeps(deps);
   try {
@@ -265,14 +290,16 @@ export async function dispatchAssetRoute(
       return true;
     }
     const store = d.store; // narrowed non-null for the handlers
-    if (isDuplicates) {
+    if (isKeyframes) {
+      await handleKeyframes(req, res, actor, pid, decodeSegment(parts[2]), d.checkAccess, deps);
+    } else if (isDuplicates) {
       await handleDuplicates(req, res, { actor, pid, store, checkAccess: d.checkAccess });
     } else if (isUrls) {
       await handleAssetUrls(req, res, {
         actor,
         pid,
         store,
-        presignGet: d.presignGet,
+        presignGet: d.presignGet, readObject: d.readObject,
         ingestBucket: d.ingestBucket,
         allowlist: d.allowlist,
         m2cBucket: d.m2cBucket,
@@ -311,7 +338,7 @@ export async function readAssetSource(
   const [row] = (await d.store.batchGet([assetKey(pid, assetId)])) as (AssetRow | undefined)[];
   if (!row || row.status === "removed" || typeof row.sourceUri !== "string") return null;
   const entry = await signAsset(row, {
-    actor: "", pid, store: d.store, presignGet: d.presignGet, ingestBucket: d.ingestBucket, allowlist: d.allowlist,
+    actor: "", pid, store: d.store, presignGet: d.presignGet, readObject: d.readObject, ingestBucket: d.ingestBucket, allowlist: d.allowlist,
     m2cBucket: d.m2cBucket, now: d.now, checkAccess: d.checkAccess,
   });
   return entry ? { row, sourceUri: row.sourceUri, url: entry.source.url } : null;
@@ -324,6 +351,7 @@ interface UrlsCtx {
   pid: string;
   store: AssetReadStore;
   presignGet: PresignGet;
+  readObject: ReadObject;
   ingestBucket: string;
   allowlist: string[];
   m2cBucket: string;
@@ -362,8 +390,9 @@ async function signAsset(row: AssetRow, ctx: UrlsCtx): Promise<AssetUrlEntry | n
 
 /** `POST /projects/:pid/assets/urls` — access check, consistent read, per-id presign or `project_not_found`. */
 async function handleAssetUrls(req: any, res: any, ctx: UrlsCtx): Promise<void> {
-  const ids = await readAssetIds(req, res);
-  if (ids === null) return; // a 4xx was already sent
+  const body = await readAssetIds(req, res);
+  if (body === null) return; // a 4xx was already sent
+  const { ids, frames: frameAsks } = body;
 
   const access = await ctx.checkAccess(ctx.actor, ctx.pid);
   if (!access.ok) {
@@ -373,7 +402,7 @@ async function handleAssetUrls(req: any, res: any, ctx: UrlsCtx): Promise<void> 
 
   // De-duplicate for the batch read; the response is keyed by id, so duplicates collapse naturally.
   const uniqueIds = [...new Set(ids)];
-  const wellFormed = uniqueIds.filter((id) => isAssetId(id));
+  const wellFormed = [...new Set([...uniqueIds, ...frameAsks.map((f) => f.asset_id)])].filter((id) => isAssetId(id));
   const rows = wellFormed.length ? await ctx.store.batchGet(wellFormed.map((id) => assetKey(ctx.pid, id))) : [];
   const bySk = new Map<string, Item>(rows.map((r) => [String(r.SK), r]));
 
@@ -391,14 +420,38 @@ async function handleAssetUrls(req: any, res: any, ctx: UrlsCtx): Promise<void> 
     urls[id] = entry;
   }
 
-  sendJson(res, 200, { urls, errors });
+  // A moment's own picture (`frames`): the frame of the shot its time falls in, from the video's own index record.
+  const frames: Record<string, PresignedUrl> = {};
+  for (const f of frameAsks) {
+    const row = isAssetId(f.asset_id) ? (bySk.get(ASSET_SK_PREFIX + f.asset_id) as AssetRow | undefined) : undefined;
+    const url = row ? await signMomentFrame(row, f.at_ms, ctx).catch(() => null) : null;
+    if (url) frames[`${f.asset_id}@${f.at_ms}`] = url;
+  }
+
+  sendJson(res, 200, { urls, errors, ...(frameAsks.length ? { frames } : {}) });
+}
+
+/**
+ * Presign the frame of the shot `atMs` falls in, or `null`. Only an indexed video of this project, only its own
+ * record (`projects/<pid>/<assetId>/documents/…`, which only the pipeline writes), and only a frame that record
+ * names: the Ingest bucket for a `projects/` key, else the M2C proxy bucket the frame capture wrote to.
+ */
+async function signMomentFrame(row: AssetRow, atMs: number, ctx: UrlsCtx): Promise<PresignedUrl | null> {
+  if (row.kind !== "video" || row.status === "removed" || !ctx.ingestBucket) return null;
+  const recordKey = (row.doc as { recordKey?: unknown } | undefined)?.recordKey;
+  if (typeof recordKey !== "string" || !recordKey.startsWith(`projects/${ctx.pid}/${String(row.assetId)}/documents/`)) return null;
+  const key = frameAt(await shotFramesOf(recordKey, (k) => ctx.readObject(ctx.ingestBucket, k)), atMs);
+  if (!key) return null;
+  const bucket = key.startsWith("projects/") ? ctx.ingestBucket : ctx.m2cBucket;
+  if (!bucket) return null;
+  return { url: await ctx.presignGet(bucket, key, ASSET_URL_TTL_S), expiresAt: expiresAtSeconds(ctx.now()) };
 }
 
 /**
  * Read and validate the `{asset_ids}` body: a JSON object with an array of up to 100 strings. Sends a
  * 400 and returns `null` on anything malformed; returns the id list otherwise.
  */
-async function readAssetIds(req: any, res: any): Promise<string[] | null> {
+async function readAssetIds(req: any, res: any): Promise<{ ids: string[]; frames: FrameAsk[] } | null> {
   let raw: Buffer;
   try {
     raw = await readCappedBody(req, ASSET_URLS_MAX_BODY_BYTES);
@@ -426,8 +479,19 @@ async function readAssetIds(req: any, res: any): Promise<string[] | null> {
     });
     return null;
   }
-  return assetIds as string[];
+  const rawFrames = (parsed as { frames?: unknown }).frames ?? [];
+  const frames = Array.isArray(rawFrames) ? rawFrames.filter((f): f is FrameAsk =>
+    !!f && typeof f === "object" && typeof (f as FrameAsk).asset_id === "string"
+    && Number.isInteger((f as FrameAsk).at_ms) && (f as FrameAsk).at_ms >= 0) : null;
+  if (frames === null || frames.length > ASSET_URL_MAX_IDS) {
+    sendJson(res, 400, { error: { code: "bad_request", message: `frames must be an array of at most ${ASSET_URL_MAX_IDS} {asset_id, at_ms}` } });
+    return null;
+  }
+  return { ids: assetIds as string[], frames };
 }
+
+/** One moment's picture request: the video and the time (ms) the moment starts at. */
+interface FrameAsk { asset_id: string; at_ms: number }
 
 // --------------------------------------------------------------------------------------- status route
 
@@ -457,6 +521,88 @@ async function handleAssetDetail(res: any, ctx: DetailCtx): Promise<void> {
     return;
   }
   sendJson(res, 200, publicAssetView(row, ctx.assetId));
+}
+
+// ---------------------------------------------------------------------------------- keyframes
+
+/**
+ * `GET /projects/:pid/assets/:assetId/keyframes` → `{keyframes: number[] | null}`: the video's keyframe times (s), read
+ * from its MP4/MOV index by the Asset_Service (`keyframes`: agent projects.keyframes — the ONE reader, which the clip
+ * action's copy decision uses too). The timeline snaps a dragged range onto them, so a cut placed by eye starts on a
+ * keyframe and is a stream copy. `null` = not a video, or an index it does not read: the timeline does not snap.
+ */
+async function handleKeyframes(req: any, res: any, actor: string, pid: string, assetId: string,
+  checkAccess: (actorSub: string, projectId: string) => Promise<AccessResult>, deps: AssetRouteDeps): Promise<void> {
+  const access = await checkAccess(actor, pid);
+  if (!access.ok || !isAssetId(assetId)) { sendNotFound(res); return; }
+  const invoke = deps.invokeAssetService ?? invokeAssetService;
+  const token = typeof req?.userToken === "string" && req.userToken ? req.userToken : undefined;
+  const reply = await invoke({ projectId: pid, command: "keyframes", args: { asset_id: assetId },
+    ...(token ? { userToken: token } : { devBypassActor: actor }) });
+  if (!reply.ok) {
+    if (reply.status === 404) { sendNotFound(res); return; }
+    sendJson(res, 200, { keyframes: null }); // a transient failure: the timeline just does not snap this time
+    return;
+  }
+  const times = (reply.value as { keyframes?: unknown }).keyframes;
+  sendJson(res, 200, { keyframes: Array.isArray(times) ? times.filter((t) => typeof t === "number" && Number.isFinite(t)) : null });
+}
+
+// ---------------------------------------------------------------------------------- whole-project scans
+
+/**
+ * Rows asked for per page of a whole-project scan. DynamoDB also ends a page at 1 MB read, whichever comes first.
+ * The grid's own list keeps {@link ASSET_LIST_PAGE} (one page per "Load more"); a scan reads to the end, so 50-row
+ * pages only added round trips — a 349-file project took 7 serial reads where 1 does.
+ */
+export const PROJECT_SCAN_PAGE = 1000;
+
+/**
+ * Every ASSET row of a Project's newest-first `assetsByRegistered` GSI, read in as few round trips as DynamoDB
+ * allows, at most `maxRows` rows. The ONE scan the folder list, filename search, a folder's files and
+ * duplicates share. Pass `projection` for the fields the caller reads: the GSI projects ALL, and each row carries
+ * its ingestion `steps`, so the full rows were ~30x the folder list's four fields; a caller that answers with whole
+ * rows re-reads just its answer with {@link rowsByAssetId}.
+ *
+ * `visit` returns `false` to stop early. `truncated` is true only when the row bound ended the scan while rows
+ * remained (a visitor's stop is the caller's to report).
+ */
+export async function scanProjectAssets(
+  store: IndexQueryStore,
+  pid: string,
+  opts: { maxRows: number; projection?: readonly string[] },
+  visit: (row: Item) => boolean | void,
+): Promise<{ truncated: boolean }> {
+  let read = 0;
+  let start: Record<string, unknown> | undefined;
+  while (read < opts.maxRows) {
+    const got = await store.queryIndex({
+      indexName: ASSET_LIST_INDEX,
+      partitionAttr: ASSET_LIST_PK_ATTR,
+      partitionValue: projectPk(pid),
+      sortAttr: ASSET_LIST_SK_ATTR,
+      ascending: false,
+      limit: Math.min(PROJECT_SCAN_PAGE, opts.maxRows - read),
+      ...(opts.projection ? { projection: opts.projection } : {}),
+      ...(start ? { exclusiveStartKey: start } : {}),
+    });
+    for (const r of got.items) {
+      read++;
+      if (visit(r) === false) return { truncated: false };
+    }
+    if (!got.lastEvaluatedKey) return { truncated: false };
+    start = got.lastEvaluatedKey;
+  }
+  return { truncated: true };
+}
+
+/** The full rows of `ids` (consistent reads, in `ids` order); an id with no row, or a removed one, is skipped. */
+async function rowsByAssetId(store: AssetReadStore, pid: string, ids: readonly string[]): Promise<AssetRow[]> {
+  const wanted = ids.filter((id) => isAssetId(id));
+  if (!wanted.length) return [];
+  const rows = (await store.batchGet(wanted.map((id) => assetKey(pid, id)))) as AssetRow[];
+  const byId = new Map(rows.map((r) => [String(r.assetId), r]));
+  return wanted.map((id) => byId.get(id)).filter((r): r is AssetRow => !!r && r.status !== "removed");
 }
 
 // ----------------------------------------------------------------------------------------- list route
@@ -507,11 +653,13 @@ async function handleAssetList(req: any, res: any, ctx: ListCtx): Promise<void> 
       offset = decoded.offset;
     }
     const found = await searchAssets(ctx, q, kind, folderKey);
-    const page = found.ranked.slice(offset, offset + SEARCH_PAGE);
-    const nextOffset = offset + page.length;
+    const window = found.ranked.slice(offset, offset + SEARCH_PAGE);
+    const nextOffset = offset + window.length;
     const hasMore = nextOffset < found.ranked.length;
+    // The scan read only SEARCH_FIELDS; the page it answers with is re-read whole (one BatchGet of <= 50 rows).
+    const page = await rowsByAssetId(ctx.store, ctx.pid, window.map((r) => String(r.assetId)));
     sendJson(res, 200, {
-      assets: page.map((r) => publicAssetView(r as AssetRow)),
+      assets: page.map((r) => publicAssetView(r)),
       total: found.ranked.length,
       ...(hasMore ? { cursor: encodeSearchCursor({ q: q ?? "", kind: kind ?? "", ...(folderKey !== undefined ? { folder: folderKey } : {}), offset: nextOffset }) } : {}),
       // `truncated` now means the project is larger than the scan bound, so some matches may be unseen —
@@ -568,30 +716,13 @@ async function handleFolderList(res: any, ctx: ListCtx): Promise<void> {
   }
   const counts = new Map<string, number>();
   let rootCount = 0;
-  let truncated = true;
-  let start: Record<string, unknown> | undefined;
-  for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
-    const got = await ctx.store.queryIndex({
-      indexName: ASSET_LIST_INDEX,
-      partitionAttr: ASSET_LIST_PK_ATTR,
-      partitionValue: projectPk(ctx.pid),
-      sortAttr: ASSET_LIST_SK_ATTR,
-      ascending: false,
-      limit: ASSET_LIST_PAGE,
-      ...(start ? { exclusiveStartKey: start } : {}),
-    });
-    for (const r of got.items) {
-      if (r.status === "removed" || r.visibility === "session") continue;
+  const { truncated } = await scanProjectAssets(ctx.store, ctx.pid,
+    { maxRows: SEARCH_MAX_ROWS, projection: ["status", "visibility", "folder"] }, (r) => {
+      if (r.status === "removed" || r.visibility === "session") return;
       const f = typeof r.folder === "string" ? r.folder : "";
       if (f) counts.set(f, (counts.get(f) ?? 0) + 1);
       else rootCount++;
-    }
-    if (!got.lastEvaluatedKey) {
-      truncated = false;
-      break;
-    }
-    start = got.lastEvaluatedKey;
-  }
+    });
   // Bookmarks file like files, so a folder holding only saved moments is a folder too.
   for (const b of await ctx.store.query(projectPk(ctx.pid), BOOKMARK_SK_PREFIX)) {
     const f = typeof b.folder === "string" ? b.folder : "";
@@ -649,8 +780,10 @@ async function handleBookmarkList(req: any, res: any, ctx: ListCtx): Promise<voi
 // ------------------------------------------------------------------------------------- shared helpers
 
 const ASSET_KINDS = new Set(["video", "image", "audio", "document", "data"]);
-/** Filename search reads at most this many GSI pages (50 rows each): 5,000 assets, newest first. */
-const SEARCH_MAX_PAGES = 100;
+/** Filename search, a folder's files and the folder list read at most this many assets, newest first. */
+const SEARCH_MAX_ROWS = 5000;
+/** What search ranks and filters by: the rest of a row is read only for the page it returns. */
+const SEARCH_FIELDS = ["assetId", "status", "kind", "folder", "displayName", "registeredAt"] as const;
 /** One page of ranked search results. */
 const SEARCH_PAGE = 50;
 
@@ -669,7 +802,9 @@ function fold(s: string): string {
  */
 function nameScore(row: Item, needle: string): number {
   const name = fold(typeof row.displayName === "string" ? row.displayName : "");
-  if (name === needle) return 0;
+  // A name typed without its extension is still the exact name: `Netflix_Open_Content_Meridian` must find the
+  // original `.mp4` ahead of its newer `…Meridian_clip_*` derivatives, which are only prefix matches.
+  if (name === needle || name.replace(/\.[^./]{1,8}$/, "") === needle) return 0;
   if (name.startsWith(needle)) return 1;
   if (name.includes(needle)) return 2;
   return 3; // the query matched the folder path, not the name
@@ -715,31 +850,14 @@ async function searchAssets(ctx: ListCtx, q: string | null, kind: string | null,
   folder?: string): Promise<{ ranked: Item[]; scanTruncated: boolean }> {
   const needle = q === null ? null : fold(q.trim());
   const matches: Item[] = [];
-  let scanTruncated = true;
-  let start: Record<string, unknown> | undefined;
-  for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
-    const got = await ctx.store.queryIndex({
-      indexName: ASSET_LIST_INDEX,
-      partitionAttr: ASSET_LIST_PK_ATTR,
-      partitionValue: projectPk(ctx.pid),
-      sortAttr: ASSET_LIST_SK_ATTR,
-      ascending: false,
-      limit: ASSET_LIST_PAGE,
-      ...(start ? { exclusiveStartKey: start } : {}),
-    });
-    for (const r of got.items) {
-      if (r.status === "removed") continue;
-      if (kind !== null && r.kind !== kind) continue;
-      if (folder !== undefined && (typeof r.folder === "string" ? r.folder : "") !== folder) continue;
-      if (needle !== null && !fold(folderPathText(r)).includes(needle)) continue;
+  const { truncated: scanTruncated } = await scanProjectAssets(ctx.store, ctx.pid,
+    { maxRows: SEARCH_MAX_ROWS, projection: SEARCH_FIELDS }, (r) => {
+      if (r.status === "removed") return;
+      if (kind !== null && r.kind !== kind) return;
+      if (folder !== undefined && (typeof r.folder === "string" ? r.folder : "") !== folder) return;
+      if (needle !== null && !fold(folderPathText(r)).includes(needle)) return;
       matches.push(r);
-    }
-    if (!got.lastEvaluatedKey) {
-      scanTruncated = false;
-      break;
-    }
-    start = got.lastEvaluatedKey;
-  }
+    });
   // The scan yields newest-first; a stable sort by relevance keeps that recency order within each tier.
   const ranked = needle === null ? matches : matches.slice().sort((a, b) => nameScore(a, needle) - nameScore(b, needle));
   return { ranked, scanTruncated };
@@ -812,8 +930,8 @@ export const DUPLICATES_MAX_FILES = 1000;
 /** 1,000 descriptors of a long name are well under this; a larger body is refused with 413. */
 const DUPLICATES_MAX_BODY_BYTES = 1024 * 1024;
 const DUPLICATES_MAX_NAME_LENGTH = 1024;
-/** The pass reads at most this many GSI pages (50 rows each, 20,000 assets), newest first. */
-const DUPLICATES_MAX_PAGES = 400;
+/** The pass reads at most this many assets, newest first. */
+const DUPLICATES_MAX_ROWS = 20000;
 
 interface DuplicateFile {
   index: number;
@@ -821,7 +939,7 @@ interface DuplicateFile {
 }
 
 interface DuplicateHit {
-  row: Item;
+  assetId: string;
   exact: boolean;
 }
 
@@ -885,44 +1003,33 @@ async function handleDuplicates(req: any, res: any, ctx: ListCtx): Promise<void>
     return false;
   };
   let truncated = false;
-  let start: Record<string, unknown> | undefined;
   if (wanted.size > 0) {
-    for (let page = 0; ; page++) {
-      if (page >= DUPLICATES_MAX_PAGES) {
-        truncated = true;
-        break;
-      }
-      const got = await ctx.store.queryIndex({
-        indexName: ASSET_LIST_INDEX,
-        partitionAttr: ASSET_LIST_PK_ATTR,
-        partitionValue: projectPk(ctx.pid),
-        sortAttr: ASSET_LIST_SK_ATTR,
-        ascending: false,
-        limit: ASSET_LIST_PAGE,
-        ...(start ? { exclusiveStartKey: start } : {}),
-      });
-      for (const r of got.items) {
-        if (r.status === "removed" || typeof r.displayName !== "string") continue;
+    ({ truncated } = await scanProjectAssets(ctx.store, ctx.pid,
+      { maxRows: DUPLICATES_MAX_ROWS, projection: ["assetId", "status", "displayName", "sourceSize"] }, (r) => {
+        if (r.status === "removed" || typeof r.displayName !== "string") return;
         const size = typeof r.sourceSize === "number" ? r.sourceSize : Number(r.sourceSize);
-        if (!Number.isFinite(size)) continue;
+        if (!Number.isFinite(size)) return;
         const name = fold(r.displayName);
         const unsuffixed = fold(withoutCopySuffix(r.displayName));
+        let changed = false;
         for (const key of name === unsuffixed ? [name] : [name, unsuffixed]) {
           for (const f of wanted.get(key) ?? []) {
             if (f.size !== size) continue;
             const exact = key === name;
             const prior = best.get(f.index);
             // Newest first: keep the first hit, unless a later one is the unsuffixed original.
-            if (!prior || (exact && !prior.exact)) best.set(f.index, { row: r, exact });
+            if (!prior || (exact && !prior.exact)) { best.set(f.index, { assetId: String(r.assetId), exact }); changed = true; }
           }
         }
-      }
-      if (!got.lastEvaluatedKey || !pending()) break; // done, or every file already has its original
-      start = got.lastEvaluatedKey;
-    }
+        if (changed && !pending()) return false; // every file already has its original
+      }));
   }
-  const duplicates = [...best.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([index, hit]) => ({ index, asset: publicAssetView(hit.row as AssetRow) }));
+  const hits = [...best.entries()].sort(([a], [b]) => a - b);
+  const rows = new Map((await rowsByAssetId(ctx.store, ctx.pid, [...new Set(hits.map(([, h]) => h.assetId))]))
+    .map((r) => [String(r.assetId), r]));
+  const duplicates = hits.flatMap(([index, hit]) => {
+    const row = rows.get(hit.assetId);
+    return row ? [{ index, asset: publicAssetView(row) }] : [];
+  });
   sendJson(res, 200, { duplicates, ...(truncated ? { truncated: true } : {}) });
 }

@@ -137,6 +137,7 @@ def _make_tool_collection_record(
         category=_CATEGORY,
         name=name,
         status=status,
+        version=None if status == "draft" else 1,
         scope="private",
         s3_prefix=f"tool-collections/{asset_id}/",
         created_at=1700000000000,

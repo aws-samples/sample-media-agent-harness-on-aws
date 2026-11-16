@@ -7,6 +7,7 @@ template: composite-timeline
 tool: speech-diarization
 deliverable: final_transcript.json, speaker_manifest.json, global_speakers.json
 segments: sentences[] start=start end=end group=speaker_id name=text
+lane_set: speakers
 summary: num_global_speakers, num_sentences, language
 ---
 
